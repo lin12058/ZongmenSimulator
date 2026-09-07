@@ -18,6 +18,18 @@
   var timeSec = 0, lastT = 0;
   var minimapDirty = true, minimapTimer = 0;
 
+  /* ---------- 渲染节流状态 ----------
+   * 静态图层缓存 + 相机位移阈值:
+   *   浪线/道路带/区域名/灵脉花/聚落图标 全部是世界锚定的确定性内容,
+   *   只在相机确实移动/缩放/视口变化超过阈值时整层重绘;
+   *   相机静止时直接 blit 复用静态图层, 不再每帧全量重算 Canvas2D。 */
+  var staticLayer = null;                       // 离屏静态图层
+  var staticCam = { x: NaN, y: NaN, zoom: NaN, w: 0, h: 0 };  // 缓存生成时的相机/视口
+  var staticDirty = true;                       // 首帧强制重建
+  var lastPan = { x: 0, y: 0, zoom: 0 };   // 上次流式扫描位置
+  var streamIdle = true;                        // 相机静止 && 区块已就绪
+  var warmGap = 3, warmFrame = 0;               // 道路预热: 每 3 帧推进一次
+
   /* ---------- 工具 ---------- */
   function $(id) { return document.getElementById(id); }
   function clamp(v, a, b) { return NL.clamp(v, a, b); }
@@ -59,9 +71,21 @@
     ctx.closePath();
   }
 
-  /* ---------- 区块流式加载 ---------- */
+  /* ---------- 区块流式加载 ----------
+   * 相机位移 < PAN_EPS 且视野内区块均已就绪时直接跳过,
+   * 避免静止画面每帧全量重扫"需要的区块集合 + 排序 + 逐帧生成"。 */
   function updateStreaming() {
     var b = viewBounds();
+    var _panChanged =
+      Math.abs(cam.x - lastPan.x) > 18 * (1 / (cam.zoom * 0.75 + 0.25)) ||
+      Math.abs(cam.y - lastPan.y) > 18 * (1 / (cam.zoom * 0.75 + 0.25)) ||
+      Math.abs(cam.zoom - lastPan.zoom) > 0.02;
+    if (!_panChanged && genQueue.length === 0) {
+      streamIdle = true;
+      return;                                   // 静止且无积压 → 零开销
+    }
+    streamIdle = false;
+
     var pad = MG.HEX_W * 2;
     var corners = [
       MG.pxToTile(b.x0 - pad, b.y0 - pad), MG.pxToTile(b.x1 + pad, b.y0 - pad),
@@ -110,6 +134,7 @@
       var built = MG.buildChunk(job.ca, job.cb);
       renderer.uploadChunk(job.key, built.data);
       chunks.set(job.key, { bbox: built.bbox });
+      lastPan.x = cam.x; lastPan.y = cam.y; lastPan.zoom = cam.zoom;
       minimapDirty = true;
     }
   }
@@ -230,10 +255,29 @@
     bctx.fillText('方圆百里', 6, mh - 6);
   }
 
-  /* ---------- 标注层 ---------- */
-  function drawOverlay() {
-    var ctx = els.overlayCtx;
+  /* ---------- 标注层 ----------
+   * 静态世界锚定内容全部确定性绘制到离屏 staticLayer:
+   *   相机位移/缩放/视口变化超阈值时才整层重绘 (renderStaticInto),
+   *   其余帧仅把 staticLayer blit 叠到 overlay 并重画动态悬停/选中高亮。
+   */
+
+  function staticNeedsRedraw(vw, vh) {
+    if (staticDirty) return true;
+    var scale = 18 / (cam.zoom * 0.75 + 0.25);
+    if (Math.abs(cam.x - staticCam.x) > scale) return true;
+    if (Math.abs(cam.y - staticCam.y) > scale) return true;
+    if (Math.abs(cam.zoom - staticCam.zoom) > 0.02) return true;
+    if (vw !== staticCam.w || vh !== staticCam.h) return true;
+    return false;
+  }
+
+  function renderStaticInto() {
     var cw = els.overlay.width, ch = els.overlay.height;
+    if (!staticLayer) staticLayer = document.createElement('canvas');
+    if (staticLayer.width !== cw || staticLayer.height !== ch) {
+      staticLayer.width = cw; staticLayer.height = ch;
+    }
+    var ctx = staticLayer.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
     var b = viewBounds();
@@ -485,6 +529,48 @@
         }
       }
     }
+
+    staticCam.x = cam.x; staticCam.y = cam.y;
+    staticCam.zoom = cam.zoom; staticCam.w = els.app.clientWidth; staticCam.h = els.app.clientHeight;
+    staticDirty = false;
+  }
+
+  /* 每帧: blit 静态层 + 重画动态悬停/选中高亮 */
+  function drawOverlay() {
+    var vw = els.app.clientWidth, vh = els.app.clientHeight;
+    if (staticNeedsRedraw(vw, vh)) renderStaticInto();
+    var ctx = els.overlayCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
+    /* staticLayer 在 staticCam 相机位置下绘制世界锚定内容; 当前相机每帧平滑移动,
+     * 故用平移补偿 (cam - staticCam)*zoom*dpr 让图标跟随相机逐帧滑移,
+     * 避免"重绘时的含量不变, 只有跳变"造成的一卡一卡。
+     * 仅当 zoom 与缓存时的缩放高度接近时施加平移 (缩放差异>阈值会触发重绘, 此处几乎不会发生)。 */
+    if (staticLayer && Math.abs(cam.zoom - staticCam.zoom) < 0.02) {
+      /* 世界锚定内容跟随相机反向平移:
+       * staticLayer 按 staticCam 绘制, 当前相机 cam 右移→内容整体左移(负偏移),
+       * so 使用 staticCam - cam。 */
+      var sdx = dpr * cam.zoom * (staticCam.x - cam.x);
+      var sdy = dpr * cam.zoom * (staticCam.y - cam.y);
+      ctx.drawImage(staticLayer, sdx, sdy);
+    } else if (staticLayer) {
+      ctx.drawImage(staticLayer, 0, 0);
+    }
+    function hexHi(t, alpha, pulse) {
+      if (!t) return;
+      var w = MG.tileToWorld(t.q, t.r);
+      ctx.save();
+      ctx.setTransform(dpr * cam.zoom, 0, 0, dpr * cam.zoom,
+        dpr * (els.app.clientWidth / 2 - cam.x * cam.zoom),
+        dpr * (els.app.clientHeight / 2 - cam.y * cam.zoom));
+      ctx.strokeStyle = 'rgba(48,36,24,' + alpha + ')';
+      ctx.lineWidth = pulse ? 5 : 3.4;
+      hexPath(ctx, w.x, w.y, MG.HEX_R * 0.94);
+      ctx.stroke();
+      ctx.restore();
+    }
+    hexHi(hoverTile, 0.7, false);
+    hexHi(selectedTile, 0.95, true);
   }
 
   /* ---------- 相机 ---------- */
@@ -728,8 +814,9 @@
       if (Math.abs(cam.ty - cam.y) < 0.1) cam.y = cam.ty;
       clampCam();
 
-      /* 道路渐进预热: 绘制帧只读缓存, 新 A* 在主循环逐帧补 (每帧至多 1 条, 无 LOD) */
-      {
+      /* 道路渐进预热: 绘制帧只读缓存, 新 A* 每 3 帧至多补 1 条;
+         相机在平移/缩放期间照常预热, 静止时也不空转 (因区块就绪后 updateStreaming 直接返回) */
+      if (warmFrame++ % warmGap === 0) {
         var wct = MG.pxToTile(cam.x, cam.y);
         MG.warmRoadsStep(wct.q, wct.r);
       }

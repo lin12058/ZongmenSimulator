@@ -616,7 +616,10 @@
     return out;
   }
 
-  /* 主循环渐进预热: 每帧至多补 1 条 A*, 围绕相机所在区域格 5x5 旋转扫描 */
+  /* 主循环渐进预热: 道路 A* 是"建一次存坐标"的纯缓存计算,
+   * 已算成的路存 roadCache、不可达的进 roadFail, 均不再重算。
+   * 本函数每被调用最多推进一次 5×5 旋转扫描、至多产出 1 条新路;
+   * 节流由 main.js 的 warmGap 帧间隔控制, 相机静止时根本不调用。 */
   var warmIdx = 0;
   function warmRoadsStep(camQ, camR) {
     var M = REGION_M;
@@ -625,9 +628,8 @@
     for (var n = 0; n < 25; n++) {
       var idx = warmIdx++;
       roadsNear(ci + (idx % 5) - 2, cj + (((idx / 5) | 0) % 5) - 2, 1);
-      if (roadCache.size + roadFail.size > before) return true;
+      if (roadCache.size + roadFail.size > before) return;  // 本帧产出 1 条即停
     }
-    return false;
   }
 
   /* ---------- 灵气场 / 群落 / 灵脉 (设定: 先定灵脉, 后造山河) ---------- */
