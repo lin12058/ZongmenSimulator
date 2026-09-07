@@ -291,7 +291,7 @@
    * 精灵索引 = 图集行*8+列:
    *   第 5 行: 40/41 山地·两变体, 42/43 雪峰·两变体, 44..47 林地·四变体
    *   第 6 行: 48 沙丘岩石, 49 草丛, 50..54 金木水火土灵脉峰
-   *   第 7 行: 56/57 山地·横岭变体, 58/59 雪峰·横岭变体 */
+   *   第 7 行: 56/57 山地·横岭变体, 58/59 雪峰·横岭变体, 60/61 草地小山包, 62/63 草地孤树 */
   function propSpriteFor(f) {
     var b = f.disp != null ? f.disp : f.biome;
     if (b >= 8) return b + 42;                          // 灵脉峰 (50+元素)
@@ -305,8 +305,40 @@
       return h2 < 0.75 ? 44 + (h2 * 5.34 | 0) : -1;
     }
     if (b === 5) return (f.hash * 721.3) % 1 < 0.30 ? 48 : -1;
-    if (b === 3) return (f.hash * 541.7) % 1 < 0.10 ? 49 : -1;
+    if (b === 3) {
+      /* 草地: 小山包(噪声调制密度 → 起伏成片) + 单棵孤树 + 草丛 */
+      var mb = NL.fbm(nDetail, f.q * 0.09 + 88.8, f.r * 0.09 - 12.3, 2) * 0.5 + 0.5;
+      if (f.hash < 0.10 + mb * 0.12) return 60 + v2;   // 小山包 10~22%
+      if (f.hash < 0.14 + mb * 0.13) return 62 + v2;   // 单棵孤树 ~4~6%
+      if (f.hash > 0.90) return 49;                    // 草丛 10%
+      return -1;
+    }
     return -1;
+  }
+
+  /* ---------- 山体聚类偏移 (noise 势场聚类) ----------
+   * 低频噪声作"山势势能场", 山峰精灵沿势场梯度向上坡方向位移,
+   * 坡越陡拉力越大、势能低处不动 → 成片山地向局部高点聚拢成组团峰林,
+   * 消除逐格横排的"横隔"感。纯函数 (只依赖坐标与种子), 跨区块/跨会话一致。 */
+  var CLUSTER_S = 0.0016;    // 势场频率 (世界像素): 波长 ≈ 600px ≈ 38 格, 决定山群尺度
+  var CLUSTER_MAX = 36;      // 最大位移 (px) ≈ 2.2 格 (聚拢幅度加大 50% 后)
+  var CLUSTER_JIT = 5;       // 附加随机抖动 (px), 防止聚成一点
+  function clusterOffset(f) {
+    var P = function (wx, wy) {
+      return NL.fbm(nWarp, wx * CLUSTER_S + 51.3, wy * CLUSTER_S - 27.8, 2) * 0.5 + 0.5;
+    };
+    var p0 = P(f.x, f.y);
+    var eps = 26;                                   // 梯度采样步长 (px)
+    var gx = P(f.x + eps, f.y) - P(f.x - eps, f.y);
+    var gy = P(f.x, f.y + eps) - P(f.x, f.y - eps);
+    var g = Math.sqrt(gx * gx + gy * gy);
+    var pull = g / (g + 0.10);                      // 坡度 → 拉力 (饱和曲线)
+    var wsum = NL.smoothstep(0.36, 0.58, p0);       // 只在势能高的山区聚拢
+    var mag = CLUSTER_MAX * pull * wsum;
+    var ux = g > 1e-5 ? gx / g : 0, uy = g > 1e-5 ? gy / g : 0;
+    var ox = ux * mag + (hash01(f.q, f.r, 71) - 0.5) * 2 * CLUSTER_JIT;
+    var oy = uy * mag + (hash01(f.q, f.r, 72) - 0.5) * 2 * CLUSTER_JIT;
+    return { ox: ox, oy: oy };
   }
 
   /* 构建一个区块的实例数据 (供渲染器上传)
@@ -317,6 +349,7 @@
     var R = CHUNK_SCAN;
     var centers = [], tiles = [], elevs = [], hashes = [], neigh = [];
     var propCenters = [], propSprites = [], propHashes = [], propElevs = [];
+    var propList = [];
     var bbox = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
     for (var dq = -R; dq <= R; dq++) {
       for (var dr = -R; dr <= R; dr++) {
@@ -335,19 +368,28 @@
           packed += Math.min(nf.biome, 7) * Math.pow(8, k);
         }
         neigh.push(packed);
-        /* 立体精灵: r 外层循环递增 → 天然 y 升序, 画序即遮挡序 */
+        /* 立体精灵: 山/雪峰加噪声聚类偏移; 灵脉峰/林/沙/草保持原位 */
         var sp = propSpriteFor(f);
         if (sp >= 0) {
-          propCenters.push(f.x, f.y);
-          propSprites.push(sp);
-          propHashes.push(f.hash);
-          propElevs.push(f.e);       // 海拔驱动精灵高度 (着色器按 noise 缩放)
+          var off = (f.vein == null && (f.biome === 6 || f.biome === 7))
+                  ? clusterOffset(f) : { ox: 0, oy: 0 };
+          propList.push({ x: f.x + off.ox, y: f.y + off.oy,
+                          sp: sp, hash: f.hash, e: f.e });
         }
         if (f.x < bbox.x0) bbox.x0 = f.x;
         if (f.x > bbox.x1) bbox.x1 = f.x;
         if (f.y < bbox.y0) bbox.y0 = f.y;
         if (f.y > bbox.y1) bbox.y1 = f.y;
       }
+    }
+    /* 聚类偏移打乱了行序, 按 最终 y 升序重排 → 遮挡序仍正确 */
+    propList.sort(function (a, b) { return a.y - b.y; });
+    for (var pi = 0; pi < propList.length; pi++) {
+      var pr = propList[pi];
+      propCenters.push(pr.x, pr.y);
+      propSprites.push(pr.sp);
+      propHashes.push(pr.hash);
+      propElevs.push(pr.e);
     }
     return {
       key: chunkKey(ca, cb), ca: ca, cb: cb,

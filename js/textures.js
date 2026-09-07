@@ -622,12 +622,55 @@
     drawPropPeak(ctx, 104, 106, 34, 40, [116, 118, 120], [164, 166, 166], { snow: true });
   }
 
+  /* ---- 草地精灵: 小山包 60/61 · 单棵孤树 62/63 (第 7 行 4..7 列) ---- */
+  function propMound(v) {
+    return function (ctx) {
+      /* 低缓草丘: 亮草色渐变 + 淡墨脊线 (不闭合, 避免密排黑线穿帮) */
+      propShadow(ctx, 64, 105, 42, 12, 0.13);
+      var g = ctx.createLinearGradient(0, 58, 0, 106);
+      g.addColorStop(0, 'rgba(206,217,174,0.98)');
+      g.addColorStop(0.55, 'rgba(180,194,142,0.78)');
+      g.addColorStop(1, 'rgba(158,174,122,0.18)');
+      ctx.beginPath();
+      if (v === 0) {                          // 单个缓坡圆丘
+        ctx.moveTo(16, 106);
+        ctx.quadraticCurveTo(42, 58, 80, 76);
+        ctx.quadraticCurveTo(102, 88, 114, 106);
+      } else {                                // 双丘错落
+        ctx.moveTo(12, 106);
+        ctx.quadraticCurveTo(34, 80, 56, 88);
+        ctx.quadraticCurveTo(76, 58, 94, 84);
+        ctx.quadraticCurveTo(108, 96, 118, 106);
+      }
+      ctx.closePath();
+      ctx.fillStyle = g;
+      ctx.fill();
+      strokeInk(ctx, v === 0
+        ? [[16, 106], [42, 60], [78, 77]]
+        : [[12, 106], [35, 81], [56, 88], [76, 60], [93, 84]],
+        { width: 1.3, color: [104, 120, 82], alpha: 0.52, fly: false, layers: 2 });
+      /* 坡面零星小草笔 */
+      for (var i = 0; i < 5; i++) {
+        var gx = 34 + trng() * 60, gy = 80 + trng() * 22;
+        strokeInk(ctx, [[gx, gy], [gx + (trng() - 0.5) * 3, gy - 4 - trng() * 4]],
+          { width: 1.0, color: [104, 120, 82], alpha: 0.40, fly: false, layers: 1 });
+      }
+    };
+  }
+  function propSoloTree(v) {
+    return function (ctx) {
+      /* 单棵小树: 孤植, 复用 propTree (阔叶/松 两变体) */
+      propShadow(ctx, 64, 107, 18, 6, 0.20);
+      propTree(ctx, 64, 106, v === 0 ? 42 : 50, v === 0 ? 'leaf' : 'pine');
+    };
+  }
+
   /* ---------- 生成图集 ----------
    * 布局: 第 0~3 行 = 8 群系 × 4 变体 (列=群系, 行=变体)
    *       第 4 行   = 5 灵脉格底 (8金 9木 10水 11火 12土)
    *       第 5 行   = 立体精灵: 0/1 山 2/3 雪 4..7 林
    *       第 6 行   = 立体精灵: 0 沙 1 草丛 2..6 灵脉峰
-   *       第 7 行   = 立体精灵: 0/1 山B 2/3 雪B (56..59) */
+   *       第 7 行   = 立体精灵: 0/1 山B 2/3 雪B 4/5 草丘 6/7 孤树 (56..63) */
   var VEIN_ROW = 4;
   var ATLAS_ROWS = 8;
   function buildAtlas() {
@@ -679,8 +722,9 @@
       propRow2[c6](ctx);
       ctx.restore();
     }
-    /* 第 7 行: 山B/雪B 精灵 (56/57 山, 58/59 雪) */
-    var propRow3 = [propMountainB, propMountainB, propSnowB, propSnowB];
+    /* 第 7 行: 山B/雪B 精灵 (56/57 山, 58/59 雪) + 草地精灵 (60/61 小山包, 62/63 孤树) */
+    var propRow3 = [propMountainB, propMountainB, propSnowB, propSnowB,
+                    propMound(0), propMound(1), propSoloTree(0), propSoloTree(1)];
     for (var c7 = 0; c7 < propRow3.length; c7++) {
       ctx.save();
       ctx.translate(c7 * PX, 7 * PX);

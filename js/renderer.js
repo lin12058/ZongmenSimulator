@@ -125,9 +125,13 @@
     '  else if ((iSprite > 41.5 && iSprite < 43.5) || (iSprite > 57.5 && iSprite < 59.5))',
     '    hs = mix(0.95, 1.55, clamp((iElev-0.84)/0.12, 0.0, 1.0));',
     '  else if (iSprite < 49.5) hs = 0.62 + 0.34*fract(iHash*9.13);',
+    '  else if (iSprite > 59.5 && iSprite < 61.5) hs = 0.52 + 0.24*fract(iHash*9.13);',  // 草地小山包: 更矮缓
+    '  else if (iSprite > 61.5 && iSprite < 63.5) hs = 0.72 + 0.30*fract(iHash*9.13);',  // 草地孤树: 中等
     '  else                     hs = 1.05;',
-    '  float W = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*hs);',
-    '  float H = uR*(3.3+1.2*fract(iHash*5.17)) * hs;',  // 高 ≈ 3.3~4.5 倍半径 × 海拔系数
+    '  float ss = 1.0;',
+    '  if (iSprite > 59.5 && iSprite < 61.5) ss = 0.30;',   // 小山包整体缩至 30%
+    '  float W = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*hs) * ss;',
+    '  float H = uR*(3.3+1.2*fract(iHash*5.17)) * hs * ss;',  // 高 ≈ 3.3~4.5 倍半径 × 海拔系数
     '  float jx = (fract(iHash*3.77)-0.5)*uR*1.8;',
     '  float flip = step(0.5, fract(iHash*7.31));',
     '  float u0 = aPos.x*0.5+0.5;',
