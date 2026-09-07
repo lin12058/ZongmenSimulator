@@ -326,7 +326,7 @@
         if (own.q !== cc.q || own.r !== cc.r) continue;
         var f = fields(q, r);
         centers.push(f.x, f.y);
-        tiles.push((f.disp != null ? f.disp : f.biome) * 4 + f.variant);
+        tiles.push(f.biome * 4 + f.variant);   // 格底回归自然地形, 灵脉不再覆写深色底 (精灵仍按 disp 出灵脉峰)
         elevs.push(f.e);
         hashes.push(f.hash);
         var packed = 0;

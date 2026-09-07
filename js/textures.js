@@ -778,43 +778,20 @@
     return cv;
   }
 
-  /* ---------- 七星灵脉花 (Canvas2D overlay 绘制, 设定 §七) ----------
-   * cx,cy: 中心格世界坐标; armXY: 6 从属格世界坐标 (小灵脉传 null);
-   * rgb: 灵根色; opts.level: 0大 1中 2小 */
+  /* ---------- 灵脉灵气晕圈 (Canvas2D overlay 绘制) ----------
+   * cx,cy: 中心格世界坐标; rgb: 灵根色; opts.level: 0大 1中 2小
+   * (七星花连线/圆点/格底均已移除, 仅留淡晕圈) */
   function drawVeinFlower(ctx, cx, cy, armXY, rgb, opts) {
     opts = opts || {};
     var level = opts.level == null ? 2 : opts.level;
     var aCore = level === 0 ? 0.95 : level === 1 ? 0.8 : 0.62;
     var rgbS = rgb[0] + ',' + rgb[1] + ',' + rgb[2];
-    /* 灵气晕圈 */
     var hr = level === 0 ? 48 : level === 1 ? 36 : 22;
     var g = ctx.createRadialGradient(cx, cy, hr * 0.1, cx, cy, hr);
     g.addColorStop(0, 'rgba(' + rgbS + ',' + (0.17 * aCore).toFixed(3) + ')');
     g.addColorStop(1, 'rgba(' + rgbS + ',0)');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(cx, cy, hr, 0, Math.PI * 2); ctx.fill();
-    /* 六触手 → 从属格 */
-    if (armXY) {
-      ctx.strokeStyle = 'rgba(' + rgbS + ',' + (0.5 * aCore).toFixed(3) + ')';
-      ctx.lineWidth = level === 0 ? 2.2 : 1.8;
-      ctx.lineCap = 'round';
-      for (var k = 0; k < armXY.length; k++) {
-        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(armXY[k].x, armXY[k].y); ctx.stroke();
-        ctx.beginPath(); ctx.arc(armXY[k].x, armXY[k].y, 3.2, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + rgbS + ',' + (0.42 * aCore).toFixed(3) + ')'; ctx.fill();
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = 'rgba(58,48,38,0.45)'; ctx.stroke();
-        ctx.strokeStyle = 'rgba(' + rgbS + ',' + (0.5 * aCore).toFixed(3) + ')';
-        ctx.lineWidth = level === 0 ? 2.2 : 1.8;
-      }
-    }
-    /* 中心花蕊 */
-    var cr = level === 0 ? 7 : level === 1 ? 5.5 : 4;
-    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(244,238,222,0.92)'; ctx.fill();
-    ctx.lineWidth = 1.6; ctx.strokeStyle = 'rgba(' + rgbS + ',' + aCore.toFixed(3) + ')'; ctx.stroke();
-    ctx.beginPath(); ctx.arc(cx, cy, level === 0 ? 2.8 : 2, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(' + rgbS + ',' + aCore.toFixed(3) + ')'; ctx.fill();
   }
 
   global.InkTextures = {

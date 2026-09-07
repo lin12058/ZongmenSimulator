@@ -415,7 +415,7 @@
           ctx.beginPath(); ctx.arc(cm.x, cm.y, auraR, 0, Math.PI * 2); ctx.fill();
         }
       }
-      /* 七星灵脉花 (大/中灵脉 1 中心 + 6 从属; 小灵脉单点) */
+      /* 灵脉灵气晕圈 (连线/圆点已删, 仅淡晕圈 + 名牌) */
       for (ci = ci0; ci <= ci1; ci++) {
         for (cj = cj0; cj <= cj1; cj++) {
           cm = MG.communityOf(ci, cj);
@@ -424,31 +424,15 @@
             var v = cm.veins[vv];
             var vw = MG.tileToWorld(v.q, v.r);
             var rgb = v.variant ? MG.VARIANT_RGB[v.variant] : MG.ELEMENT_RGB[v.element];
-            var arms = null;
-            if (v.level < 2) {
-              arms = [];
-              for (var kk = 0; kk < 6; kk++) {
-                arms.push(MG.tileToWorld(v.q + MG.NEIGH_SLOTS[kk][0], v.r + MG.NEIGH_SLOTS[kk][1]));
-              }
-            }
-            IT.drawVeinFlower(ctx, vw.x, vw.y, arms, rgb, { level: v.level });
-            if (v.level < 2) veinLabels.push({ x: vw.x, y: vw.y, name: v.name, rgb: rgb, level: v.level });
+            IT.drawVeinFlower(ctx, vw.x, vw.y, null, rgb, { level: v.level });
+            veinLabels.push({ x: vw.x, y: vw.y, name: v.name + '灵脉（' + ['大', '中', '小'][v.level] + '）', rgb: rgb, level: v.level });
           }
         }
       }
     }
 
-    /* 悬停 / 选中格高亮 (世界坐标等比) */
-    function hexHi(t, alpha, pulse) {
-      if (!t) return;
-      var w = MG.tileToWorld(t.q, t.r);
-      ctx.strokeStyle = 'rgba(48,36,24,' + alpha + ')';
-      ctx.lineWidth = pulse ? 5 : 3.4;
-      hexPath(ctx, w.x, w.y, MG.HEX_R * 0.94);
-      ctx.stroke();
-    }
-    hexHi(hoverTile, 0.7, false);
-    hexHi(selectedTile, 0.95, true);
+    /* 悬停/选中格高亮不在静态层绘制 (会烙进缓存, 鼠标移开后残留),
+       由 drawOverlay() 每帧动态绘制 */
 
     /* ---- 屏幕坐标系 ---- */
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
