@@ -52,20 +52,23 @@
     'uniform float uApo;',
     'uniform float uSeaLevel;',
     'uniform float uTime;',
-    'uniform vec3 uAvg[8];',
+    'uniform vec3 uAvg[13];',
     'uniform float uFade;',        // 区块渐入 0..1
     'uniform vec3 uPaperTint;',
     'out vec4 fragColor;',
     'void main(){',
     '  float d = max(abs(vLocal.x), 0.5*abs(vLocal.x)+0.8660254*abs(vLocal.y)) - uApo;',
     '  if (d > 0.6) discard;',
-    '  float biome = floor(vTile/4.0 + 0.5);',
+    '  float biome = floor(vTile/4.0 + 0.001);',   // vTile = biome*4+variant, 精确解码
     '  float variant = vTile - biome*4.0;',
     '  float pad = 0.045;',
     '  vec2 uvL = vUv*(1.0-2.0*pad)+pad;',
-    '  vec2 uv = (vec2(biome, variant)+uvL)/vec2(8.0, 4.0);',
+    /* 图集寻址: 群系 0..7 = (列=群系, 行=变体); 灵脉格 8..12 = 第 4 行 */
+    '  vec2 cell = biome < 7.5 ? vec2(biome, variant) : vec2(biome - 8.0, 4.0);',
+    '  vec2 uv = (cell + uvL)/vec2(8.0, 5.0);',
     '  vec3 base = texture(uAtlas, uv).rgb;',
-    // —— 邻居晕染 ——
+    // —— 邻居晕染 (灵脉格跳过, 保持灵气贴图完整) ——
+    '  if (biome < 7.5) {',
     '  for (int k = 0; k < 6; k++) {',
     '    float nb = mod(floor(vNeigh / pow(8.0, float(k))), 8.0);',
     '    if (abs(nb - biome) > 0.5) {',
@@ -75,6 +78,7 @@
     '      t = t*t*(3.0-2.0*t);',
     '      base = mix(base, uAvg[int(nb)], t * 0.55);',
     '    }',
+    '  }',
     '  }',
     '  if (biome < 1.5) {',
     '    float depth = clamp((uSeaLevel - vElev)*5.0, 0.0, 1.0);',

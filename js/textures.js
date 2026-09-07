@@ -281,16 +281,92 @@
       { width: 1.3, color: INK, alpha: 0.38, fly: false, layers: 2 });
   };
 
-  /* ---------- 生成图集 ---------- */
+  /* ---------- 灵脉格 (8金 9木 10水 11火 12土): 暗岩底 + 灵根色晕 + 符纹 ---------- */
+  var VEIN_BASE = ['#6e685c', '#5c6650', '#54626b', '#6b5248', '#6e6353'];
+  var VEIN_TINT = [
+    [206, 186, 128], [116, 152, 92], [96, 128, 152], [190, 82, 56], [162, 130, 88]
+  ];
+
+  /* 灵根符纹 (TILE 坐标系内作画) */
+  var drawSigil = [
+    /* 金: 剑意竖锋 + 菱晶 */
+    function (ctx, c) {
+      strokeInk(ctx, [[64, 28], [64, 98]], { width: 2.2, color: c, alpha: 0.65, layers: 2 });
+      strokeInk(ctx, [[50, 60], [64, 44], [78, 60], [64, 76], [50, 60]],
+        { width: 1.6, color: [236, 228, 206], alpha: 0.6, layers: 2 });
+      strokeInk(ctx, [[88, 34], [96, 26]], { width: 1.2, color: c, alpha: 0.4, layers: 1 });
+      strokeInk(ctx, [[40, 90], [32, 98]], { width: 1.2, color: c, alpha: 0.4, layers: 1 });
+    },
+    /* 木: 主脉 + 羽状侧脉 */
+    function (ctx, c) {
+      strokeInk(ctx, [[64, 26], [64, 100]], { width: 2.0, color: c, alpha: 0.6, layers: 2 });
+      for (var s = 0; s < 4; s++) {
+        var y = 36 + s * 17;
+        strokeInk(ctx, [[64, y], [44, y - 9]], { width: 1.2, color: c, alpha: 0.45, layers: 1 });
+        strokeInk(ctx, [[64, y], [84, y - 9]], { width: 1.2, color: c, alpha: 0.45, layers: 1 });
+      }
+    },
+    /* 水: 三叠浪弧 */
+    function (ctx, c) {
+      for (var s = 0; s < 3; s++) {
+        var y = 42 + s * 22;
+        strokeInk(ctx, [[34, y], [52, y - 8], [72, y + 4], [94, y - 4]],
+          { width: 1.8, color: c, alpha: 0.55, layers: 2 });
+      }
+    },
+    /* 火: 焰形主笔 + 飞火 */
+    function (ctx, c) {
+      strokeInk(ctx, [[64, 96], [50, 70], [64, 52], [56, 38], [70, 24], [76, 46], [68, 62], [80, 78]],
+        { width: 2.0, color: c, alpha: 0.6, layers: 2 });
+      strokeInk(ctx, [[40, 92], [34, 80], [42, 68]], { width: 1.2, color: c, alpha: 0.4, layers: 1 });
+      strokeInk(ctx, [[88, 94], [94, 82], [86, 70]], { width: 1.2, color: c, alpha: 0.4, layers: 1 });
+    },
+    /* 土: 三层台地横皴 */
+    function (ctx, c) {
+      for (var s = 0; s < 3; s++) {
+        var y = 40 + s * 20;
+        strokeInk(ctx, [[30, y], [64, y - 6], [98, y]], { width: 1.8, color: c, alpha: 0.5, layers: 2 });
+      }
+      strokeInk(ctx, [[44, 52], [84, 52]], { width: 1.0, color: c, alpha: 0.3, fly: false, layers: 1 });
+    }
+  ];
+
+  for (var vb = 0; vb < 5; vb++) {
+    (function (b) {
+      painters[b] = function (ctx) {
+        ctx.fillStyle = VEIN_BASE[b - 8];
+        ctx.fillRect(0, 0, TILE, TILE);
+        var tint = VEIN_TINT[b - 8];
+        wash(ctx, 64, 64, 80, tint, 0.14);
+        wash(ctx, 20 + trng() * 88, 20 + trng() * 88, 46, tint, 0.20);
+        wash(ctx, trng() * 128, trng() * 128, 36, [250, 244, 226], 0.10);
+        /* 灵光星点 */
+        for (var i = 0; i < 12; i++) {
+          ctx.fillStyle = rgba(tint, 0.25 + trng() * 0.35);
+          ctx.beginPath();
+          ctx.arc(trng() * 128, trng() * 128, 0.7 + trng() * 1.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        /* 山峰皴 (灵脉必是山) */
+        drawPeak(ctx, 64 + (trng() - 0.5) * 10, 102 + (trng() - 0.5) * 6, 68, 56,
+          [50, 46, 38], [108, 102, 90], 0.55);
+        /* 灵根符纹 */
+        drawSigil[b - 8](ctx, tint);
+      };
+    })(vb + 8);
+  }
+
+  /* ---------- 生成图集 ----------
+   * 布局: 第 0~3 行 = 8 群系 × 4 变体 (列=群系, 行=变体)
+   *       第 4 行   = 5 灵脉格 (8金 9木 10水 11火 12土) */
+  var VEIN_ROW = 4;
   function buildAtlas() {
-    var cv = makeCanvas(PX * COLS, PX * ROWS);
+    var cv = makeCanvas(PX * COLS, PX * (ROWS + 1));
     var ctx = cv.getContext('2d');
     for (var b = 0; b < 8; b++) {
       for (var v = 0; v < 4; v++) {
-        var px = b * PX; /* 8 列正好放下 8 个群系, 每行 4 个变体 */
-        var py = v * PX;
         ctx.save();
-        ctx.translate(px, py);
+        ctx.translate(b * PX, v * PX);
         ctx.scale(PX / TILE, PX / TILE);  // 画师仍按 128 坐标系作画
         ctx.beginPath();
         ctx.rect(0, 0, TILE, TILE);
@@ -301,15 +377,27 @@
         ctx.restore();
       }
     }
+    for (var k = 0; k < 5; k++) {
+      ctx.save();
+      ctx.translate(k * PX, VEIN_ROW * PX);
+      ctx.scale(PX / TILE, PX / TILE);
+      ctx.beginPath();
+      ctx.rect(0, 0, TILE, TILE);
+      ctx.clip();
+      trng = NL.mulberry32(77777 + (k + 8) * 131);
+      painters[k + 8](ctx, 0);
+      ctx.restore();
+    }
     return cv;
   }
 
-  /* 各群系的平均色 (供着色器做格边晕染过渡) */
+  /* 各群系/灵脉格的平均色 (供着色器做格边晕染过渡) */
   function computeAvgColors(atlas) {
     var ctx = atlas.getContext('2d');
-    var out = new Float32Array(8 * 3);
+    var out = new Float32Array(13 * 3);
     for (var b = 0; b < 8; b++) {
-      var d = ctx.getImageData(b * PX, 0, PX, PX).data;
+      /* 群系: 4 变体格合并求均值 */
+      var d = ctx.getImageData(b * PX, 0, PX, PX * 4).data;
       var r = 0, g = 0, bl = 0, n = 0;
       for (var i = 0; i < d.length; i += 4) {
         r += d[i]; g += d[i + 1]; bl += d[i + 2]; n++;
@@ -317,6 +405,16 @@
       out[b * 3] = r / n / 255;
       out[b * 3 + 1] = g / n / 255;
       out[b * 3 + 2] = bl / n / 255;
+    }
+    for (var k = 0; k < 5; k++) {
+      var d2 = ctx.getImageData(k * PX, VEIN_ROW * PX, PX, PX).data;
+      var r2 = 0, g2 = 0, b2 = 0, n2 = 0;
+      for (var j = 0; j < d2.length; j += 4) {
+        r2 += d2[j]; g2 += d2[j + 1]; b2 += d2[j + 2]; n2++;
+      }
+      out[(k + 8) * 3] = r2 / n2 / 255;
+      out[(k + 8) * 3 + 1] = g2 / n2 / 255;
+      out[(k + 8) * 3 + 2] = b2 / n2 / 255;
     }
     return out;
   }
@@ -379,14 +477,55 @@
     return cv;
   }
 
+  /* ---------- 七星灵脉花 (Canvas2D overlay 绘制, 设定 §七) ----------
+   * cx,cy: 中心格世界坐标; armXY: 6 从属格世界坐标 (小灵脉传 null);
+   * rgb: 灵根色; opts.level: 0大 1中 2小 */
+  function drawVeinFlower(ctx, cx, cy, armXY, rgb, opts) {
+    opts = opts || {};
+    var level = opts.level == null ? 2 : opts.level;
+    var aCore = level === 0 ? 0.95 : level === 1 ? 0.8 : 0.62;
+    var rgbS = rgb[0] + ',' + rgb[1] + ',' + rgb[2];
+    /* 灵气晕圈 */
+    var hr = level === 0 ? 48 : level === 1 ? 36 : 22;
+    var g = ctx.createRadialGradient(cx, cy, hr * 0.1, cx, cy, hr);
+    g.addColorStop(0, 'rgba(' + rgbS + ',' + (0.17 * aCore).toFixed(3) + ')');
+    g.addColorStop(1, 'rgba(' + rgbS + ',0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, hr, 0, Math.PI * 2); ctx.fill();
+    /* 六触手 → 从属格 */
+    if (armXY) {
+      ctx.strokeStyle = 'rgba(' + rgbS + ',' + (0.5 * aCore).toFixed(3) + ')';
+      ctx.lineWidth = level === 0 ? 2.2 : 1.8;
+      ctx.lineCap = 'round';
+      for (var k = 0; k < armXY.length; k++) {
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(armXY[k].x, armXY[k].y); ctx.stroke();
+        ctx.beginPath(); ctx.arc(armXY[k].x, armXY[k].y, 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + rgbS + ',' + (0.42 * aCore).toFixed(3) + ')'; ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(58,48,38,0.45)'; ctx.stroke();
+        ctx.strokeStyle = 'rgba(' + rgbS + ',' + (0.5 * aCore).toFixed(3) + ')';
+        ctx.lineWidth = level === 0 ? 2.2 : 1.8;
+      }
+    }
+    /* 中心花蕊 */
+    var cr = level === 0 ? 7 : level === 1 ? 5.5 : 4;
+    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(244,238,222,0.92)'; ctx.fill();
+    ctx.lineWidth = 1.6; ctx.strokeStyle = 'rgba(' + rgbS + ',' + aCore.toFixed(3) + ')'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, level === 0 ? 2.8 : 2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(' + rgbS + ',' + aCore.toFixed(3) + ')'; ctx.fill();
+  }
+
   global.InkTextures = {
     TILE: TILE,
     PX: PX,
     COLS: COLS,
     ROWS: ROWS,
+    VEIN_ROW: VEIN_ROW,
     buildAtlas: buildAtlas,
     computeAvgColors: computeAvgColors,
     buildPaper: buildPaper,
-    buildNoise: buildNoise
+    buildNoise: buildNoise,
+    drawVeinFlower: drawVeinFlower
   };
 })(window);

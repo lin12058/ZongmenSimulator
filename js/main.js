@@ -202,7 +202,7 @@
         var wy = cam.y + (py - H / 2) * SCALE;
         var t = MG.pxToTile(wx, wy);
         var f = MG.fields(t.q, t.r);
-        var col = MG.BIOME_META[f.biome].color;
+        var col = MG.BIOME_META[f.disp != null ? f.disp : f.biome].color;
         var i = (py * W + px) * 4;
         img.data[i] = parseInt(col.slice(1, 3), 16);
         img.data[i + 1] = parseInt(col.slice(3, 5), 16);
@@ -260,10 +260,10 @@
     ctx.lineWidth = 2.4;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.setLineDash([10, 8]);
+    ctx.setLineDash(z > 2.4 ? [] : [10, 8]);   // 高倍改实线: 虚线描边开销随 zoom² 增长
     for (var i = i0; i <= i1; i++) {
       for (var j = j0; j <= j1; j++) {
-        var roads = MG.roadsNear(i, j);
+        var roads = MG.roadsNear(i, j, 0);     // 绘制帧纯读缓存, A* 由主循环预热
         for (var rr = 0; rr < roads.length; rr++) {
           var road = roads[rr];
           if (drawn[road.key]) continue;
@@ -279,36 +279,52 @@
       }
     }
     ctx.setLineDash([]);
+    } /* z >= 0.8 道路层结束 */
 
-    /* 灵脉: 朱砂点线 (世界坐标等比) */
-    if (showVeins && z >= 0.7) {
-      ctx.strokeStyle = 'rgba(158,58,42,0.6)';
-      ctx.lineWidth = 3.0;
-      ctx.setLineDash([4, 12]);
-      var V = MG.VEIN_V;
-      var vi0 = Math.floor(qmin / V) - 1, vi1 = Math.floor(qmax / V) + 1;
-      var vj0 = Math.floor(rmin / V) - 1, vj1 = Math.floor(rmax / V) + 1;
-      for (i = vi0; i <= vi1; i++) {
-        for (j = vj0; j <= vj1; j++) {
-          var vein = MG.veinAt(i, j);
-          if (!vein) continue;
-          var vp = vein.pts;
-          ctx.beginPath();
-          for (var vj = 0; vj < vp.length; vj++) {
-            if (vj === 0) ctx.moveTo(vp[vj].x, vp[vj].y); else ctx.lineTo(vp[vj].x, vp[vj].y);
-          }
-          ctx.stroke();
-          ctx.save();
-          ctx.translate(vp[0].x, vp[0].y - 10);
-          ctx.rotate(Math.PI / 4);
-          ctx.fillStyle = 'rgba(158,58,42,0.75)';
-          ctx.fillRect(-4, -4, 8, 8);
-          ctx.restore();
+    /* 灵脉: 七星花 + 群落灵气晕圈 (世界坐标等比, 设定 §三/§七/§九) */
+    var veinLabels = [];
+    if (showVeins && z >= 0.55) {
+      var CL = MG.CFG.COMM_CL;
+      var ci0 = Math.floor(qmin / CL) - 1, ci1 = Math.floor(qmax / CL) + 1;
+      var cj0 = Math.floor(rmin / CL) - 1, cj1 = Math.floor(rmax / CL) + 1;
+      /* 群落灵气晕圈: 中心富、边缘贫 */
+      for (var ci = ci0; ci <= ci1; ci++) {
+        for (var cj = cj0; cj <= cj1; cj++) {
+          var cm = MG.communityOf(ci, cj);
+          if (!cm) continue;
+          var cRGB = MG.ELEMENT_RGB[cm.element];
+          var auraR = MG.CFG.COMM_R * MG.HEX_W * 1.15;
+          var cS = cRGB[0] + ',' + cRGB[1] + ',' + cRGB[2];
+          var ag = ctx.createRadialGradient(cm.x, cm.y, auraR * 0.06, cm.x, cm.y, auraR);
+          ag.addColorStop(0, 'rgba(' + cS + ',0.085)');
+          ag.addColorStop(0.6, 'rgba(' + cS + ',0.035)');
+          ag.addColorStop(1, 'rgba(' + cS + ',0)');
+          ctx.fillStyle = ag;
+          ctx.beginPath(); ctx.arc(cm.x, cm.y, auraR, 0, Math.PI * 2); ctx.fill();
         }
       }
-      ctx.setLineDash([]);
+      /* 七星灵脉花 (大/中灵脉 1 中心 + 6 从属; 小灵脉单点) */
+      for (ci = ci0; ci <= ci1; ci++) {
+        for (cj = cj0; cj <= cj1; cj++) {
+          cm = MG.communityOf(ci, cj);
+          if (!cm) continue;
+          for (var vv = 0; vv < cm.veins.length; vv++) {
+            var v = cm.veins[vv];
+            var vw = MG.tileToWorld(v.q, v.r);
+            var rgb = v.variant ? MG.VARIANT_RGB[v.variant] : MG.ELEMENT_RGB[v.element];
+            var arms = null;
+            if (v.level < 2) {
+              arms = [];
+              for (var kk = 0; kk < 6; kk++) {
+                arms.push(MG.tileToWorld(v.q + MG.NEIGH_SLOTS[kk][0], v.r + MG.NEIGH_SLOTS[kk][1]));
+              }
+            }
+            IT.drawVeinFlower(ctx, vw.x, vw.y, arms, rgb, { level: v.level });
+            if (v.level < 2) veinLabels.push({ x: vw.x, y: vw.y, name: v.name, rgb: rgb, level: v.level });
+          }
+        }
+      }
     }
-    } /* z >= 0.8 道路层结束 */
 
     /* 悬停 / 选中格高亮 (世界坐标等比) */
     function hexHi(t, alpha, pulse) {
@@ -352,6 +368,25 @@
           ctx.fillStyle = rg.biome <= 1 ? 'rgba(52,66,72,0.28)' : 'rgba(58,48,38,0.26)';
           ctx.fillText(rg.name, ps.x, ps.y);
         }
+      }
+    }
+
+    /* 灵脉名牌 (屏幕坐标, 近景显示) */
+    if (showLabels && z >= 1.0) {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      for (var vl = 0; vl < veinLabels.length; vl++) {
+        var vb = veinLabels[vl];
+        var ps3 = w2s(vb.x, vb.y);
+        if (ps3.x < -80 || ps3.y < -40 || ps3.x > vw + 80 || ps3.y > vh + 40) continue;
+        var vfs = 12 * Math.max(z, 0.8);
+        ctx.font = vfs + 'px "KaiTi","STKaiti",serif';
+        var ty = ps3.y + (vb.level === 0 ? 14 : 12) * Math.max(z, 0.8);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(240,232,214,0.85)';
+        ctx.strokeText(vb.name, ps3.x, ty);
+        ctx.fillStyle = 'rgba(' + vb.rgb[0] + ',' + vb.rgb[1] + ',' + vb.rgb[2] + ',0.95)';
+        ctx.fillText(vb.name, ps3.x, ty);
       }
     }
 
@@ -417,9 +452,7 @@
   function updateStats() {
     var st = 0, rd = MG.roadCache.size;
     MG.settleCache.forEach(function (arr) { st += arr.length; });
-    var vn = 0;
-    MG.veinCache.forEach(function (v) { if (v) vn++; });
-    els.stats.textContent = '已探明 宗门村镇 ' + st + ' · 墨路 ' + rd + ' · 灵脉 ' + vn;
+    els.stats.textContent = '已探明 宗门村镇 ' + st + ' · 墨路 ' + rd + ' · 灵脉 ' + MG.countVeins();
   }
 
   /* ---------- 信息面板 ---------- */
@@ -452,6 +485,15 @@
     }
     rows.push('<div class="row"><span class="k">地界</span><span class="v">' + ri.name + '</span></div>');
     rows.push('<div class="row"><span class="k">地貌</span><span class="v">' + MG.BIOME_META[f.biome].name + '</span></div>');
+    if (f.vein) {
+      rows.push('<div class="sep"></div>');
+      rows.push('<div class="row"><span class="k">灵脉</span><span class="v big">' + f.vein.name + '</span></div>');
+      rows.push('<div class="row"><span class="k">灵根</span><span class="v">' +
+        (f.vein.variant ? f.vein.variant + '灵根 · 派自' + MG.ELEMENTS[f.vein.element]
+                        : MG.ELEMENTS[f.vein.element] + '灵根') + '</span></div>');
+      rows.push('<div class="row"><span class="k">位份</span><span class="v">' +
+        (f.vein.level === 0 ? '大灵脉·七星' : f.vein.level === 1 ? '中灵脉·七星' : '独立小灵脉') + '</span></div>');
+    }
     rows.push('<div class="row"><span class="k">海拔</span><span class="v">' + (f.e * 300 | 0) + ' 丈</span></div>');
     rows.push('<div class="row"><span class="k">润泽</span><span class="v">' + (f.m * 100 | 0) + '%</span></div>');
     var wd = f.biome <= 1 ? 0 : waterDist(tile.q, tile.r);
@@ -462,7 +504,7 @@
     outer:
     for (var di = -1; di <= 1; di++) {
       for (var dj = -1; dj <= 1; dj++) {
-        var roads = MG.roadsNear(ci + di, cj + dj);
+        var roads = MG.roadsNear(ci + di, cj + dj, 1);   // 点击事件帧: 预算 1 条
         for (var r2 = 0; r2 < roads.length; r2++) {
           if (roads[r2].tiles.has(tile.q + ',' + tile.r)) { onRoad = true; break outer; }
         }
@@ -617,6 +659,12 @@
       if (Math.abs(cam.tx - cam.x) < 0.1) cam.x = cam.tx;
       if (Math.abs(cam.ty - cam.y) < 0.1) cam.y = cam.ty;
       clampCam();
+
+      /* 道路渐进预热: 绘制帧只读缓存, 新 A* 在主循环逐帧补 (每帧至多 1 条) */
+      if (cam.zoom >= 0.8) {
+        var wct = MG.pxToTile(cam.x, cam.y);
+        MG.warmRoadsStep(wct.q, wct.r);
+      }
 
       updateStreaming();
       renderer.render(cam, timeSec);

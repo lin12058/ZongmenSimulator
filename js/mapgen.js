@@ -21,7 +21,13 @@
     { key: 'forest',   name: '林地', color: '#89a27f' },
     { key: 'desert',   name: '沙漠', color: '#dbc692' },
     { key: 'mountain', name: '山地', color: '#a19a8c' },
-    { key: 'snow',     name: '雪峰', color: '#e8e5dc' }
+    { key: 'snow',     name: '雪峰', color: '#e8e5dc' },
+    /* 灵脉格 (disp biome 8..12): 金木水火土 */
+    { key: 'vein-metal', name: '金灵脉', color: '#c4b078' },
+    { key: 'vein-wood',  name: '木灵脉', color: '#688c56' },
+    { key: 'vein-water', name: '水灵脉', color: '#56748e' },
+    { key: 'vein-fire',  name: '火灵脉', color: '#b04832' },
+    { key: 'vein-earth', name: '土灵脉', color: '#98784f' }
   ];
 
   var SEA_LEVEL = 0.40;
@@ -31,7 +37,44 @@
   var CHUNK_S = 2 * CHUNK_R + 1;          // 区块中心间距 (21)
   var CHUNK_SCAN = 15;                    // 区块构建扫描半径: 胞腔最远可达 14 格, 15 保证全覆盖无缝
   var REGION_M = 18;                      // 区域晶格间距
-  var VEIN_V = 44;                        // 灵脉晶格间距
+
+  /* ---------- 灵脉驱动世界 (灵脉地图设定: 先定灵脉, 后造山河) ----------
+   * §十二: 参数全部集中在 CFG, 可用 MapGen.configure(patch) 运行时覆写 */
+  var CFG = {
+    COMM_CL: 150,                           // 群落晶格间距 ≈ 大灵脉最小中心距 D_L_L
+    COMM_R: 40,                             // 群落半径 (格)
+    D_L_M: 18, D_L_S: 12, D_M: 14, D_SMALL: 8,   // 群内最小间距 (格)
+    SPIRIT_R_TILES: 1000,                   // 灵气边界半径 (格): 距原点 1000 处灵气归零
+    SPIRIT_CURVE: 0.8,                      // 灵气衰减曲线指数 (缓)
+    COMM_P_MIN: 0.16, COMM_P_SPIRIT: 0.62,  // 群落存在概率 = MIN + SPIRIT × 灵气
+    SUB_ATTEMPTS: 14,                       // 次级灵脉落位尝试次数
+    LIFT_CORE: [0.80, 0.75, 0.70],          // 大/中/小灵脉中心抬升目标
+    LIFT_ARM_OFF: 0.05,                     // 七星从属格抬升减量
+    /* 灵根生态呼应 (§六): d≤3 湿度/温度偏置 (水/木湿润、火干热、金微干) */
+    ECO_WATER: 0.25, ECO_WOOD: 0.18,
+    ECO_FIRE_DRY: 0.22, ECO_FIRE_HEAT: 0.15,
+    ECO_METAL: 0.08
+  };
+  /* 五行: 0金 1木 2水 3火 4土 */
+  var ELEMENTS = ['金', '木', '水', '火', '土'];
+  var SHENG = [2, 3, 1, 4, 0];            // 相生: 金生水 木生火 水生木 火生土 土生金
+  var KE = [1, 4, 3, 0, 2];               // 相克: 金克木 木克土 水克火 火克金 土克水
+  var DUAL = { '0|3': '雷', '1|2': '风', '0|2': '冰', '3|4': '暗' };  // 相冲/相合 → 异灵根
+  var ELEMENT_RGB = [
+    [196, 176, 120], [104, 140, 86], [86, 116, 142], [176, 72, 50], [152, 120, 82]
+  ];
+  var VARIANT_RGB = { 雷: [142, 96, 190], 风: [118, 150, 148], 冰: [136, 168, 192], 暗: [96, 84, 110] };
+  var LANDFORM = [
+    ['白石岩峰', '金属矿脉', '剑意石林', '铁锈山脊', '金刚台地'],
+    ['原始灵木林', '藤蔓深谷', '灵植圃', '千年树冠', '青苔湿地'],
+    ['深潭', '瀑布', '海眼', '雾瘴湖泽', '环山湖'],
+    ['熔岩裂隙', '活火山', '地热温泉', '焦土熔流', '火晶洞窟'],
+    ['厚土丘陵', '矿藏山腹', '石脉土台', '黄土地', '岩层断崖']
+  ];
+  var VARIANT_LANDFORM = {
+    雷: ['雷击崖', '紫电渊'], 风: ['风口峡谷', '风蚀柱'],
+    冰: ['冰川', '寒潭'], 暗: ['缚灵渊', '幽冥涧']
+  };
 
   /* 邻居槽位 (轴坐标) 按 60°*k 排列: 0:东 1:东南 2:西南 3:西 4:西北 5:东北 */
   var NEIGH_SLOTS = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
@@ -68,7 +111,14 @@
   var regionCache = new Map();   // "i,j" -> 区域信息
   var settleCache = new Map();   // "i,j" -> 聚落数组
   var roadCache = new Map();     // "a|b" -> 道路
-  var veinCache = new Map();     // "i,j" -> 灵脉 | null
+  var commCache = new Map();     // "i,j" -> 群落 | null
+  var veinNearCache = new Map(); // "q,r" -> 灵脉近邻 {d, v} | null
+  var roadFail = new Set();      // "a|b" -> 不可达聚落对 (A* 失败, 终身跳过)
+  /* 缓存满额时淘汰旧一半 (Map 保持插入序), 避免 clear() 造成全量重算尖峰 */
+  function evictHalf(m) {
+    var n = m.size >> 1, it = m.keys();
+    while (n-- > 0) m.delete(it.next().value);
+  }
 
   /* ---------- 基础工具 ---------- */
   function hash01(a, b, salt) {
@@ -111,7 +161,8 @@
     nDetail = new NL.SimplexNoise(rng);
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); veinCache.clear();
+    roadCache.clear(); commCache.clear(); veinNearCache.clear();
+    roadFail.clear();
   }
 
   /* ---------- 海拔场 (纯函数, 带缓存) ---------- */
@@ -130,7 +181,25 @@
     var spawn = Math.max(0, 1 - d0 / 70);
     var e = NL.clamp(0.06 + e01 * (0.50 + 0.60 * mask) + Math.pow(rg, 2.6) * 0.55 * mask
            + spawn * spawn * 0.30, 0, 1);
-    if (elevCache.size > 150000) elevCache.clear();
+    /* 灵脉地形迁就 (设定 §八): 灵脉必是山, 水中灵脉必是岛; 周边过渡山丘 */
+    var vn = veinNear(q, r);
+    if (vn) {
+      var coreE = CFG.LIFT_CORE[vn.v.level] || 0.70;
+      if (vn.d === 0) {                       // 中心格: 高山档
+        if (e < SEA_LEVEL) e = SEA_LEVEL + 0.16;   // 水中灵脉 → 岛
+        if (e < coreE) e = coreE;
+      } else if (vn.d === 1) {                // 七星从属格: 山态
+        if (e < SEA_LEVEL) e = SEA_LEVEL + 0.12;
+        if (e < coreE - CFG.LIFT_ARM_OFF) e = coreE - CFG.LIFT_ARM_OFF;
+      } else if (vn.d === 2) {                // 过渡: 部分抬升
+        var t2 = coreE - 0.10;
+        if (t2 > e) e = e + (t2 - e) * 0.55;
+      } else {
+        var t3 = coreE - 0.16;
+        if (t3 > e) e = e + (t3 - e) * 0.35;
+      }
+    }
+    if (elevCache.size > 150000) evictHalf(elevCache);
     elevCache.set(key, e);
     return e;
   }
@@ -153,6 +222,21 @@
     var h = hash01(q, r, 3);
     var variant = (h * 997.3) % 4 | 0;
 
+    /* 灵根生态呼应 (设定 §六): 灵脉 d≤3 范围湿度/温度按灵根偏置
+       水/木湿润生林, 火干热化焦土, 金微干石化 */
+    var vn = veinNear(q, r);
+    if (vn && vn.d <= 3) {
+      var ew = vn.d === 1 ? 1 : vn.d === 2 ? 0.55 : 0.25;
+      var ee = vn.v.element;
+      if (ee === 2) m = NL.clamp(m + CFG.ECO_WATER * ew, 0, 1);
+      else if (ee === 1) m = NL.clamp(m + CFG.ECO_WOOD * ew, 0, 1);
+      else if (ee === 3) {
+        m = NL.clamp(m - CFG.ECO_FIRE_DRY * ew, 0, 1);
+        t = NL.clamp(t + CFG.ECO_FIRE_HEAT * ew, 0, 1);
+      }
+      else if (ee === 0) m = NL.clamp(m - CFG.ECO_METAL * ew, 0, 1);
+    }
+
     var biome;
     if (e < SEA_LEVEL - 0.060) biome = BIOME.DEEP;
     else if (e < SEA_LEVEL) biome = BIOME.OCEAN;
@@ -170,9 +254,18 @@
     else if (m + Math.max(0, 0.14 - (e - SEA_LEVEL) * 1.4) > 0.62) biome = BIOME.FOREST; // 海岸加湿
     else biome = BIOME.GRASS;
 
+    /* 灵脉格: 覆写显示用 biome (8..12 = 金木水火土灵脉格) */
+    var vinfo = null;
+    if (vn && vn.d <= 1) {
+      vinfo = { element: vn.v.element, variant: vn.v.variant,
+                level: vn.v.level, d: vn.d, name: vn.v.name };
+    }
+    var disp = vinfo ? 8 + vinfo.element : biome;
+
     var w = tileToWorld(q, r);
-    c = { q: q, r: r, x: w.x, y: w.y, e: e, m: m, t: t, biome: biome, variant: variant, hash: h };
-    if (fieldCache.size > 150000) fieldCache.clear();
+    c = { q: q, r: r, x: w.x, y: w.y, e: e, m: m, t: t,
+          biome: biome, disp: disp, vein: vinfo, variant: variant, hash: h };
+    if (fieldCache.size > 150000) evictHalf(fieldCache);
     fieldCache.set(key, c);
     return c;
   }
@@ -210,13 +303,13 @@
         if (own.q !== cc.q || own.r !== cc.r) continue;
         var f = fields(q, r);
         centers.push(f.x, f.y);
-        tiles.push(f.biome * 4 + f.variant);
+        tiles.push((f.disp != null ? f.disp : f.biome) * 4 + f.variant);
         elevs.push(f.e);
         hashes.push(f.hash);
         var packed = 0;
         for (var k = 0; k < 6; k++) {
           var nf = fields(q + NEIGH_SLOTS[k][0], r + NEIGH_SLOTS[k][1]);
-          packed += nf.biome * Math.pow(8, k);
+          packed += Math.min(nf.biome, 7) * Math.pow(8, k);
         }
         neigh.push(packed);
         if (f.x < bbox.x0) bbox.x0 = f.x;
@@ -304,7 +397,9 @@
     if (c) return c;
     var arr = [];
     var h0 = hash01(i, j, 7);
-    if (h0 < 0.46) {
+    /* 灵气梯度 (设定 §九/§十): 聚落密度随灵气衰减, 1000 外无灵凡俗 */
+    var spLoc = spiritAt(i * REGION_M, j * REGION_M);
+    if (h0 < 0.20 + 0.38 * spLoc) {
       var count = h0 < 0.30 ? 1 : 2;
       for (var k = 0; k < count; k++) {
         var sq = i * REGION_M + (hash01(i, j, 21 + k) - 0.5) * REGION_M * 0.7;
@@ -317,13 +412,18 @@
           if (f.biome >= BIOME.GRASS && f.biome <= BIOME.DESERT) { placed = f; break; }
         }
         if (!placed) continue;
+        /* 灵脉亲和 (设定 §十一): 灵脉域内宗门概率与人口提升 */
+        var cn = communityNear(placed.q, placed.r);
+        var inVeinDomain = !!(cn && cn.dist < CFG.COMM_R * 1.4);
         var hr = hash01(i, j, 81 + k);
-        var type = hr < 0.16 ? 'sect' : hr < 0.28 ? 'city' : hr < 0.52 ? 'town' : 'village';
+        var type = hr < (inVeinDomain ? 0.24 : 0.14) ? 'sect'
+                 : hr < 0.28 ? 'city' : hr < 0.52 ? 'town' : 'village';
         if (type === 'sect' && !mountainNear(placed.q, placed.r, 6)) type = 'town';
         var pop = type === 'sect' ? (hash01(i, j, 91) * 4000 + 2000) | 0
                 : type === 'city' ? (hash01(i, j, 92) * 30000 + 40000) | 0
                 : type === 'town' ? (hash01(i, j, 93) * 6000 + 4000) | 0
                 : (hash01(i, j, 94) * 900 + 200) | 0;
+        if (inVeinDomain && type !== 'sect') pop = (pop * 1.3) | 0;
         arr.push({
           id: i + '_' + j + '_' + k, type: type,
           q: placed.q, r: placed.r, x: placed.x, y: placed.y,
@@ -426,8 +526,10 @@
     return null;
   }
 
-  /* 某区域格内聚落的对外道路 (缓存, 全局去重) */
-  function roadsNear(i, j) {
+  /* 某区域格内聚落的对外道路 (缓存, 全局去重, 预算制)
+     maxNew: 本次调用允许新算的 A* 条数; 0 = 纯读缓存 (绘制帧用), 防止 A* 卡帧 */
+  function roadsNear(i, j, maxNew) {
+    var budget = maxNew | 0;
     var cellKey = i + ',' + j;
     var mine = settlementsFor(i, j);
     var out = [];
@@ -453,10 +555,13 @@
       for (var c2 = 0; c2 < cands.length && linked < want; c2++) {
         var b = cands[c2];
         var rkey = a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id;
+        if (roadFail.has(rkey)) continue;          // 已判定不可达: 终身跳过
         var road = roadCache.get(rkey);
         if (!road) {
+          if (budget <= 0) continue;               // 预算用尽: 本帧不算
+          budget--;
           var path = astar(a.q, a.r, b.q, b.r);
-          if (!path) continue;
+          if (!path) { roadFail.add(rkey); continue; }
           var pts = [], tset = new Set();
           for (var pj = 0; pj < path.length; pj++) {
             var w = tileToWorld(path[pj][0], path[pj][1]);
@@ -476,40 +581,162 @@
     return out;
   }
 
-  /* ---------- 灵脉 (晶格哈希, 高山发源, 下山入海) ---------- */
-  function veinAt(i, j) {
+  /* 主循环渐进预热: 每帧至多补 1 条 A*, 围绕相机所在区域格 5x5 旋转扫描 */
+  var warmIdx = 0;
+  function warmRoadsStep(camQ, camR) {
+    var M = REGION_M;
+    var ci = Math.floor(camQ / M), cj = Math.floor(camR / M);
+    var before = roadCache.size + roadFail.size;
+    for (var n = 0; n < 25; n++) {
+      var idx = warmIdx++;
+      roadsNear(ci + (idx % 5) - 2, cj + (((idx / 5) | 0) % 5) - 2, 1);
+      if (roadCache.size + roadFail.size > before) return true;
+    }
+    return false;
+  }
+
+  /* ---------- 灵气场 / 群落 / 灵脉 (设定: 先定灵脉, 后造山河) ---------- */
+
+  /* 灵气场 (设定 §九): 以 (0,0) 为灵气中枢, 欧氏直线距离单调衰减,
+     半径 SPIRIT_R_TILES 处归零; 越近群落越密、聚落越繁华 */
+  function spiritAt(q, r) {
+    var w = tileToWorld(q, r);
+    var d = Math.sqrt(w.x * w.x + w.y * w.y) / (CFG.SPIRIT_R_TILES * HEX_R * 2);
+    var t = Math.max(0, 1 - d);
+    return Math.pow(t, CFG.SPIRIT_CURVE);
+  }
+
+  /* 相冲/相合对 → 异灵根 */
+  function dualOf(a, b) {
+    return DUAL[Math.min(a, b) + '|' + Math.max(a, b)] || null;
+  }
+
+  function pickLandform(el, variant, i, j, k) {
+    if (variant) {
+      var vp = VARIANT_LANDFORM[variant];
+      return vp[(hash01(i * 5 + k, j * 3 + k, 261) * vp.length) | 0];
+    }
+    var pool = LANDFORM[el];
+    return pool[(hash01(i * 5 + k, j * 3 + k, 262) * pool.length) | 0];
+  }
+
+  /* 群落 (设定 §三/§四): 晶格哈希确定性播种大灵脉, 密度-灵气耦合;
+     群内按 1大 + [0~3]中 + [0~7]小 向心聚敛 (越近中心越密),
+     五行只在群落内部发育: 主灵根自持 → 相生支脉繁荣 → 相克支脉异变 */
+  function communityOf(i, j) {
     var key = i + ',' + j;
-    var c = veinCache.get(key);
+    var c = commCache.get(key);
     if (c !== undefined) return c;
-    var vein = null;
-    if (hash01(i, j, 77) < 0.38) {
-      var sq = i * VEIN_V + (hash01(i, j, 78) - 0.5) * VEIN_V * 0.5;
-      var sr = j * VEIN_V + (hash01(i, j, 79) - 0.5) * VEIN_V * 0.5;
-      var q = Math.round(sq), r = Math.round(sr);
-      if (elevAt(q, r) > 0.72) {
-        var pts = [], tiles2 = [];
-        for (var step = 0; step < 90; step++) {
-          var e0 = elevAt(q, r);
-          pts.push(tileToWorld(q, r));
-          tiles2.push(q + ',' + r);
-          var bestT = -1, bestE = e0;
-          for (var k = 0; k < 6; k++) {
-            var nq = q + NEIGH_SLOTS[k][0], nr = r + NEIGH_SLOTS[k][1];
-            var ne = elevAt(nq, nr) - hash01(nq, nr, 88) * 0.02;
-            if (ne < bestE) { bestE = ne; bestT = k; }
+    var comm = null;
+    var cq0 = i * CFG.COMM_CL, cr0 = j * CFG.COMM_CL;
+    var sp = spiritAt(cq0, cr0);
+    var p = sp < 0.03 ? 0 : CFG.COMM_P_MIN + CFG.COMM_P_SPIRIT * sp;   // 群落存在概率随灵气
+    if (hash01(i, j, 201) < p) {
+      var q = Math.round(cq0 + (hash01(i, j, 202) - 0.5) * CFG.COMM_CL * 0.44);
+      var r = Math.round(cr0 + (hash01(i, j, 203) - 0.5) * CFG.COMM_CL * 0.44);
+      var el = (hash01(i, j, 204) * 5) | 0;         // 主灵根
+      var veins = [{ q: q, r: r, level: 0, element: el, variant: null,
+                     name: pickLandform(el, null, i, j, 0) }];
+      var nM = Math.min(3, (hash01(i, j, 205) * 4 * (0.35 + 0.65 * sp)) | 0);
+      var nS = Math.min(7, (hash01(i, j, 206) * 8 * (0.30 + 0.70 * sp)) | 0);
+      for (var k = 0; k < nM + nS; k++) {
+        var isMid = k < nM;
+        var level = isMid ? 1 : 2;
+        var dMin0 = isMid ? CFG.D_L_M : CFG.D_L_S;          // 与大灵脉最小距
+        var dMinO = isMid ? CFG.D_M : CFG.D_SMALL;          // 与其他次级最小距
+        var radMax = isMid ? CFG.COMM_R * 0.82 : CFG.COMM_R * 0.95;
+        var spot = null;
+        for (var t = 0; t < CFG.SUB_ATTEMPTS && !spot; t++) {
+          var u = hash01(i * 31 + k, j * 17 + k, 210 + t);
+          var ang = hash01(i * 13 + k, j * 29 + k, 230 + t) * Math.PI * 2;
+          var rad = dMin0 + (radMax - dMin0) * Math.pow(u, isMid ? 0.65 : 0.55);
+          var tq = Math.round(q + rad * Math.cos(ang));
+          var tr = Math.round(r + rad * Math.sin(ang));
+          if (hexDist(tq, tr, q, r) < dMin0) continue;
+          var ok = true;
+          for (var v2 = 0; v2 < veins.length; v2++) {
+            if (hexDist(tq, tr, veins[v2].q, veins[v2].r) < dMinO) { ok = false; break; }
           }
-          if (bestT < 0) break;
-          q += NEIGH_SLOTS[bestT][0];
-          r += NEIGH_SLOTS[bestT][1];
-          if (elevAt(q, r) < SEA_LEVEL - 0.02) break;   // 入海而止
+          if (ok) spot = { q: tq, r: tr };
         }
-        if (pts.length > 10) {
-          vein = { name: '灵脉·' + i + '_' + j, pts: pts, tiles: tiles2 };
+        if (!spot) continue;
+        /* 五行发育 (设定 §4.3/§4.4): 相生相克只在群落内部 */
+        var er = hash01(i * 7 + k, j * 11 + k, 250);
+        var se = el, variant = null;
+        if (er < 0.44) {
+          se = el;                                   // 主灵根基调
+        } else if (er < 0.78) {
+          se = SHENG[el];                            // 相生支脉繁荣
+          if (hash01(i * 7 + k, j * 11 + k, 251) < 0.30) variant = dualOf(el, se);
+        } else if (er < 0.90) {
+          se = SHENG[SHENG[el]];                     // 远相生
+        } else {
+          se = KE[el];                               // 相克制衡 → 异变
+          variant = hash01(i * 7 + k, j * 11 + k, 252) < 0.55 ? dualOf(el, se) : null;
+        }
+        veins.push({ q: spot.q, r: spot.r, level: level, element: se, variant: variant,
+                     name: pickLandform(se, variant, i, j, k + 1) });
+      }
+      comm = { i: i, j: j, q: q, r: r, element: el, spirit: sp,
+               x: tileToWorld(q, r).x, y: tileToWorld(q, r).y, veins: veins };
+    }
+    commCache.set(key, comm);
+    return comm;
+  }
+
+  /* 最近群落 (3×3 晶格扫描, 确定性) */
+  function communityNear(q, r) {
+    var i0 = Math.floor(q / CFG.COMM_CL), j0 = Math.floor(r / CFG.COMM_CL);
+    var best = null, bd = 1e18;
+    for (var di = -1; di <= 1; di++) {
+      for (var dj = -1; dj <= 1; dj++) {
+        var cm = communityOf(i0 + di, j0 + dj);
+        if (!cm) continue;
+        var d = hexDist(q, r, cm.q, cm.r);
+        if (d < bd) { bd = d; best = cm; }
+      }
+    }
+    return best ? { comm: best, dist: bd } : null;
+  }
+
+  /* 某格附近最近灵脉: d ≤ 1 为七星格 (中心/从属), d ≤ 3 参与地形过渡 */
+  function veinNear(q, r) {
+    var key = q + ',' + r;
+    var c = veinNearCache.get(key);
+    if (c !== undefined) return c;
+    var i0 = Math.floor(q / CFG.COMM_CL), j0 = Math.floor(r / CFG.COMM_CL);
+    var best = null, bd = 1e18;
+    for (var di = -1; di <= 1; di++) {
+      for (var dj = -1; dj <= 1; dj++) {
+        var cm = communityOf(i0 + di, j0 + dj);
+        if (!cm) continue;
+        for (var v = 0; v < cm.veins.length; v++) {
+          var d = hexDist(q, r, cm.veins[v].q, cm.veins[v].r);
+          if (d < bd) { bd = d; best = cm.veins[v]; }
         }
       }
     }
-    veinCache.set(key, vein);
-    return vein;
+    var out = (best && bd <= 3) ? { d: bd, v: best } : null;
+    if (veinNearCache.size > 200000) evictHalf(veinNearCache);
+    veinNearCache.set(key, out);
+    return out;
+  }
+
+  /* 已缓存群落中灵脉总数 (统计用) */
+  function countVeins() {
+    var n = 0;
+    commCache.forEach(function (cm) { if (cm) n += cm.veins.length; });
+    return n;
+  }
+
+  /* §十二: 运行时覆写参数 (合并进 CFG 并清空相关缓存) */
+  function configure(patch) {
+    if (!patch) return;
+    for (var k in patch) {
+      if (Object.prototype.hasOwnProperty.call(CFG, k)) CFG[k] = patch[k];
+    }
+    commCache.clear(); veinNearCache.clear();
+    elevCache.clear(); fieldCache.clear();
   }
 
   /* ---------- 导出 ---------- */
@@ -524,21 +751,31 @@
     regionInfo: regionInfo,
     settlementsFor: settlementsFor,
     roadsNear: roadsNear,
-    veinAt: veinAt,
+    warmRoadsStep: warmRoadsStep,
+    spiritAt: spiritAt,
+    communityOf: communityOf,
+    communityNear: communityNear,
+    veinNear: veinNear,
+    countVeins: countVeins,
     pxToTile: pxToTile,
     tileToWorld: tileToWorld,
     hexDist: hexDist,
     mountainNear: mountainNear,
     roadCache: roadCache,
     settleCache: settleCache,
-    veinCache: veinCache,
+    commCache: commCache,
+    NEIGH_SLOTS: NEIGH_SLOTS,
     HEX_R: HEX_R,
     HEX_W: HEX_W,
     CHUNK_R: CHUNK_R,
     CHUNK_S: CHUNK_S,
     CHUNK_SCAN: CHUNK_SCAN,
     REGION_M: REGION_M,
-    VEIN_V: VEIN_V,
+    CFG: CFG,
+    configure: configure,
+    ELEMENTS: ELEMENTS,
+    ELEMENT_RGB: ELEMENT_RGB,
+    VARIANT_RGB: VARIANT_RGB,
     SEA_LEVEL: SEA_LEVEL,
     BIOME: BIOME,
     BIOME_META: BIOME_META
