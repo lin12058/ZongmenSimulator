@@ -64,15 +64,15 @@
     '  float pad = 0.045;',
     '  vec2 uvL = vUv*(1.0-2.0*pad)+pad;',
     /* 图集寻址: 群系 0..7 = (列=群系, 行=变体); 灵脉格 8..12 = 第 4 行
-       图集共 7 行 (第 5/6 行为立体精灵), 必须除以 7.0, 否则灵脉行采样越界 → 黑格 */
+       图集共 8 行 (第 5/6/7 行为立体精灵), 必须除以 8.0, 否则灵脉行采样越界 → 黑格 */
     '  vec2 cell = biome < 7.5 ? vec2(biome, variant) : vec2(biome - 8.0, 4.0);',
-    '  vec2 uv = (cell + uvL)/vec2(8.0, 7.0);',
+    '  vec2 uv = (cell + uvL)/vec2(8.0, 8.0);',
     '  vec3 base = texture(uAtlas, uv).rgb;',
-    // —— 邻居晕染 (灵脉格跳过, 保持灵气贴图完整) ——
+    // —— 邻居晕染 (灵脉格跳过, 保持灵气贴图完整; 山/雪不参与 —— 其边界由山峰精灵承担, 晕染会出黑边) ——
     '  if (biome < 7.5) {',
     '  for (int k = 0; k < 6; k++) {',
     '    float nb = mod(floor(vNeigh / pow(8.0, float(k))), 8.0);',
-    '    if (abs(nb - biome) > 0.5) {',
+    '    if (abs(nb - biome) > 0.5 && nb < 5.5 && biome < 5.5) {',
     '      float ang = 1.0471976 * float(k);',
     '      vec2 n = vec2(cos(ang), sin(ang));',
     '      float t = clamp((dot(vLocal, n) - (uApo - 6.5)) / 6.5, 0.0, 1.0);',
@@ -83,9 +83,9 @@
     '  }',
     '  if (biome < 1.5) {',
     '    float depth = clamp((uSeaLevel - vElev)*5.0, 0.0, 1.0);',
-    '    base *= mix(1.08, 0.76, depth);',
-    '    float w1 = sin(vLocal.x*0.10 + vLocal.y*0.045 + uTime*0.9 + vHash*6.2832);',
-    '    float w2 = sin(vLocal.x*0.05 - vLocal.y*0.07 + uTime*0.55 + vHash*12.0);',
+    '    base *= mix(1.10, 0.84, depth);',
+    '    float w1 = sin(vLocal.x*0.10 + vLocal.y*0.045 + vHash*6.2832);',
+    '    float w2 = sin(vLocal.x*0.05 - vLocal.y*0.07 + vHash*12.0);',
     '    base *= 1.0 + 0.05*w1 + 0.035*w2;',
     '    base *= 0.975 + 0.05*vHash;',
     '  } else {',
@@ -107,6 +107,7 @@
     'layout(location=1) in vec2 iCenter;',
     'layout(location=2) in float iSprite;',    // row*8+col
     'layout(location=3) in float iHash;',
+    'layout(location=4) in float iElev;',      // 海拔: 山体高度随 noise 缩放
     'uniform vec2 uRes;',
     'uniform vec2 uCam;',
     'uniform float uZoom;',
@@ -116,8 +117,17 @@
     'out float vHash;',
     'void main(){',
     '  float h2 = fract(iHash*13.73);',
-    '  float W = 3.4641016*uR*(1.55+0.65*h2);',          // ≈ 六边宽 × 1.55~2.2 (压邻格)
-    '  float H = uR*(3.3+1.2*fract(iHash*5.17));',       // 高 ≈ 3.3~4.5 倍半径
+    /* 高度系数: 山 40/41·56/57 与 雪 42/43·58/59 按海拔档位缩放 (noise 驱动, 非固定高);
+       林 44..47 / 沙 48 / 草 49 只做轻微随机; 灵脉峰 50..54 近似固定 */
+    '  float hs;',
+    '  if (iSprite < 41.5 || (iSprite > 55.5 && iSprite < 57.5))',
+    '    hs = mix(0.55, 1.30, clamp((iElev-0.70)/0.14, 0.0, 1.0));',
+    '  else if ((iSprite > 41.5 && iSprite < 43.5) || (iSprite > 57.5 && iSprite < 59.5))',
+    '    hs = mix(0.95, 1.55, clamp((iElev-0.84)/0.12, 0.0, 1.0));',
+    '  else if (iSprite < 49.5) hs = 0.62 + 0.34*fract(iHash*9.13);',
+    '  else                     hs = 1.05;',
+    '  float W = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*hs);',
+    '  float H = uR*(3.3+1.2*fract(iHash*5.17)) * hs;',  // 高 ≈ 3.3~4.5 倍半径 × 海拔系数
     '  float jx = (fract(iHash*3.77)-0.5)*uR*1.8;',
     '  float flip = step(0.5, fract(iHash*7.31));',
     '  float u0 = aPos.x*0.5+0.5;',
@@ -154,6 +164,27 @@
     '  rgb = mix(uPaperTint, rgb, uFade);',
     '  fragColor = vec4(rgb, tex.a*uFade);',
     '}'
+  ].join('\n');
+
+  /* ---- 道路: 贴地小径 (画进底图 FBO, 位于立体精灵之下 → 树压路) ---- */
+  var ROAD_VS = [
+    '#version 300 es',
+    'layout(location=0) in vec2 aWorld;',
+    'uniform vec2 uRes;',
+    'uniform vec2 uCam;',
+    'uniform float uZoom;',
+    'void main(){',
+    '  vec2 screen = (aWorld - uCam)*uZoom + uRes*0.5;',
+    '  vec2 clip = screen/uRes*2.0 - 1.0;',
+    '  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);',
+    '}'
+  ].join('\n');
+  var ROAD_FS = [
+    '#version 300 es',
+    'precision mediump float;',
+    'uniform vec4 uColor;',
+    'out vec4 fragColor;',
+    'void main(){ fragColor = uColor; }'
   ].join('\n');
 
   var POST_VS = [
@@ -199,27 +230,50 @@
     '  col = mix(col, pr.rgb, pr.a);',
     // —— 底图边缘检测 → 墨线 (等比: 采样半径随缩放) ——
     '  float e1 = 0.0; float coast = 0.0; float coast2 = 0.0;',
+    '  float mtnEdge = (id > 5.5 && id < 7.5) ? 1.0 : 0.0;',   // 本格是山/雪
     '  vec2 o0 = uTexel * pxw; vec2 o1 = vec2(0.0, uTexel.y) * pxw;',
     '  for (int i=0;i<4;i++){',
     '    vec2 o = (i==0)? o0 : (i==1)? -o0 : (i==2)? o1 : -o1;',
     '    float nid = biomeAt(uv+o);',
     '    e1 = max(e1, (cat(nid) != cat(id)) ? 1.0 : 0.0);',
     '    if (iWater != (nid<1.5)) coast = 1.0;',
+    '    if (nid > 5.5 && nid < 7.5) mtnEdge = 1.0;',          // 邻格是山/雪 → 边界墨线交给山峰精灵勾边
     '  }',
-    '  vec2 o2 = o0*3.4; vec2 o3 = o1*3.4;',
-    '  for (int i=0;i<4;i++){',
-    '    vec2 o = (i==0)? o2 : (i==1)? -o2 : (i==2)? o3 : -o3;',
-    '    float nid = biomeAt(uv+o);',
-    '    if (iWater != (nid<1.5)) coast2 = 1.0;',
-    '  }',
-    '  float br = texture(uNoise, world*0.013).r;',
-    '  float fine = texture(uNoise, world*0.06).g;',
-    '  float inkLine = e1 * (0.30 + 0.70*smoothstep(0.22, 0.55, br));',
+  '  vec2 o2 = o0*3.4; vec2 o3 = o1*3.4;',
+  '  for (int i=0;i<4;i++){',
+  '    vec2 o = (i==0)? o2 : (i==1)? -o2 : (i==2)? o3 : -o3;',
+  '    float nid = biomeAt(uv+o);',
+  '    if (iWater != (nid<1.5)) coast2 = 1.0;',
+  '  }',
+  '  vec2 o6 = o0*7.5; vec2 o7 = o1*7.5;',
+  '  float coast3 = 0.0;',
+  '  for (int i=0;i<4;i++){',
+  '    vec2 o = (i==0)? o6 : (i==1)? -o6 : (i==2)? o7 : -o7;',
+  '    float nid = biomeAt(uv+o);',
+  '    if (iWater != (nid<1.5)) coast3 = 1.0;',
+  '  }',
+  '  float br = texture(uNoise, world*0.013).r;',
+  '  float fine = texture(uNoise, world*0.06).g;',
+  '  // —— 海岸浅水提亮 + 静态近岸白沫 (世界锚定, 无动画) ——',
+  '  float ring = max(coast*1.0, max(coast2*0.66, coast3*0.38));',
+  '  if (iWater) {',
+  '    col += vec3(0.05, 0.06, 0.05) * ring;',                          // 近岸浅水泛亮
+  '    float wob = texture(uNoise, world*0.045).g;',
+  '    float ph = world.x*0.085 + world.y*0.06 + wob*4.2;',
+  '    float crest = pow(0.5 + 0.5*sin(ph*6.2832), 4.5);',               // 平行岸线的白沫脊 (收细)
+  '    float foamA = ring * (0.18 + 0.82*crest) * (0.55 + 0.45*wob);',
+  '    col = mix(col, vec3(0.90, 0.94, 0.92), clamp(foamA*0.42, 0.0, 0.28));',
+  '  }',
+    // —— 精灵近邻遮罩: 山/树精灵脚下 (含接地阴影) 的底图 hex 墨线穿帮, 就近衰减 ——
+    '  float pa = pr.a;',
+    '  float paDn = texture(uProps, uv + vec2(0.0, uTexel.y*pxw*2.6)).a;',
+    '  float paUp = texture(uProps, uv - vec2(0.0, uTexel.y*pxw*2.6)).a;',
+    '  float propNear = clamp(max(pa, max(paDn, paUp))*1.4, 0.0, 1.0);',
+    '  float inkLine = e1 * (0.30 + 0.70*smoothstep(0.22, 0.55, br)) * (1.0 - propNear*0.92) * (1.0 - mtnEdge);',
     '  float coastLine = max(coast, coast2*0.22) * (0.45+0.55*smoothstep(0.18, 0.5, br));',
     '  vec3 inkCol = vec3(0.15, 0.13, 0.115);',
     '  col = mix(col, inkCol, clamp(inkLine*0.55 + coastLine*0.38, 0.0, 0.8));',
     // —— 精灵轮廓墨线 (剪影梯度 → 枯笔勾边) ——
-    '  float pa = pr.a;',
     '  float pe = 0.0;',
     '  for (int i=0;i<4;i++){',
     '    vec2 o = (i==0)? o0 : (i==1)? -o0 : (i==2)? o1 : -o1;',
@@ -231,11 +285,13 @@
     '  float sh = texture(uProps, uv + vec2(0.0, uTexel.y*pxw*3.2)).a;',
     '  sh *= (1.0 - pa) * step(1.5, id);',
     '  col *= 1.0 - 0.15*sh;',
-    // —— 宣纸正片叠底 + 纤维 ——
+    // —— 整体提亮 (修复全局偏暗) ——
+    '  col = col*1.08 + 0.022;',
+    // —— 宣纸正片叠底 + 纤维 (减淡, 保留纸理不压暗画面) ——
     '  vec3 paper = texture(uPaper, world/uPaperScale).rgb;',
-    '  col *= mix(vec3(1.0), paper*1.12, 0.48);',
+    '  col *= mix(vec3(1.0), paper*1.28, 0.38);',
     '  col += (fine-0.5)*0.045;',
-    '  col *= 1.0 - 0.20*smoothstep(0.55, 1.35, length((uv-0.5)*vec2(1.05,1.25))*2.0);',
+    '  col *= 1.0 - 0.10*smoothstep(0.55, 1.35, length((uv-0.5)*vec2(1.05,1.25))*2.0);',
     '  fragColor = vec4(col, 1.0);',
     '}'
   ].join('\n');
@@ -250,6 +306,10 @@
     this.progHex = this._build(HEX_VS, HEX_FS);
     this.progProp = this._build(PROP_VS, PROP_FS);
     this.progPost = this._build(POST_VS, POST_FS);
+    this.progRoad = this._build(ROAD_VS, ROAD_FS);
+    this.roadBufHalo = gl.createBuffer();   // 道路柔光底层 (宽而淡)
+    this.roadBufCore = gl.createBuffer();   // 道路主路面
+    this.roadCounts = [0, 0];
 
     var quad = new Float32Array([
       -1, -1, 1, -1, 1, 1,
@@ -272,7 +332,7 @@
 
     this.fbo = null; this.fboTex = null; this.fboW = 0; this.fboH = 0;
     this.propFbo = null; this.propTex = null;   // 立体精灵层 (单独 FBO, 不污染底图 biome alpha)
-    this.atlasRows = 7;
+    this.atlasRows = 8;
     this.dpr = 1;               // 设备像素比: 世界坐标换算一律用 CSS 像素 (与 main.js 相机一致)
 
     gl.disable(gl.DEPTH_TEST);
@@ -328,6 +388,17 @@
     this.avgColors = arr;
   };
 
+  /* 上传道路三角面 (世界坐标, CPU 展宽成 quad; 每帧由 main.js 调用) */
+  InkRenderer.prototype.setRoads = function (halo, core) {
+    var gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.roadBufHalo);
+    gl.bufferData(gl.ARRAY_BUFFER, halo, gl.DYNAMIC_DRAW);
+    this.roadCounts[0] = halo.length / 2;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.roadBufCore);
+    gl.bufferData(gl.ARRAY_BUFFER, core, gl.DYNAMIC_DRAW);
+    this.roadCounts[1] = core.length / 2;
+  };
+
   /* 上传一个区块的实例数据, 建独立 VAO (底图 + 立体精灵两套) */
   InkRenderer.prototype.uploadChunk = function (key, data) {
     var gl = this.gl;
@@ -362,8 +433,8 @@
       gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf);
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-      var pd = [data.propCenters, data.propSprites, data.propHashes];
-      var pl = [1, 2, 3];
+      var pd = [data.propCenters, data.propSprites, data.propHashes, data.propElevs];
+      var pl = [1, 2, 3, 4];
       for (k = 0; k < 3; k++) {
         var pb = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, pb);
@@ -483,13 +554,39 @@
       if (node.done) break;
       var c = node.value;
       var age = timeSec - c.born;
-      var fade = Math.min(1, age / 0.6);
+      var fade = this.noFade ? 1 : Math.min(1, age / 0.6);
       fade = fade * fade * (3 - 2 * fade);
       gl.uniform1f(u.fade, fade);
       gl.bindVertexArray(c.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, c.count);
     }
     gl.bindVertexArray(null);
+
+    /* ---- Pass1.2: 道路 → 底图 FBO (RGB 混合, alpha 通道保持 biome 编码不变) ---- */
+    if (this.roadCounts[0] || this.roadCounts[1]) {
+      var ur = this._uRoad || (this._uRoad = {
+        res: gl.getUniformLocation(this.progRoad, 'uRes'),
+        cam: gl.getUniformLocation(this.progRoad, 'uCam'),
+        zoom: gl.getUniformLocation(this.progRoad, 'uZoom'),
+        color: gl.getUniformLocation(this.progRoad, 'uColor')
+      });
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+      gl.useProgram(this.progRoad);
+      gl.uniform2f(ur.res, w / this.dpr, h / this.dpr);
+      gl.uniform2f(ur.cam, cam.x, cam.y);
+      gl.uniform1f(ur.zoom, cam.zoom);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.roadBufHalo);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform4f(ur.color, 0.808, 0.776, 0.627, 0.16);
+      gl.drawArrays(gl.TRIANGLES, 0, this.roadCounts[0]);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.roadBufCore);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform4f(ur.color, 0.878, 0.831, 0.674, 0.55);
+      gl.drawArrays(gl.TRIANGLES, 0, this.roadCounts[1]);
+      gl.disable(gl.BLEND);
+    }
 
     /* ---- Pass1.5: 立体精灵 → 独立 FBO (alpha 混合, y 序压格) ---- */
     if (!this._uProp) {
@@ -527,7 +624,7 @@
       var cp = node.value;
       if (!cp.propCount) continue;
       var ageP = timeSec - cp.born;
-      var fadeP = Math.min(1, ageP / 0.6);
+      var fadeP = this.noFade ? 1 : Math.min(1, ageP / 0.6);
       fadeP = fadeP * fadeP * (3 - 2 * fadeP);
       gl.uniform1f(up.fade, fadeP);
       gl.bindVertexArray(cp.propVao);

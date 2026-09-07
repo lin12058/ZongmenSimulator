@@ -132,31 +132,39 @@
   /* ---------- 各群系格面绘制 ---------- */
   var painters = [];
 
-  /* 0 深海: 灰青底 + 隐约长波 */
+  /* 0 深海: 碧蓝底 + 隐约长波 */
   painters[0] = function (ctx, v) {
-    ctx.fillStyle = '#95a5ad';
+    ctx.fillStyle = '#6d9aab';
     ctx.fillRect(0, 0, TILE, TILE);
-    wash(ctx, 30 + trng() * 60, 30 + trng() * 60, 60, [76, 92, 100], 0.07);
-    wash(ctx, trng() * 128, trng() * 128, 46, [152, 168, 172], 0.09);
+    wash(ctx, 30 + trng() * 60, 30 + trng() * 60, 60, [58, 96, 116], 0.10);
+    wash(ctx, trng() * 128, trng() * 128, 46, [118, 158, 172], 0.12);
     for (var i = 0; i < 2; i++) {
       var yy = 15 + trng() * 100, xx = trng() * 60;
       strokeInk(ctx, [[xx, yy], [xx + 22 + trng() * 20, yy + (trng() - 0.5) * 5]],
-        { width: 1.2, color: [70, 88, 96], alpha: 0.13, fly: false, layers: 1 });
+        { width: 1.2, color: [52, 88, 108], alpha: 0.13, fly: false, layers: 1 });
     }
   };
 
-  /* 1 浅海: 淡青底 + 水纹弧线 */
+  /* 1 浅海: 淡碧蓝底 + 水纹弧线 + 白沫碎点 */
   painters[1] = function (ctx, v) {
-    ctx.fillStyle = '#b4c2c4';
+    ctx.fillStyle = '#9dc2c9';
     ctx.fillRect(0, 0, TILE, TILE);
-    wash(ctx, trng() * 128, trng() * 128, 55, [176, 195, 192], 0.25);
+    wash(ctx, trng() * 128, trng() * 128, 55, [152, 192, 196], 0.25);
+    wash(ctx, trng() * 128, trng() * 128, 40, [174, 208, 208], 0.20);
     var n = 5 + (trng() * 3 | 0);
     for (var i = 0; i < n; i++) {
       var xx = 8 + trng() * 90, yy = 10 + trng() * 108;
       var ww = 12 + trng() * 16;
       strokeInk(ctx, [
         [xx, yy], [xx + ww * 0.5, yy - 2.5 - trng() * 1.5], [xx + ww, yy]
-      ], { width: 1.2, color: [92, 110, 114], alpha: 0.30, fly: false, layers: 1 });
+      ], { width: 1.2, color: [76, 118, 128], alpha: 0.28, fly: false, layers: 1 });
+    }
+    /* 白色浪尖碎点 */
+    for (i = 0; i < 8; i++) {
+      ctx.fillStyle = 'rgba(238,244,242,' + (0.14 + trng() * 0.16).toFixed(2) + ')';
+      ctx.beginPath();
+      ctx.arc(trng() * 128, trng() * 128, 0.7 + trng() * 1.2, 0, Math.PI * 2);
+      ctx.fill();
     }
   };
 
@@ -173,12 +181,23 @@
     }
   };
 
-  /* 3 草地: 淡青绿 + 草笔 */
+  /* 3 草地: 淡青绿 + 草笔 + 极淡小草坪斑块 (参考图: 近看才有细微色差) */
   painters[3] = function (ctx, v) {
     ctx.fillStyle = '#b4c3a0';
     ctx.fillRect(0, 0, TILE, TILE);
     wash(ctx, 20 + trng() * 88, 20 + trng() * 88, 52, [168, 185, 142], 0.22);
     wash(ctx, trng() * 128, trng() * 128, 40, [196, 205, 172], 0.25);
+    /* 微小草坪: 2.5~7px 亮/暗斑, 对比提到隐约可见 */
+    var nPatch = 12 + (trng() * 6 | 0);
+    for (var pi = 0; pi < nPatch; pi++) {
+      var px = 6 + trng() * 116, py = 6 + trng() * 116, pr = 2.5 + trng() * 4.5;
+      var lit = trng() > 0.4;
+      ctx.fillStyle = lit ? 'rgba(210,220,180,' + (0.11 + trng() * 0.07).toFixed(3) + ')'
+                          : 'rgba(140,156,108,' + (0.10 + trng() * 0.06).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.ellipse(px, py, pr, pr * (0.6 + trng() * 0.4), trng() * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
+    }
     var n = 14 + (trng() * 7 | 0);
     for (var i = 0; i < n; i++) {
       var xx = 6 + trng() * 116, yy = 14 + trng() * 108;
@@ -198,13 +217,26 @@
     }
   };
 
-  /* 4 林地: 草底 + 椿点树冠 */
+  /* 4 林地: 草底 + 双色树冠团簇 (参考图斑驳林感: 暗底 + 亮冠 + 高光点) */
   painters[4] = function (ctx, v) {
     painters[3](ctx, v);
-    var n = 5 + (trng() * 3 | 0);
+    var n = 6 + (trng() * 4 | 0);
     for (var i = 0; i < n; i++) {
       var xx = 14 + trng() * 100, yy = 16 + trng() * 100;
-      dotCluster(ctx, xx, yy, 6 + (trng() * 4 | 0), [74, 94, 66], 2.6);
+      var cr = 3.5 + trng() * 4.5;
+      /* 暗色底冠 */
+      ctx.fillStyle = rgba([52, 76, 46], 0.42 + trng() * 0.18);
+      ctx.beginPath();
+      ctx.arc(xx, yy + cr * 0.25, cr, 0, Math.PI * 2);
+      ctx.fill();
+      /* 亮色主冠 (偏右上) */
+      ctx.fillStyle = rgba([76, 104, 56], 0.45 + trng() * 0.2);
+      ctx.beginPath();
+      ctx.arc(xx - cr * 0.18, yy - cr * 0.2, cr * 0.78, 0, Math.PI * 2);
+      ctx.fill();
+      /* 高光碎点 */
+      dotCluster(ctx, xx - cr * 0.3, yy - cr * 0.4, 4, [104, 132, 70], cr * 0.28);
+      /* 树干阴影 */
       strokeInk(ctx, [[xx, yy + 2], [xx, yy + 5 + trng() * 2]],
         { width: 1.0, color: [70, 60, 44], alpha: 0.4, fly: false, layers: 1 });
     }
@@ -339,7 +371,7 @@
   }
 
   /* ============================================================
-   * 立体精灵 (第 5/6 行): 透明底绘制, 超出格子压到邻格上
+   * 立体精灵 (第 5/6/7 行): 透明底绘制, 超出格子压到邻格上
    * ============================================================ */
 
   /* 接地投影: 椭圆软墨 */
@@ -357,7 +389,7 @@
     ctx.restore();
   }
 
-  /* 透明底山峰: 渐变山体 + 脊线 + 披麻皴 + 可选雪帽 */
+  /* 透明底山峰: 渐变山体 + 受光面/背光面 + 皴笔 + 岩层横裂 + 可选雪帽/雪线挂雪 */
   function drawPropPeak(ctx, cx, baseY, w, h, dark, mid, opt) {
     opt = opt || {};
     var apexY = baseY - h;
@@ -373,22 +405,80 @@
     ctx.closePath();
     ctx.fillStyle = g;
     ctx.fill();
+    /* 受光面 (左坡): 淡亮 wash, 参考图日光自左上来 */
+    var gl2 = ctx.createLinearGradient(cx - w * 0.5, baseY, cx, apexY);
+    gl2.addColorStop(0, 'rgba(214,210,196,0)');
+    gl2.addColorStop(0.55, 'rgba(214,210,196,0.16)');
+    gl2.addColorStop(1, 'rgba(226,222,208,0.30)');
+    ctx.beginPath();
+    ctx.moveTo(cx - w * 0.5, baseY);
+    ctx.quadraticCurveTo(cx - w * 0.28, baseY - h * 0.5, cx - w * 0.04, apexY + h * 0.05);
+    ctx.quadraticCurveTo(cx + w * 0.04, apexY + h * 0.10, cx + w * 0.02, baseY - h * 0.30);
+    ctx.quadraticCurveTo(cx - w * 0.24, baseY - h * 0.22, cx - w * 0.5, baseY);
+    ctx.closePath();
+    ctx.fillStyle = gl2;
+    ctx.fill();
+    /* 背光面 (右坡): 深色压暗, 拉开体积 */
+    ctx.beginPath();
+    ctx.moveTo(cx + w * 0.5, baseY);
+    ctx.quadraticCurveTo(cx + w * 0.30, baseY - h * 0.45, cx + w * 0.17, apexY + h * 0.11);
+    ctx.quadraticCurveTo(cx + w * 0.10, apexY + h * 0.04, cx + w * 0.05, apexY + h * 0.16);
+    ctx.quadraticCurveTo(cx + w * 0.16, baseY - h * 0.40, cx + w * 0.30, baseY);
+    ctx.closePath();
+    ctx.fillStyle = rgba(dark, 0.30);
+    ctx.fill();
+    /* 岩层横裂: 右坡短促横向皴断 (参考图岩壁层理) */
+    var nCrag = 2 + (trng() * 2 | 0);
+    for (var ci = 0; ci < nCrag; ci++) {
+      var ct = 0.30 + trng() * 0.45;
+      var cxp = cx + w * (0.08 + ct * 0.16);
+      var cyp = baseY - h * (0.30 + ct * 0.42);
+      var cw = w * (0.10 + trng() * 0.12);
+      strokeInk(ctx, [
+        [cxp - cw, cyp], [cxp, cyp + 2.2], [cxp + cw, cyp - 1.5]
+      ], { width: 1.0, color: INK, alpha: 0.20 + trng() * 0.15, fly: false, layers: 1 });
+    }
     if (opt.snow) {
+      /* 雪帽: 锯齿状下缘 */
       ctx.beginPath();
       ctx.moveTo(cx + w * 0.03, apexY + h * 0.03);
-      ctx.quadraticCurveTo(cx + w * 0.22, baseY - h * 0.70, cx + w * 0.28, baseY - h * 0.58);
-      ctx.quadraticCurveTo(cx + w * 0.13, baseY - h * 0.68, cx + w * 0.01, baseY - h * 0.56);
-      ctx.quadraticCurveTo(cx - w * 0.13, baseY - h * 0.68, cx - w * 0.22, baseY - h * 0.58);
-      ctx.quadraticCurveTo(cx - w * 0.13, baseY - h * 0.72, cx + w * 0.03, apexY + h * 0.03);
+      ctx.lineTo(cx + w * 0.10, apexY + h * 0.10);
+      ctx.lineTo(cx + w * 0.05, apexY + h * 0.09);
+      ctx.lineTo(cx + w * 0.13, apexY + h * 0.17);
+      ctx.lineTo(cx + w * 0.04, apexY + h * 0.14);
+      ctx.lineTo(cx + w * 0.06, apexY + h * 0.22);
+      ctx.lineTo(cx - w * 0.04, apexY + h * 0.15);
+      ctx.lineTo(cx - w * 0.02, apexY + h * 0.23);
+      ctx.lineTo(cx - w * 0.12, apexY + h * 0.16);
+      ctx.lineTo(cx - w * 0.09, apexY + h * 0.24);
+      ctx.lineTo(cx - w * 0.18, apexY + h * 0.15);
+      ctx.quadraticCurveTo(cx - w * 0.13, apexY + h * 0.06, cx + w * 0.03, apexY + h * 0.03);
       ctx.closePath();
-      ctx.fillStyle = 'rgba(249,247,241,0.95)';
+      ctx.fillStyle = 'rgba(250,250,248,0.96)';
       ctx.fill();
+      /* 挂雪沟槽: 沿两坡向下延伸的白色条痕 */
+      var nStreak = 2 + (trng() * 2 | 0);
+      for (var si = 0; si < nStreak; si++) {
+        var st0 = 0.10 + trng() * 0.22;
+        var sxp = cx + (trng() - 0.5) * w * 0.16;
+        var syp = apexY + h * st0;
+        var sl = h * (0.14 + trng() * 0.16);
+        var sdx = (sxp < cx ? -1 : 1) * w * 0.10;
+        ctx.beginPath();
+        ctx.moveTo(sxp - 1.6, syp);
+        ctx.quadraticCurveTo(sxp + sdx * 0.5, syp + sl * 0.55, sxp + sdx, syp + sl);
+        ctx.quadraticCurveTo(sxp + sdx * 0.3 + 1.4, syp + sl * 0.6, sxp + 1.6, syp);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(248,249,247,' + (0.55 + trng() * 0.3).toFixed(2) + ')';
+        ctx.fill();
+      }
     }
     strokeInk(ctx, [
       [cx - w * 0.5, baseY],
       [cx - w * 0.27, baseY - h * 0.52],
       [cx - w * 0.02, apexY + h * 0.07]
     ], { width: 1.5, color: INK, alpha: 0.5, fly: false, layers: 2 });
+    /* 披麻皴: 自脊向左下短披麻 */
     var nCun = 5 + (trng() * 3 | 0);
     for (var i = 0; i < nCun; i++) {
       var t = 0.2 + trng() * 0.6;
@@ -401,38 +491,67 @@
     }
   }
 
-  /* 透明底树: 枯笔干 + 椿点冠 */
-  function propTree(ctx, x, baseY, h) {
+  /* 透明底树: 枯笔干 + 多层球冠 (暗底冠/主冠/高光) + 可选花色
+   * pal: {trunk, c1 暗冠, c2 主冠, c3 高光, bloom 花色(可空)} */
+  var TREE_PAL = {
+    leaf:   { trunk: [74, 62, 46], c1: [50, 76, 44], c2: [72, 100, 54], c3: [102, 130, 66] },
+    pine:   { trunk: [58, 48, 36], c1: [38, 60, 42], c2: [52, 76, 48], c3: [72, 96, 56] },
+    blossom:{ trunk: [78, 62, 48], c1: [54, 80, 48], c2: [76, 104, 56], c3: [104, 132, 68],
+              bloom: [216, 156, 168], bloom2: [190, 118, 140] },
+    autumn: { trunk: [70, 56, 42], c1: [108, 78, 38], c2: [148, 106, 46], c3: [192, 142, 60] }
+  };
+  function propTree(ctx, x, baseY, h, palName) {
+    var pal = TREE_PAL[palName || 'leaf'] || TREE_PAL.leaf;
+    var lean = (trng() - 0.5) * 4;
     strokeInk(ctx, [
       [x, baseY],
-      [x + (trng() - 0.5) * 3, baseY - h * 0.45],
-      [x + (trng() - 0.5) * 4, baseY - h]
-    ], { width: 1.7, color: [72, 60, 44], alpha: 0.6, fly: false, layers: 2 });
+      [x + lean * 0.5, baseY - h * 0.45],
+      [x + lean, baseY - h * 0.86]
+    ], { width: 1.7, color: pal.trunk, alpha: 0.62, fly: false, layers: 2 });
+    /* 分枝 */
+    strokeInk(ctx, [
+      [x + lean * 0.3, baseY - h * 0.5], [x + lean * 0.3 + h * 0.12, baseY - h * 0.66]
+    ], { width: 1.0, color: pal.trunk, alpha: 0.42, fly: false, layers: 1 });
     var cy = baseY - h * 0.74, cr = h * 0.40;
-    dotCluster(ctx, x - cr * 0.32, cy - cr * 0.15, 11, [56, 76, 50], cr * 0.42);
-    dotCluster(ctx, x + cr * 0.36, cy + cr * 0.05, 9, [66, 90, 58], cr * 0.38);
-    dotCluster(ctx, x - cr * 0.02, cy - cr * 0.45, 9, [88, 112, 70], cr * 0.34);
+    /* 暗底冠 (左下) */
+    dotCluster(ctx, x - cr * 0.34 + lean * 0.3, cy + cr * 0.18, 12, pal.c1, cr * 0.44);
+    /* 主冠 */
+    dotCluster(ctx, x + lean * 0.7, cy - cr * 0.10, 11, pal.c2, cr * 0.40);
+    /* 高光 (右上, 受光面) */
+    dotCluster(ctx, x + cr * 0.30 + lean * 0.8, cy - cr * 0.42, 9, pal.c3, cr * 0.30);
+    /* 花色点缀 (花树/异色树) */
+    if (pal.bloom) {
+      dotCluster(ctx, x + lean * 0.5, cy - cr * 0.30, 7, pal.bloom, cr * 0.26);
+      dotCluster(ctx, x - cr * 0.20 + lean * 0.4, cy + cr * 0.05, 4, pal.bloom2, cr * 0.20);
+    }
   }
 
-  /* ---- 第 5 行: 山 0/1 · 雪 2/3 · 林 4..7 ---- */
+  /* ---- 第 5 行: 山 0/1 · 雪 2/3 · 林 4..7 (松/阔/花/秋 四种林相) ---- */
   function propMountain(ctx) {
-    propShadow(ctx, 64, 108, 38, 13);
-    drawPropPeak(ctx, 84, 104, 48, 56, [92, 86, 74], [152, 144, 128], {});
-    drawPropPeak(ctx, 48, 106, 66, 94, [58, 52, 44], [128, 120, 104], {});
-    wash(ctx, 60, 102, 26, [130, 122, 104], 0.15);
+    propShadow(ctx, 64, 108, 40, 13);
+    /* 远峰 (淡) + 主峰 (深): 前后层次
+       (山脚碎石点与山脚晕染已移除: 密排时连成黑点线穿帮) */
+    drawPropPeak(ctx, 46, 106, 64, 90, [70, 64, 54], [138, 132, 116], {});
+    drawPropPeak(ctx, 86, 104, 50, 60, [90, 84, 72], [156, 148, 130], {});
   }
   function propSnow(ctx) {
-    propShadow(ctx, 64, 108, 36, 12);
-    drawPropPeak(ctx, 86, 104, 44, 50, [118, 120, 122], [166, 168, 166], { snow: true });
-    drawPropPeak(ctx, 50, 106, 62, 92, [102, 104, 106], [148, 150, 148], { snow: true });
+    propShadow(ctx, 64, 108, 38, 12);
+    drawPropPeak(ctx, 88, 104, 46, 54, [112, 114, 118], [162, 164, 164], { snow: true });
+    drawPropPeak(ctx, 48, 106, 64, 94, [96, 98, 102], [146, 148, 148], { snow: true });
   }
   function propForest(v) {
     return function (ctx) {
       propShadow(ctx, 64, 108, 34, 11, 0.26);
-      if (v === 0) { propTree(ctx, 48, 104, 76); propTree(ctx, 78, 100, 56); }
-      else if (v === 1) { propTree(ctx, 40, 102, 58); propTree(ctx, 66, 106, 86); propTree(ctx, 88, 100, 44); }
-      else if (v === 2) { propTree(ctx, 64, 104, 84); propTree(ctx, 90, 100, 52); }
-      else { propTree(ctx, 34, 102, 50); propTree(ctx, 58, 106, 76); propTree(ctx, 84, 102, 62); }
+      /* 小而密的树丛: 树高 36~58, 每精灵 3~4 棵互相搭冠 (参考图密林感) */
+      if (v === 0) {                          // 阔叶混交
+        propTree(ctx, 44, 104, 52, 'leaf'); propTree(ctx, 72, 101, 42, 'leaf'); propTree(ctx, 90, 104, 34, 'leaf');
+      } else if (v === 1) {                   // 松林高耸
+        propTree(ctx, 60, 105, 58, 'pine'); propTree(ctx, 40, 102, 40, 'pine'); propTree(ctx, 82, 103, 36, 'pine');
+      } else if (v === 2) {                   // 花树点缀
+        propTree(ctx, 46, 104, 48, 'leaf'); propTree(ctx, 74, 102, 44, 'blossom'); propTree(ctx, 90, 105, 34, 'leaf');
+      } else {                                // 秋色点染
+        propTree(ctx, 50, 104, 50, 'leaf'); propTree(ctx, 78, 101, 40, 'autumn'); propTree(ctx, 92, 104, 34, 'leaf');
+      }
       wash(ctx, 64, 100, 26, [96, 116, 80], 0.14);
     };
   }
@@ -463,8 +582,9 @@
   }
   function propBush(ctx) {
     propShadow(ctx, 64, 108, 24, 8, 0.20);
-    dotCluster(ctx, 60, 96, 12, [74, 94, 66], 4.5);
-    dotCluster(ctx, 74, 100, 9, [92, 112, 76], 3.6);
+    dotCluster(ctx, 60, 96, 12, [70, 92, 62], 4.5);
+    dotCluster(ctx, 74, 100, 9, [88, 110, 72], 3.6);
+    dotCluster(ctx, 66, 92, 6, [106, 132, 76], 2.6);
     for (var i = 0; i < 5; i++) {
       var xx = 50 + trng() * 28;
       strokeInk(ctx, [[xx, 106], [xx + (trng() - 0.5) * 3, 96 - trng() * 6]],
@@ -489,13 +609,41 @@
     };
   }
 
+  /* ---- 第 7 行: 山 B 0/1 · 雪 B 2/3 (远山横岭构图, 打破壁纸感) ---- */
+  function propMountainB(ctx) {
+    propShadow(ctx, 64, 108, 42, 13);
+    /* 三峰横岭: 中高侧低, 走向相反 */
+    drawPropPeak(ctx, 34, 106, 44, 52, [76, 70, 60], [146, 140, 124], {});
+    drawPropPeak(ctx, 70, 105, 56, 84, [60, 54, 46], [130, 124, 108], {});
+    drawPropPeak(ctx, 102, 106, 38, 42, [84, 78, 66], [152, 146, 130], {});
+    for (var i = 0; i < 5; i++) {
+      ctx.fillStyle = rgba([104, 96, 82], 0.30 + trng() * 0.25);
+      ctx.beginPath();
+      ctx.arc(30 + trng() * 68, 102 + trng() * 5, 1.2 + trng() * 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  function propSnowB(ctx) {
+    propShadow(ctx, 64, 108, 40, 13);
+    drawPropPeak(ctx, 38, 106, 42, 50, [104, 106, 110], [154, 156, 156], { snow: true });
+    drawPropPeak(ctx, 74, 105, 54, 82, [90, 92, 96], [140, 142, 142], { snow: true });
+    drawPropPeak(ctx, 104, 106, 34, 40, [116, 118, 120], [164, 166, 166], { snow: true });
+    for (var i = 0; i < 4; i++) {
+      ctx.fillStyle = rgba([236, 238, 236], 0.40 + trng() * 0.25);
+      ctx.beginPath();
+      ctx.arc(34 + trng() * 60, 102 + trng() * 5, 1.0 + trng() * 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   /* ---------- 生成图集 ----------
    * 布局: 第 0~3 行 = 8 群系 × 4 变体 (列=群系, 行=变体)
    *       第 4 行   = 5 灵脉格底 (8金 9木 10水 11火 12土)
    *       第 5 行   = 立体精灵: 0/1 山 2/3 雪 4..7 林
-   *       第 6 行   = 立体精灵: 0 沙 1 草丛 2..6 灵脉峰 */
+   *       第 6 行   = 立体精灵: 0 沙 1 草丛 2..6 灵脉峰
+   *       第 7 行   = 立体精灵: 0/1 山B 2/3 雪B (56..59) */
   var VEIN_ROW = 4;
-  var ATLAS_ROWS = 7;
+  var ATLAS_ROWS = 8;
   function buildAtlas() {
     var cv = makeCanvas(PX * COLS, PX * ATLAS_ROWS);
     var ctx = cv.getContext('2d');
@@ -543,6 +691,16 @@
       ctx.scale(PX / TILE, PX / TILE);
       trng = NL.mulberry32(98891 + c6 * 97);
       propRow2[c6](ctx);
+      ctx.restore();
+    }
+    /* 第 7 行: 山B/雪B 精灵 (56/57 山, 58/59 雪) */
+    var propRow3 = [propMountainB, propMountainB, propSnowB, propSnowB];
+    for (var c7 = 0; c7 < propRow3.length; c7++) {
+      ctx.save();
+      ctx.translate(c7 * PX, 7 * PX);
+      ctx.scale(PX / TILE, PX / TILE);
+      trng = NL.mulberry32(108881 + c7 * 83);
+      propRow3[c7](ctx);
       ctx.restore();
     }
     return cv;

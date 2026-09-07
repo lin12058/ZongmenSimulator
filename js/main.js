@@ -253,14 +253,78 @@
     var i0 = Math.floor(qmin / M) - 1, i1 = Math.floor(qmax / M) + 1;
     var j0 = Math.floor(rmin / M) - 1, j1 = Math.floor(rmax / M) + 1;
 
-    /* 道路: 墨色虚线 (世界坐标等比; 远景不画, 避免 A* 批量首算卡帧且低倍下无意义) */
-    if (z >= 0.8) {
-    var drawn = {};
-    ctx.strokeStyle = 'rgba(58,50,40,0.30)';
-    ctx.lineWidth = 2.4;
+    /* 海面波浪: 静态白描浪线 (参考图风, hash 确定性 → 跨帧跨会话一致, 无动画, 无 LOD) */
+    {
+    var wq0 = MG.pxToTile(b.x0 - 24, b.y0 - 24), wq1 = MG.pxToTile(b.x1 + 24, b.y1 + 24),
+        wq2 = MG.pxToTile(b.x0 - 24, b.y1 + 24), wq3 = MG.pxToTile(b.x1 + 24, b.y0 - 24);
+    var wqmin = Math.min(wq0.q, wq1.q, wq2.q, wq3.q) - 1, wqmax = Math.max(wq0.q, wq1.q, wq2.q, wq3.q) + 1;
+    var wrmin = Math.min(wq0.r, wq1.r, wq2.r, wq3.r) - 1, wrmax = Math.max(wq0.r, wq1.r, wq2.r, wq3.r) + 1;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.setLineDash(z > 2.4 ? [] : [10, 8]);   // 高倍改实线: 虚线描边开销随 zoom² 增长
+    for (var wq = wqmin; wq <= wqmax; wq++) {
+      for (var wr = wrmin; wr <= wrmax; wr++) {
+        var wf = MG.fields(wq, wr);
+        if (wf.biome > 1) continue;
+        var hh = wf.hash;
+        var fr1 = (hh * 913.7) % 1, fr2 = (hh * 517.3) % 1, fr3 = (hh * 271.1) % 1;
+        /* 近岸浅海: 白沫弧 + 沫点 (邻格有陆地) */
+        var nearLand = false;
+        if (wf.biome === 1) {
+          for (var wn = 0; wn < 6; wn++) {
+            if (MG.fields(wq + MG.NEIGH_SLOTS[wn][0], wr + MG.NEIGH_SLOTS[wn][1]).biome > 1) { nearLand = true; break; }
+          }
+        }
+        if (nearLand) {
+          var mcx = wf.x + (fr1 - 0.5) * MG.HEX_W * 0.8;
+          var mcy = wf.y + (fr2 - 0.5) * MG.HEX_R * 0.8;
+          var mr = MG.HEX_W * (0.20 + fr3 * 0.15);
+          /* 近岸沫弧: 细笔淡墨 (水墨风: 不用高光白, 用偏灰墨绿) */
+          ctx.strokeStyle = 'rgba(126,152,150,' + (0.22 + fr2 * 0.10).toFixed(2) + ')';
+          ctx.lineWidth = 0.85;
+          ctx.beginPath();
+          ctx.arc(mcx, mcy, mr, Math.PI * 1.02 + fr1 * 0.8, Math.PI * 1.72 + fr1 * 0.8);
+          ctx.stroke();
+          ctx.fillStyle = 'rgba(226,236,232,' + (0.20 + fr3 * 0.14).toFixed(2) + ')';
+          ctx.beginPath(); ctx.arc(mcx + mr * 1.25, mcy + 1.8, 0.8, 0, Math.PI * 2); ctx.fill();
+          continue;
+        }
+        /* 开阔海面: 水墨浪线 — 细笔淡墨, 一波三折, 尾端回锋短笔 */
+        if (hh >= (wf.biome === 0 ? 0.30 : 0.46)) continue;
+        var wx0 = wf.x + (fr1 - 0.5) * MG.HEX_W * 1.2;
+        var wy0 = wf.y + (fr2 - 0.5) * MG.HEX_R * 1.2;
+        var wl = MG.HEX_W * (1.1 + fr3 * 1.5);
+        var wtilt = (fr1 - 0.5) * 0.25;
+        ctx.strokeStyle = 'rgba(64,94,104,' + (0.16 + fr2 * 0.10).toFixed(2) + ')';
+        ctx.lineWidth = 0.75;
+        ctx.beginPath();
+        ctx.moveTo(wx0 - wl * 0.5, wy0 + wtilt * wl * 0.5);
+        ctx.quadraticCurveTo(wx0 - wl * 0.1, wy0 - wl * 0.13, wx0 + wl * 0.12, wy0 - wl * 0.02);
+        ctx.quadraticCurveTo(wx0 + wl * 0.32, wy0 + wl * 0.06, wx0 + wl * 0.5, wy0 + wtilt * wl * 0.3);
+        ctx.stroke();
+        /* 回锋短笔 (更淡更细, 错位半笔) */
+        if (fr3 > 0.55) {
+          ctx.strokeStyle = 'rgba(70,100,110,' + (0.10 + fr2 * 0.06).toFixed(2) + ')';
+          ctx.lineWidth = 0.6;
+          ctx.beginPath();
+          ctx.moveTo(wx0 - wl * 0.16, wy0 + 2.4);
+          ctx.quadraticCurveTo(wx0 + wl * 0.06, wy0 + 1.2, wx0 + wl * 0.26, wy0 + 2.6);
+          ctx.stroke();
+        }
+      }
+    }
+    } /* 浪线层结束 (无 LOD) */
+
+    /* 道路: GL 贴地小径 (三角面画进底图 FBO → 树等立体精灵渲染其上, 树压路;
+       无 LOD, 全缩放绘制; 无路缘、宽窄随路段起伏) */
+    var haloV = [], coreV = [];
+    function pushSeg(arr, ax, ay, bx, by, w) {
+      var dx = bx - ax, dy = by - ay;
+      var len = Math.sqrt(dx * dx + dy * dy) || 1;
+      var nx = -dy / len * w * 0.5, ny = dx / len * w * 0.5;
+      arr.push(ax - nx, ay - ny, bx + nx, by + ny, ax + nx, ay + ny,
+               ax - nx, ay - ny, bx - nx, by - ny, bx + nx, by + ny);
+    }
+    var drawn = {};
     for (var i = i0; i <= i1; i++) {
       for (var j = j0; j <= j1; j++) {
         var roads = MG.roadsNear(i, j, 0);     // 绘制帧纯读缓存, A* 由主循环预热
@@ -270,20 +334,24 @@
           drawn[road.key] = true;
           if (road.x1 < b.x0 - 200 || road.x0 > b.x1 + 200 || road.y1 < b.y0 - 200 || road.y0 > b.y1 + 200) continue;
           var pts = road.pts;
-          ctx.beginPath();
-          for (var p2 = 0; p2 < pts.length; p2++) {
-            if (p2 === 0) ctx.moveTo(pts[p2].x, pts[p2].y); else ctx.lineTo(pts[p2].x, pts[p2].y);
+          var rh = 0;
+          for (var kc = 0; kc < road.key.length; kc++) rh = (rh * 31 + road.key.charCodeAt(kc)) % 997;
+          var wBase = 1.4 + (rh / 997) * 1.5;
+          for (var p2 = 0; p2 < pts.length - 1; p2++) {
+            var segH = Math.sin(p2 * 12.9898 + rh * 0.7853) * 43758.5453;
+            var wob = segH - Math.floor(segH);            // 0..1 段宽噪声
+            var wm = wBase * (0.60 + 0.8 * wob);
+            pushSeg(haloV, pts[p2].x, pts[p2].y, pts[p2 + 1].x, pts[p2 + 1].y, wm * 2.4);
+            pushSeg(coreV, pts[p2].x, pts[p2].y, pts[p2 + 1].x, pts[p2 + 1].y, Math.max(1.0, wm));
           }
-          ctx.stroke();
         }
       }
     }
-    ctx.setLineDash([]);
-    } /* z >= 0.8 道路层结束 */
+    renderer.setRoads(new Float32Array(haloV), new Float32Array(coreV));
 
     /* 灵脉: 七星花 + 群落灵气晕圈 (世界坐标等比, 设定 §三/§七/§九) */
     var veinLabels = [];
-    if (showVeins && z >= 0.55) {
+    if (showVeins) {
       var CL = MG.CFG.COMM_CL;
       var ci0 = Math.floor(qmin / CL) - 1, ci1 = Math.floor(qmax / CL) + 1;
       var cj0 = Math.floor(rmin / CL) - 1, cj1 = Math.floor(rmax / CL) + 1;
@@ -660,8 +728,8 @@
       if (Math.abs(cam.ty - cam.y) < 0.1) cam.y = cam.ty;
       clampCam();
 
-      /* 道路渐进预热: 绘制帧只读缓存, 新 A* 在主循环逐帧补 (每帧至多 1 条) */
-      if (cam.zoom >= 0.8) {
+      /* 道路渐进预热: 绘制帧只读缓存, 新 A* 在主循环逐帧补 (每帧至多 1 条, 无 LOD) */
+      {
         var wct = MG.pxToTile(cam.x, cam.y);
         MG.warmRoadsStep(wct.q, wct.r);
       }
@@ -731,8 +799,19 @@
     img.src = 'assets/textures/paper.png';
 
     onResize();
-    var urlSeed = new URLSearchParams(location.search).get('seed');
+    /* URL 定点预览参数: seed / qt,rt (格坐标定位) / zm (缩放) / nofade (跳过渐入, 供 headless 截图) */
+    var urlParams = new URLSearchParams(location.search);
+    var urlSeed = urlParams.get('seed');
     regenerate(urlSeed || String(Date.now() % 100000000));
+    if (urlParams.get('qt') != null) {
+      var wp0 = MG.tileToWorld(+urlParams.get('qt'), +(urlParams.get('rt') || 0));
+      cam.tx = cam.x = wp0.x;
+      cam.ty = cam.y = wp0.y;
+    }
+    if (urlParams.get('zm') != null) {
+      cam.tzoom = cam.zoom = clamp(parseFloat(urlParams.get('zm')), minZoom, maxZoom);
+    }
+    renderer.noFade = urlParams.get('nofade') === '1';
     bindInput();
 
     /* 调试钩子 */

@@ -14,8 +14,8 @@
   var BIOME = { DEEP: 0, OCEAN: 1, BEACH: 2, GRASS: 3, FOREST: 4, DESERT: 5, MOUNTAIN: 6, SNOW: 7 };
 
   var BIOME_META = [
-    { key: 'deep',     name: '深海', color: '#93a4ac', water: true },
-    { key: 'ocean',    name: '浅海', color: '#b2c1c3', water: true },
+    { key: 'deep',     name: '深海', color: '#6d9aab', water: true },
+    { key: 'ocean',    name: '浅海', color: '#9dc2c9', water: true },
     { key: 'beach',    name: '沙岸', color: '#e0d3ae' },
     { key: 'grass',    name: '草地', color: '#b4c3a0' },
     { key: 'forest',   name: '林地', color: '#89a27f' },
@@ -290,15 +290,19 @@
   /* ---------- 立体精灵分配 (超出格子的山/树/灵脉峰) ----------
    * 精灵索引 = 图集行*8+列:
    *   第 5 行: 40/41 山地·两变体, 42/43 雪峰·两变体, 44..47 林地·四变体
-   *   第 6 行: 48 沙丘岩石, 49 草丛, 50..54 金木水火土灵脉峰 */
+   *   第 6 行: 48 沙丘岩石, 49 草丛, 50..54 金木水火土灵脉峰
+   *   第 7 行: 56/57 山地·横岭变体, 58/59 雪峰·横岭变体 */
   function propSpriteFor(f) {
     var b = f.disp != null ? f.disp : f.biome;
     if (b >= 8) return b + 42;                          // 灵脉峰 (50+元素)
-    if (b === 6) return 40 + (f.hash * 2 | 0);
-    if (b === 7) return 42 + (f.hash * 2 | 0);
+    var v2 = (f.hash * 2) | 0;                          // 0/1 成对变体
+    if (b === 6) {
+      return (f.hash * 913.7) % 1 < 0.5 ? 40 + v2 : 56 + v2;   // 山峰全量渲染 (不按海拔取消)
+    }
+    if (b === 7) return (f.hash * 721.3) % 1 < 0.5 ? 42 + v2 : 58 + v2;
     if (b === 4) {
       var h2 = (f.hash * 913.7) % 1;
-      return h2 < 0.55 ? 44 + (h2 * 7.27 | 0) : -1;
+      return h2 < 0.75 ? 44 + (h2 * 5.34 | 0) : -1;
     }
     if (b === 5) return (f.hash * 721.3) % 1 < 0.30 ? 48 : -1;
     if (b === 3) return (f.hash * 541.7) % 1 < 0.10 ? 49 : -1;
@@ -312,7 +316,7 @@
     var cc = chunkCenter(ca, cb);
     var R = CHUNK_SCAN;
     var centers = [], tiles = [], elevs = [], hashes = [], neigh = [];
-    var propCenters = [], propSprites = [], propHashes = [];
+    var propCenters = [], propSprites = [], propHashes = [], propElevs = [];
     var bbox = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
     for (var dq = -R; dq <= R; dq++) {
       for (var dr = -R; dr <= R; dr++) {
@@ -337,6 +341,7 @@
           propCenters.push(f.x, f.y);
           propSprites.push(sp);
           propHashes.push(f.hash);
+          propElevs.push(f.e);       // 海拔驱动精灵高度 (着色器按 noise 缩放)
         }
         if (f.x < bbox.x0) bbox.x0 = f.x;
         if (f.x > bbox.x1) bbox.x1 = f.x;
@@ -355,7 +360,8 @@
         neigh: new Float32Array(neigh),
         propCenters: new Float32Array(propCenters),
         propSprites: new Float32Array(propSprites),
-        propHashes: new Float32Array(propHashes)
+        propHashes: new Float32Array(propHashes),
+        propElevs: new Float32Array(propElevs)
       },
       bbox: bbox
     };
