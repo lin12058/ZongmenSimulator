@@ -8,3 +8,6 @@ assets/snap_*.png
 # 系统杂物
 Thumbs.db
 Desktop.ini
+
+# 调试截图 (agent-browser 临时产物)
+.workbuddy/shot*.jpg

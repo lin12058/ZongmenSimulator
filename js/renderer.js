@@ -63,9 +63,10 @@
     '  float variant = vTile - biome*4.0;',
     '  float pad = 0.045;',
     '  vec2 uvL = vUv*(1.0-2.0*pad)+pad;',
-    /* 图集寻址: 群系 0..7 = (列=群系, 行=变体); 灵脉格 8..12 = 第 4 行 */
+    /* 图集寻址: 群系 0..7 = (列=群系, 行=变体); 灵脉格 8..12 = 第 4 行
+       图集共 7 行 (第 5/6 行为立体精灵), 必须除以 7.0, 否则灵脉行采样越界 → 黑格 */
     '  vec2 cell = biome < 7.5 ? vec2(biome, variant) : vec2(biome - 8.0, 4.0);',
-    '  vec2 uv = (cell + uvL)/vec2(8.0, 5.0);',
+    '  vec2 uv = (cell + uvL)/vec2(8.0, 7.0);',
     '  vec3 base = texture(uAtlas, uv).rgb;',
     // —— 邻居晕染 (灵脉格跳过, 保持灵气贴图完整) ——
     '  if (biome < 7.5) {',
@@ -99,6 +100,62 @@
     '}'
   ].join('\n');
 
+  /* ---- 立体精灵 (超出格子的山/树/灵脉峰, Battle Brothers 式压格) ---- */
+  var PROP_VS = [
+    '#version 300 es',
+    'layout(location=0) in vec2 aPos;',        // [-1..1] 方块
+    'layout(location=1) in vec2 iCenter;',
+    'layout(location=2) in float iSprite;',    // row*8+col
+    'layout(location=3) in float iHash;',
+    'uniform vec2 uRes;',
+    'uniform vec2 uCam;',
+    'uniform float uZoom;',
+    'uniform float uR;',
+    'out vec2 vUv;',
+    'out float vSprite;',
+    'out float vHash;',
+    'void main(){',
+    '  float h2 = fract(iHash*13.73);',
+    '  float W = 3.4641016*uR*(1.55+0.65*h2);',          // ≈ 六边宽 × 1.55~2.2 (压邻格)
+    '  float H = uR*(3.3+1.2*fract(iHash*5.17));',       // 高 ≈ 3.3~4.5 倍半径
+    '  float jx = (fract(iHash*3.77)-0.5)*uR*1.8;',
+    '  float flip = step(0.5, fract(iHash*7.31));',
+    '  float u0 = aPos.x*0.5+0.5;',
+    '  float u = mix(u0, 1.0-u0, flip);',
+    '  float vv = 1.0-(aPos.y*0.5+0.5);',                // 0=精灵顶部
+    '  float bottom = iCenter.y + uR*0.95;',             // 底部压向下一格 → 立体堆叠
+    '  vec2 world = vec2(iCenter.x + jx + aPos.x*W*0.5, bottom - (1.0-vv)*H);',
+    '  vec2 screen = (world - uCam)*uZoom + uRes*0.5;',
+    '  vec2 clip = screen/uRes*2.0 - 1.0;',
+    '  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);',
+    '  vUv = vec2(u, vv); vSprite = iSprite; vHash = iHash;',
+    '}'
+  ].join('\n');
+
+  var PROP_FS = [
+    '#version 300 es',
+    'precision mediump float;',
+    'in vec2 vUv;',
+    'in float vSprite;',
+    'in float vHash;',
+    'uniform sampler2D uAtlas;',
+    'uniform float uRows;',
+    'uniform float uFade;',
+    'uniform vec3 uPaperTint;',
+    'out vec4 fragColor;',
+    'void main(){',
+    '  float col = mod(vSprite, 8.0);',
+    '  float row = floor(vSprite/8.0 + 0.001);',   // 精确取整: +0.5 会把 44~47 错算到第 6 行
+    '  vec2 uvL = vUv*(1.0-0.05)+0.025;',
+    '  vec2 uv = (vec2(col, row)+uvL)/vec2(8.0, uRows);',
+    '  vec4 tex = texture(uAtlas, uv);',
+    '  if (tex.a < 0.10) discard;',
+    '  vec3 rgb = tex.rgb * (0.90 + 0.20*fract(vHash*3.17));',
+    '  rgb = mix(uPaperTint, rgb, uFade);',
+    '  fragColor = vec4(rgb, tex.a*uFade);',
+    '}'
+  ].join('\n');
+
   var POST_VS = [
     '#version 300 es',
     'layout(location=0) in vec2 aPos;',
@@ -111,6 +168,7 @@
     'precision highp float;',
     'in vec2 vUv;',
     'uniform sampler2D uScene;',
+    'uniform sampler2D uProps;',   // 立体精灵层 (rgba)
     'uniform sampler2D uPaper;',
     'uniform sampler2D uNoise;',
     'uniform vec2 uRes;',
@@ -129,10 +187,18 @@
     '  vec4 sc = texture(uScene, uv);',
     '  vec3 col = sc.rgb;',
     '  float id = floor(sc.a*16.0+0.5)-1.0;',
-    // —— 边缘检测 → 墨线 (等比: 采样半径随缩放) ——
-    '  float e1 = 0.0; float coast = 0.0; float coast2 = 0.0;',
     '  bool iWater = id < 1.5;',
+    // —— 晕染外渗 (等比, 只作用底图, 精灵保持清晰前景) ——
     '  float pxw = max(uZoom, 0.5) * 0.85;',
+    '  vec2 ob = uTexel * pxw * vec2(1.7, 0.9);',
+    '  vec3 blur = ( texture(uScene, uv+ob).rgb + texture(uScene, uv-ob).rgb',
+    '              + texture(uScene, uv+ob.yx).rgb + texture(uScene, uv-ob.yx).rgb )*0.25;',
+    '  col = mix(col, blur, 0.30);',
+    // —— 立体精灵合成 ——
+    '  vec4 pr = texture(uProps, uv);',
+    '  col = mix(col, pr.rgb, pr.a);',
+    // —— 底图边缘检测 → 墨线 (等比: 采样半径随缩放) ——
+    '  float e1 = 0.0; float coast = 0.0; float coast2 = 0.0;',
     '  vec2 o0 = uTexel * pxw; vec2 o1 = vec2(0.0, uTexel.y) * pxw;',
     '  for (int i=0;i<4;i++){',
     '    vec2 o = (i==0)? o0 : (i==1)? -o0 : (i==2)? o1 : -o1;',
@@ -150,13 +216,21 @@
     '  float fine = texture(uNoise, world*0.06).g;',
     '  float inkLine = e1 * (0.30 + 0.70*smoothstep(0.22, 0.55, br));',
     '  float coastLine = max(coast, coast2*0.22) * (0.45+0.55*smoothstep(0.18, 0.5, br));',
-    // —— 晕染外渗 (等比) ——
-    '  vec2 ob = uTexel * pxw * vec2(1.7, 0.9);',
-    '  vec3 blur = ( texture(uScene, uv+ob).rgb + texture(uScene, uv-ob).rgb',
-    '              + texture(uScene, uv+ob.yx).rgb + texture(uScene, uv-ob.yx).rgb )*0.25;',
-    '  col = mix(col, blur, 0.30);',
     '  vec3 inkCol = vec3(0.15, 0.13, 0.115);',
     '  col = mix(col, inkCol, clamp(inkLine*0.55 + coastLine*0.38, 0.0, 0.8));',
+    // —— 精灵轮廓墨线 (剪影梯度 → 枯笔勾边) ——
+    '  float pa = pr.a;',
+    '  float pe = 0.0;',
+    '  for (int i=0;i<4;i++){',
+    '    vec2 o = (i==0)? o0 : (i==1)? -o0 : (i==2)? o1 : -o1;',
+    '    pe = max(pe, abs(texture(uProps, uv+o).a - pa));',
+    '  }',
+    '  float propInk = pe * (0.28 + 0.55*smoothstep(0.22, 0.55, br));',
+    '  col = mix(col, inkCol, clamp(propInk, 0.0, 0.5));',
+    // —— 精灵接地投影 (剪影下移采样, 只落在本体之外、陆地之上) ——
+    '  float sh = texture(uProps, uv + vec2(0.0, uTexel.y*pxw*3.2)).a;',
+    '  sh *= (1.0 - pa) * step(1.5, id);',
+    '  col *= 1.0 - 0.15*sh;',
     // —— 宣纸正片叠底 + 纤维 ——
     '  vec3 paper = texture(uPaper, world/uPaperScale).rgb;',
     '  col *= mix(vec3(1.0), paper*1.12, 0.48);',
@@ -174,6 +248,7 @@
     this.canvas = canvas;
 
     this.progHex = this._build(HEX_VS, HEX_FS);
+    this.progProp = this._build(PROP_VS, PROP_FS);
     this.progPost = this._build(POST_VS, POST_FS);
 
     var quad = new Float32Array([
@@ -196,6 +271,8 @@
     this.paperScale = 512;
 
     this.fbo = null; this.fboTex = null; this.fboW = 0; this.fboH = 0;
+    this.propFbo = null; this.propTex = null;   // 立体精灵层 (单独 FBO, 不污染底图 biome alpha)
+    this.atlasRows = 7;
     this.dpr = 1;               // 设备像素比: 世界坐标换算一律用 CSS 像素 (与 main.js 相机一致)
 
     gl.disable(gl.DEPTH_TEST);
@@ -238,9 +315,11 @@
   InkRenderer.prototype.setTextures = function (atlas, paper, noise) {
     var gl = this.gl;
     if (this.texAtlas) gl.deleteTexture(this.texAtlas);
+    if (this.texAtlasLin) gl.deleteTexture(this.texAtlasLin);
     if (this.texPaper) gl.deleteTexture(this.texPaper);
     if (this.texNoise) gl.deleteTexture(this.texNoise);
     this.texAtlas = this._makeTexture(atlas, gl.NEAREST);
+    this.texAtlasLin = this._makeTexture(atlas, gl.LINEAR);   // 精灵用线性过滤, 放大更柔
     this.texPaper = this._makeTexture(paper, gl.LINEAR);
     this.texNoise = this._makeTexture(noise, gl.LINEAR);
   };
@@ -249,7 +328,7 @@
     this.avgColors = arr;
   };
 
-  /* 上传一个区块的实例数据, 建独立 VAO */
+  /* 上传一个区块的实例数据, 建独立 VAO (底图 + 立体精灵两套) */
   InkRenderer.prototype.uploadChunk = function (key, data) {
     var gl = this.gl;
     this.dropChunk(key);
@@ -274,7 +353,32 @@
       bufs.push(buf);
     }
     gl.bindVertexArray(null);
-    this.chunks.set(key, { vao: vao, bufs: bufs, count: data.tiles.length, born: performance.now() / 1000 });
+
+    /* 立体精灵实例 (可为空) */
+    var propVao = null, propBufs = [], propCount = 0;
+    if (data.propCenters && data.propCenters.length) {
+      propVao = gl.createVertexArray();
+      gl.bindVertexArray(propVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      var pd = [data.propCenters, data.propSprites, data.propHashes];
+      var pl = [1, 2, 3];
+      for (k = 0; k < 3; k++) {
+        var pb = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, pb);
+        gl.bufferData(gl.ARRAY_BUFFER, pd[k], gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(pl[k]);
+        gl.vertexAttribPointer(pl[k], pl[k] === 1 ? 2 : 1, gl.FLOAT, false, 0, 0);
+        gl.vertexAttribDivisor(pl[k], 1);
+        propBufs.push(pb);
+      }
+      gl.bindVertexArray(null);
+      propCount = data.propSprites.length;
+    }
+    this.chunks.set(key, { vao: vao, bufs: bufs, count: data.tiles.length,
+                           propVao: propVao, propBufs: propBufs, propCount: propCount,
+                           born: performance.now() / 1000 });
   };
 
   InkRenderer.prototype.dropChunk = function (key) {
@@ -283,6 +387,10 @@
     if (!c) return;
     gl.deleteVertexArray(c.vao);
     for (var k = 0; k < c.bufs.length; k++) gl.deleteBuffer(c.bufs[k]);
+    if (c.propVao) {
+      gl.deleteVertexArray(c.propVao);
+      for (k = 0; k < c.propBufs.length; k++) gl.deleteBuffer(c.propBufs[k]);
+    }
     this.chunks.delete(key);
   };
 
@@ -305,6 +413,21 @@
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.fboW = w;
     this.fboH = h;
+
+    /* 精灵层 FBO */
+    if (this.propTex) gl.deleteTexture(this.propTex);
+    if (this.propFbo) gl.deleteFramebuffer(this.propFbo);
+    this.propTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.propTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.propFbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.propFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.propTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   };
 
   InkRenderer.prototype.render = function (cam, timeSec) {
@@ -368,6 +491,51 @@
     }
     gl.bindVertexArray(null);
 
+    /* ---- Pass1.5: 立体精灵 → 独立 FBO (alpha 混合, y 序压格) ---- */
+    if (!this._uProp) {
+      this._uProp = {
+        res: gl.getUniformLocation(this.progProp, 'uRes'),
+        cam: gl.getUniformLocation(this.progProp, 'uCam'),
+        zoom: gl.getUniformLocation(this.progProp, 'uZoom'),
+        r: gl.getUniformLocation(this.progProp, 'uR'),
+        rows: gl.getUniformLocation(this.progProp, 'uRows'),
+        fade: gl.getUniformLocation(this.progProp, 'uFade'),
+        tint: gl.getUniformLocation(this.progProp, 'uPaperTint'),
+        atlas: gl.getUniformLocation(this.progProp, 'uAtlas')
+      };
+    }
+    var up = this._uProp;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.propFbo);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(this.progProp);
+    gl.uniform2f(up.res, w / this.dpr, h / this.dpr);
+    gl.uniform2f(up.cam, cam.x, cam.y);
+    gl.uniform1f(up.zoom, cam.zoom);
+    gl.uniform1f(up.r, this.hexR);
+    gl.uniform1f(up.rows, this.atlasRows);
+    gl.uniform3fv(up.tint, this.paperTint);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texAtlasLin);
+    gl.uniform1i(up.atlas, 0);
+    it = this.chunks.values();
+    while ((node = it.next())) {
+      if (node.done) break;
+      var cp = node.value;
+      if (!cp.propCount) continue;
+      var ageP = timeSec - cp.born;
+      var fadeP = Math.min(1, ageP / 0.6);
+      fadeP = fadeP * fadeP * (3 - 2 * fadeP);
+      gl.uniform1f(up.fade, fadeP);
+      gl.bindVertexArray(cp.propVao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, cp.propCount);
+    }
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+
     /* ---- Pass2: 水墨后处理 → 屏幕 ---- */
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
@@ -379,6 +547,7 @@
       zoom: gl.getUniformLocation(this.progPost, 'uZoom'),
       paperScale: gl.getUniformLocation(this.progPost, 'uPaperScale'),
       scene: gl.getUniformLocation(this.progPost, 'uScene'),
+      props: gl.getUniformLocation(this.progPost, 'uProps'),
       paper: gl.getUniformLocation(this.progPost, 'uPaper'),
       noise: gl.getUniformLocation(this.progPost, 'uNoise')
     });
@@ -388,9 +557,12 @@
     gl.bindTexture(gl.TEXTURE_2D, this.texPaper);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.texNoise);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.propTex);
     gl.uniform1i(p.scene, 0);
     gl.uniform1i(p.paper, 1);
     gl.uniform1i(p.noise, 2);
+    gl.uniform1i(p.props, 3);
     gl.uniform2f(p.res, w / this.dpr, h / this.dpr);
     gl.uniform2f(p.texel, 1 / w, 1 / h);
     gl.uniform2f(p.cam, cam.x, cam.y);

@@ -287,6 +287,24 @@
     return { ca: cq / S, cb: cr / S, q: cq, r: cr };
   }
 
+  /* ---------- 立体精灵分配 (超出格子的山/树/灵脉峰) ----------
+   * 精灵索引 = 图集行*8+列:
+   *   第 5 行: 40/41 山地·两变体, 42/43 雪峰·两变体, 44..47 林地·四变体
+   *   第 6 行: 48 沙丘岩石, 49 草丛, 50..54 金木水火土灵脉峰 */
+  function propSpriteFor(f) {
+    var b = f.disp != null ? f.disp : f.biome;
+    if (b >= 8) return b + 42;                          // 灵脉峰 (50+元素)
+    if (b === 6) return 40 + (f.hash * 2 | 0);
+    if (b === 7) return 42 + (f.hash * 2 | 0);
+    if (b === 4) {
+      var h2 = (f.hash * 913.7) % 1;
+      return h2 < 0.55 ? 44 + (h2 * 7.27 | 0) : -1;
+    }
+    if (b === 5) return (f.hash * 721.3) % 1 < 0.30 ? 48 : -1;
+    if (b === 3) return (f.hash * 541.7) % 1 < 0.10 ? 49 : -1;
+    return -1;
+  }
+
   /* 构建一个区块的实例数据 (供渲染器上传)
      关键: 四候选最近中心虽保证归属唯一, 但胞腔在斜向可达 14 格,
      扫描半径必须 >= CHUNK_SCAN, 否则区块间出现楔形空洞 */
@@ -294,6 +312,7 @@
     var cc = chunkCenter(ca, cb);
     var R = CHUNK_SCAN;
     var centers = [], tiles = [], elevs = [], hashes = [], neigh = [];
+    var propCenters = [], propSprites = [], propHashes = [];
     var bbox = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
     for (var dq = -R; dq <= R; dq++) {
       for (var dr = -R; dr <= R; dr++) {
@@ -312,6 +331,13 @@
           packed += Math.min(nf.biome, 7) * Math.pow(8, k);
         }
         neigh.push(packed);
+        /* 立体精灵: r 外层循环递增 → 天然 y 升序, 画序即遮挡序 */
+        var sp = propSpriteFor(f);
+        if (sp >= 0) {
+          propCenters.push(f.x, f.y);
+          propSprites.push(sp);
+          propHashes.push(f.hash);
+        }
         if (f.x < bbox.x0) bbox.x0 = f.x;
         if (f.x > bbox.x1) bbox.x1 = f.x;
         if (f.y < bbox.y0) bbox.y0 = f.y;
@@ -326,7 +352,10 @@
         tiles: new Float32Array(tiles),
         elevs: new Float32Array(elevs),
         hashes: new Float32Array(hashes),
-        neigh: new Float32Array(neigh)
+        neigh: new Float32Array(neigh),
+        propCenters: new Float32Array(propCenters),
+        propSprites: new Float32Array(propSprites),
+        propHashes: new Float32Array(propHashes)
       },
       bbox: bbox
     };
