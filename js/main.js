@@ -450,18 +450,6 @@
     hexHi(hoverTile, 0.7, false);
     hexHi(selectedTile, 0.95, true);
 
-    /* 出生点印章 (世界锚定) */
-    ctx.save();
-    ctx.translate(150, 90);
-    ctx.fillStyle = 'rgba(166,58,44,0.85)';
-    ctx.fillRect(0, 0, 30, 30);
-    ctx.fillStyle = 'rgba(240,232,214,0.95)';
-    ctx.font = '15px "KaiTi","STKaiti",serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('山', 15, 12.5);
-    ctx.fillText('河', 15, 27);
-    ctx.restore();
-
     /* ---- 屏幕坐标系 ---- */
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     var vw = els.app.clientWidth, vh = els.app.clientHeight;
@@ -639,6 +627,9 @@
     }
     rows.push('<div class="row"><span class="k">地界</span><span class="v">' + ri.name + '</span></div>');
     rows.push('<div class="row"><span class="k">地貌</span><span class="v">' + MG.BIOME_META[f.biome].name + '</span></div>');
+    rows.push('<div class="row"><span class="k">位次</span><span class="v">' +
+      (tile.q < 0 ? '西 ' + (-tile.q) : '东 ' + tile.q) + ' · ' +
+      (tile.r < 0 ? '北 ' + (-tile.r) : '南 ' + tile.r) + '</span></div>');
     if (f.vein) {
       rows.push('<div class="sep"></div>');
       rows.push('<div class="row"><span class="k">灵脉</span><span class="v big">' + f.vein.name + '</span></div>');
