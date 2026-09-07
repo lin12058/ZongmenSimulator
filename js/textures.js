@@ -528,14 +528,13 @@
 
   /* ---- 第 5 行: 山 0/1 · 雪 2/3 · 林 4..7 (松/阔/花/秋 四种林相) ---- */
   function propMountain(ctx) {
-    propShadow(ctx, 64, 108, 40, 13);
+    /* (接地投影椭圆已移除: 密排缩小时三圆连成黑线穿帮) */
     /* 远峰 (淡) + 主峰 (深): 前后层次
        (山脚碎石点与山脚晕染已移除: 密排时连成黑点线穿帮) */
     drawPropPeak(ctx, 46, 106, 64, 90, [70, 64, 54], [138, 132, 116], {});
     drawPropPeak(ctx, 86, 104, 50, 60, [90, 84, 72], [156, 148, 130], {});
   }
   function propSnow(ctx) {
-    propShadow(ctx, 64, 108, 38, 12);
     drawPropPeak(ctx, 88, 104, 46, 54, [112, 114, 118], [162, 164, 164], { snow: true });
     drawPropPeak(ctx, 48, 106, 64, 94, [96, 98, 102], [146, 148, 148], { snow: true });
   }
@@ -611,29 +610,16 @@
 
   /* ---- 第 7 行: 山 B 0/1 · 雪 B 2/3 (远山横岭构图, 打破壁纸感) ---- */
   function propMountainB(ctx) {
-    propShadow(ctx, 64, 108, 42, 13);
+    /* (接地投影椭圆与碎石点已移除: 密排缩小时连成黑线穿帮) */
     /* 三峰横岭: 中高侧低, 走向相反 */
     drawPropPeak(ctx, 34, 106, 44, 52, [76, 70, 60], [146, 140, 124], {});
     drawPropPeak(ctx, 70, 105, 56, 84, [60, 54, 46], [130, 124, 108], {});
     drawPropPeak(ctx, 102, 106, 38, 42, [84, 78, 66], [152, 146, 130], {});
-    for (var i = 0; i < 5; i++) {
-      ctx.fillStyle = rgba([104, 96, 82], 0.30 + trng() * 0.25);
-      ctx.beginPath();
-      ctx.arc(30 + trng() * 68, 102 + trng() * 5, 1.2 + trng() * 1.8, 0, Math.PI * 2);
-      ctx.fill();
-    }
   }
   function propSnowB(ctx) {
-    propShadow(ctx, 64, 108, 40, 13);
     drawPropPeak(ctx, 38, 106, 42, 50, [104, 106, 110], [154, 156, 156], { snow: true });
     drawPropPeak(ctx, 74, 105, 54, 82, [90, 92, 96], [140, 142, 142], { snow: true });
     drawPropPeak(ctx, 104, 106, 34, 40, [116, 118, 120], [164, 166, 166], { snow: true });
-    for (var i = 0; i < 4; i++) {
-      ctx.fillStyle = rgba([236, 238, 236], 0.40 + trng() * 0.25);
-      ctx.beginPath();
-      ctx.arc(34 + trng() * 60, 102 + trng() * 5, 1.0 + trng() * 1.6, 0, Math.PI * 2);
-      ctx.fill();
-    }
   }
 
   /* ---------- 生成图集 ----------

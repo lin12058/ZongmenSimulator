@@ -792,12 +792,6 @@
     renderer.seaLevel = MG.SEA_LEVEL;
     renderer.dpr = dpr;   // 世界坐标按 CSS 像素换算, 与相机/流式加载一致
 
-    var img = new Image();
-    img.onload = function () {
-      try { renderer.setTextures(atlas, img, IT.buildNoise()); } catch (e) { /* 保持程序化纸 */ }
-    };
-    img.src = 'assets/textures/paper.png';
-
     onResize();
     /* URL 定点预览参数: seed / qt,rt (格坐标定位) / zm (缩放) / nofade (跳过渐入, 供 headless 截图) */
     var urlParams = new URLSearchParams(location.search);
