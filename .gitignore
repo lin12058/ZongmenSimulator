@@ -22,3 +22,7 @@ verify/*.png
 verify/*.html
 verify/*.log
 verify/*.txt
+
+# .NET 构建产物 (源码已入库, 二进制运行时重建生成)
+Server/Zongmen/bin/
+Server/Zongmen/obj/
