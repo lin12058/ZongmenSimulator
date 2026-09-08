@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>宗门模拟器 · 山河图</title>
+<style>
+  :root {
+    --paper: #ece3d0;
+    --ink: #2e2a24;
+    --ink-soft: rgba(58, 48, 38, 0.75);
+    --seal: #a63a2c;
+    --panel-bg: rgba(248, 243, 230, 0.92);
+    --panel-border: rgba(150, 128, 96, 0.55);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body {
+    background: var(--paper);
+    font-family: "Kaiti SC", "STKaiti", "KaiTi", "DFKai-SB", "Noto Serif SC", serif;
+    color: var(--ink);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #app { position: fixed; inset: 0; }
+  #glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #overlay { position: absolute; inset: 0; pointer-events: none; }
+
+  .panel {
+    position: absolute;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    box-shadow: 0 2px 10px rgba(80, 60, 30, 0.12);
+    border-radius: 3px;
+    backdrop-filter: blur(2px);
+  }
+
+  /* ---- 顶栏 ---- */
+  #topbar {
+    position: absolute;
+    top: 14px; left: 16px; right: 16px;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none;
+  }
+  #topbar > * { pointer-events: auto; }
+  #titleBox { padding: 10px 16px 8px; }
+  #titleBox h1 {
+    font-size: 22px; font-weight: 700; letter-spacing: 6px;
+    color: var(--ink);
+  }
+  #titleBox h1 em { font-style: normal; color: var(--seal); }
+  #titleBox .sub { margin-top: 2px; font-size: 12px; color: var(--ink-soft); letter-spacing: 2px; }
+  #controls { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+  #controls .row { display: flex; gap: 6px; align-items: center; }
+  #seedInput {
+    width: 150px; padding: 4px 8px;
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: rgba(255, 252, 244, 0.9); color: var(--ink);
+    font-family: inherit; font-size: 13px; outline: none;
+  }
+  #seedInput:focus { border-color: var(--seal); }
+  button {
+    padding: 4px 12px; cursor: pointer;
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,252,244,0.95), rgba(238,229,208,0.9));
+    color: var(--ink); font-family: inherit; font-size: 13px; letter-spacing: 2px;
+    transition: all 0.15s;
+  }
+  button:hover { border-color: var(--seal); color: var(--seal); }
+  button.primary { border-color: var(--seal); color: var(--seal); }
+  button.off { opacity: 0.45; text-decoration: line-through; }
+  #stats { font-size: 12px; color: var(--ink-soft); letter-spacing: 1px; }
+
+  /* ---- 图例 ---- */
+  #legend {
+    left: 16px; top: 96px; padding: 10px 12px;
+    font-size: 12.5px; letter-spacing: 1px;
+  }
+  #legend h3 { font-size: 13px; margin-bottom: 6px; letter-spacing: 3px; }
+  #legend .item { display: flex; align-items: center; gap: 7px; margin: 3px 0; color: var(--ink-soft); }
+  #legend .chip { width: 14px; height: 14px; border: 1px solid rgba(80,60,30,0.35); border-radius: 2px; }
+
+  /* ---- 信息面板 ---- */
+  #info {
+    left: 16px; bottom: 18px; width: 228px; padding: 12px 14px;
+    transition: opacity 0.2s;
+  }
+  #info.hidden { opacity: 0; pointer-events: none; }
+  #info h3 { font-size: 14px; letter-spacing: 3px; margin-bottom: 8px; display: flex; justify-content: space-between; }
+  #infoClose { cursor: pointer; color: var(--ink-soft); border: none; background: none; font-size: 14px; padding: 0 2px; letter-spacing: 0; }
+  #infoClose:hover { color: var(--seal); }
+  #infoBody .row { display: flex; justify-content: space-between; margin: 3px 0; font-size: 12.5px; }
+  #infoBody .k { color: var(--ink-soft); letter-spacing: 2px; }
+  #infoBody .v { color: var(--ink); }
+  #infoBody .v.big { color: var(--seal); font-size: 15px; }
+  #infoBody .sep { border-top: 1px dashed var(--panel-border); margin: 6px 0; }
+
+  /* ---- 小地图 ---- */
+  #minimapBox {
+    right: 16px; bottom: 18px; padding: 8px;
+  }
+  #minimap { display: block; width: 216px; height: 141px; cursor: crosshair; border: 1px solid rgba(80,60,30,0.3); }
+  #minimapBox .hint { margin-top: 6px; font-size: 11px; color: var(--ink-soft); text-align: center; letter-spacing: 2px; }
+
+  /* ---- 致命错误 ---- */
+  #fatal {
+    display: none; position: fixed; inset: 0; z-index: 99;
+    background: rgba(236, 227, 208, 0.96);
+    flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    text-align: center; padding: 30px;
+  }
+  #fatal h2 { color: var(--seal); letter-spacing: 4px; }
+  #fatalMsg { color: var(--ink-soft); font-size: 14px; max-width: 560px; line-height: 1.7; }
+
+  @media (max-width: 760px) {
+    #legend { display: none; }
+    #titleBox h1 { font-size: 17px; letter-spacing: 3px; }
+    #minimap { width: 150px; height: 98px; }
+  }
+</style>
+</head>
+<body>
+  <div id="app">
+    <canvas id="glcanvas"></canvas>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div id="topbar">
+    <div id="titleBox" class="panel">
+      <h1>宗门模拟器 <em>·</em> 山河图</h1>
+      <div class="sub"><span id="era">岁次甲辰 · 春</span>　|　种子「<span id="seedShow">-</span>」</div>
+    </div>
+    <div id="controls" class="panel">
+      <div class="row">
+        <input id="seedInput" placeholder="输入种子…" spellcheck="false">
+        <button id="btnSeed">山河重铸</button>
+        <button id="btnRegen" class="primary">另起一界</button>
+      </div>
+      <div class="row">
+        <button id="btnVeins">灵脉</button>
+        <button id="btnLabels">注记</button>
+        <span id="stats">-</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="legend" class="panel">
+    <h3>山河五色</h3>
+    <div id="legendItems"></div>
+  </div>
+
+  <div id="info" class="panel hidden">
+    <h3><span>山川志</span><button id="infoClose">✕</button></h3>
+    <div id="infoBody"></div>
+  </div>
+
+  <div id="minimapBox" class="panel">
+    <canvas id="minimap" width="432" height="282"></canvas>
+    <div class="hint">拖拽平移 · 滚轮缩放 · 点击查看</div>
+  </div>
+
+  <div id="fatal">
+    <h2>山河未成</h2>
+    <div id="fatalMsg">-</div>
+  </div>
+
+  <script src="js/pb.js"></script>
+  <script src="js/mapclient.js"></script>
+  <script src="js/noiselib.js"></script>
+  <script src="js/textures.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

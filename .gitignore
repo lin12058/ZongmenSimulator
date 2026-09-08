@@ -11,3 +11,14 @@ Desktop.ini
 
 # 调试截图 (agent-browser 临时产物)
 .workbuddy/shot*.jpg
+
+# ======== 运行时产物 (不入库) ========
+
+# SQLite 运行数据库 (世界数据 KV 表实时落盘, 21MB+)
+db/
+
+# verify 调试产物 (截图 / DOM dump / 日志), 保留验证脚本源文件
+verify/*.png
+verify/*.html
+verify/*.log
+verify/*.txt
