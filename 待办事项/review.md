@@ -107,65 +107,78 @@
 - `web/js/main.js`：`staticDirty = true` 在每 chunk 上传成功后无条件置位 → 连续加载 N 个 chunk 静态层重绘 N 次。
 - **修复**：合并 dirty（200ms 节流）或记录待重绘区域。
 - **来源**：review_v1 (3.3)、review_v4 (3.3)
+- **✅ 2026-09-09 已修复**：`markStaticDirty()` 距上次重绘 ≥200ms 立即置位、否则 `setTimeout(200)` 合并；`forceStaticDirty()` 用于卸载/重铸（绕过节流）；`renderStaticInto` 末尾清挂起 timer 并写 `lastStaticDraw`。loadChunk/loadExtra 改走节流，dropChunk/regenerate 走强制。
 
 ### R2. 静态中间件无缓存头 / ETag 【命中 3】
 - `Server/Zongmen/StaticWebMiddleware.cs`：每次 `File.ReadAllBytesAsync` 全量读文件 + `Cache-Control: no-cache`，无 ETag/304。
 - **修复**：按 mtime 生成 ETag + `Last-Modified`，或小文件内存缓存。
 - **来源**：review_v1 (2.5)、review_v4 (2.5)、review_v5 (R4)
+- **✅ 2026-09-09 已修复**：按 mtime+length 生成弱 ETag（`"<ft:x>-<len:x>"`），并发支持 `If-None-Match`/`If-Modified-Since` 命中返回 304。`HEAD` 不回体。`ConcurrentDictionary<fullPath, CachedFile>` 内存缓存 ≤8MB 文件 + 64 项上限（mtime 变即刷新）。`Cache-Control: no-cache` 维持语义。探测验证：200/304/不匹配-200 全对。
 
 ### R3. 服务端用浮点反解圆心偏移 → 大坐标可能错位 【命中 2】
 - `mapgen-server.js` `chunkJson`：先 `Math.round(fy/(1.5*HEX_R))` 反解 r 再反解 q；客户端用 `ca*S+(cq[i]-16)` 正向还原。大坐标下浮点累计可能差一格。
 - **修复**：服务端直接按轴向坐标 (q,r) 存整数相对偏移，不做浮点反解。
 - **来源**：review_v1 (3.1)、review_v4 (3.1)
+- **✅ 2026-09-09 已修复**：`mapgen.js` `buildChunk` 收尾在 data 中增加 `qrel/rrel` 数组（与 tiles 同序，记录每个 tile 整数相对偏移 dq/dr）；`mapgen-server.js` `chunkJson` 改 `dv.setUint8(oCq+i, d.qrel[i]+16)` / `setUint8(oCr+i, d.rrel[i]+16)`——不再 `Math.round(fy/(1.5*HEX_R))` 反解。客户端 `pb.js#chunkToArrays` 不变（`qa = ca*S+(cq-16)` 仍精确等价）；verify_map 相对坐标还原 ≤1e-3px + centers 精度全绿；大坐标 chunk `(1000,500)/(-800,1200)/(20000,-15000)` 全部 200。
 
 ### R4. 卸载后回调仍可能回填出视野的格子 【命中 2】
 - `web/js/main.js` `loadExtra` 回调：`regionCells.set/commCells.set` 无"是否仍在需要窗口"校验，可能把刚出视野的格子数据塞回 → 短暂内存残留 + 与卸载冲突。
 - **修复**：回调前校验 `keepR.has(key)`。
 - **来源**：review_v1 (3.2)、review_v4 (3.2)
+- **✅ 2026-09-09 已修复**：模块级 `keepChunk/keepR/keepC` Set 集合，`updateStreaming` 全量重建时刷新；`loadChunk`/`loadExtra` 回调前 `if (!keep*.has(job.key)) return;`（防已卸载格子被回填 + 与卸载冲突；chunk 端同步防御避免重新上传 GPU）。`regenerate` 重置三集合。
 
 ### R5. tile 请求无防抖 【命中 2】
 - 每次点击单发 `/api/map/tile`，无节流；连点产生连续小请求。
 - **修复**：加 100–200ms 防抖。
 - **来源**：review_v3 (P2)、review_v4 (categorie 其他/P2)
+- **✅ 2026-09-09 已修复**：`showInfo()` 改为 `infoTimer`/`infoPending` 防抖壳，150ms 内连点只发最后一次；原主体抽为 `requestTileInfo(tile)`。`hideInfo()` 关闭面板同时 `clearTimeout(infoTimer)` 避免关闭后仍弹出。
 
 ### R6. 服务端并发 tile/fields 无节流上限 【命中 1】
 - 无 per-IP 限流；高频刷新会钉死 V8 门闩。
 - **修复**：中间件层加简单 per-IP 限流。
 - **来源**：review_v5 (R6)
+- **✅ 2026-09-09 已修复**：`Server/Zongmen/Web/ApiRateLimitMiddleware.cs` 新增，Program.cs 注册在 StaticWebMiddleware 之后。仅拦截 `/api/map/tile` + `/api/map/fields` 两个即时计算端点（chunk/region/comm 持久化缓存兜底不限流）。固定窗口 5s/120 次/IP，超限 429 + `Retry-After`。单 IP 字典超 1024 项时按 1/1024 概率触发清理过期条目。探测：200 连发成功 120 后触发 429。
 
 ### R7. 渲染每帧全量遍历所有已加载 chunk，无视锥剔除 【命中 1】
 - `renderer.render()` Pass1/Pass1.5 均 `chunks.values()` 全量迭代 + drawArraysInstanced；chunk 数到几十上百后，远离相机的也在消耗 CPU/GPU。
 - **修复**：对 chunks 做 AABB 与 viewBounds 的粗剔除，只绘制相交 chunk。
 - **来源**：review_v5 (P1)
+- **✅ 2026-09-09 已修复**：`uploadChunk` 接收 bbox 存到 chunk 记录（main.js 计算并传入，省重复遍历）；`render()` 中 `_viewBox(cam)` 算 CSS 像素可视世界矩形（`(w/dpr)/2/zoom` 半宽/高），`boxHits(box, vb, pad)` AABB 相交测试。Pass1 pad=hexR*2.2，Pass1.5 pad=hexR*12（山峰/聚类偏移容差）。headless 渲染图无遗漏。
 
 ### R8. Tile/FieldGrid 不落库，全部即时计算堵在单线程 V8 【命中 1】
 - 小地图 0.4–1.5s 轮询 + 点击频繁时，`SemaphoreSlim(1)` 门闩成为吞吐瓶颈。
 - **修复**：field/tile 结果按 (seed,q,r) LRU 缓存；小地图降频或后台预取；必要时支持每 seed 多实例并行。
 - **来源**：review_v5 (P3)
+- **✅ 2026-09-09 已修复**：`GetFieldGridJson` 缓存 JSON 文本（key=seed 前缀+窗口，cap 64）——纯确定性、无 VM 共享状态依赖，安全。`GetTileBytes` 缓存 gz bytes（key=tile+seed 前缀+q+r，cap 1024），值带 region epoch——`GetRegionBytes` 每次经 JS 生成时 `_regionEpoch[seed]++`（可能新增道路），使旧 tile 缓存的 onRoad 自动失效，避免 P4 教训的语义回归。同 seed 多实例并行未做（与 P4 共享 roadCache 语义冲突，破坏一致性）。客户端降频已有 minimapTimer 0.4/1.5s + R5 tile 防抖。探测：tile/fields 同请求字节/JSON 一致。
 
 ### R9. 同 chunk 首 miss 无 in-flight 去重 【命中 1】
 - 高并发下多请求同时 miss 同一 chunk → 重复 buildChunk + 重复写库。
 - **修复**：加 per-key in-flight 合并（CompletableFuture 风格）。
 - **来源**：review_v5 (P4)
+- **✅ 2026-09-09 已修复**：`MapWorldService.cs` `ConcurrentDictionary<string, object> _buildGates` + lock per key + 双重检查；同 key 并发 miss 只 build 一次，其余等待者 double-check 命中 `_mem` 直接返回；finally `TryRemove` 释放门闩（不删除 → 新 miss 走缓存直返）。同样逻辑覆盖 region/comm。探测：24 并发同 key miss 88ms 全一致。
 
 ### R10. 全局调试句柄残留 【命中 1】
 - `web/js/main.js` `window.__cam/__renderer/__data` 无条件暴露。
 - **修复**：用 `if (DEBUG)` 包裹。
 - **来源**：review_v1 (3.4)
+- **✅ 2026-09-09 已修复**：`var DEBUG = URLSearchParams('debug=1|capture=1')` 开启，`window.__cam/__renderer/__data` 包裹 `if (DEBUG)` 内。`verify/cdp_probe.mjs` 默认 URL 追加 `&debug=1` 保留状态探测能力。
 
 ### R11. `configure()` 清缓存未同步 region/roadCache 【命中 1】
 - 若未来 `REGION_M` 可配置，需同时清理 `regionCache/settleCache/roadCache/roadFail`。
 - **来源**：review_v1 (四/2)
+- **✅ 2026-09-09 已修复**：`mapgen.js` `configure()` 在原 `commCache/veinNearCache/elevCache/fieldCache.clear()` 基础上追加 `regionCache.clear(); settleCache.clear(); roadCache.clear(); roadFail.clear();`——CFG 任何参数变化（包括未来 REGION_M 可配置）都不会留下新旧混用缓存。
 
 ### R12. 队列/其他常数与死代码 【命中 1】
 - `CONC_CHUNK/CONC_EXTRA` 魔法数字非配置化；`mapgen.js` 中 `warmRoadsStep/warmIdx` 为无调用方死代码。
 - **建议**：收敛到常量对象；清理残留死代码。
 - **来源**：review_v1 (四/1)、review_v3 (P2)
+- **✅ 2026-09-09 已修复**：`web/js/main.js` `CONC_CHUNK/CONC_EXTRA/CHUNK_RETRY_BASE_MS/CHUNK_RETRY_MAX_MS` 收敛为单一 `NET_CFG` 常量对象。`mapgen.js` 删除 `warmRoadsStep` 函数 + `warmIdx` 变量 + L671-674 注释块 + L842 导出（grep 确认无调用方）。
 
 ### R13. 纹理生成顺序隐式耦合 【命中 1】
 - `buildAtlas` 重置 `trng`，`buildPaper/buildNoise` 不重置，依赖 `boot` 固定顺序。中间插入任何消费 `trng()` 的代码都会导致外观漂移。
 - **建议**：在各自构建函数开头显式重置种子。
 - **来源**：review_v3 (P2)
+- **✅ 2026-09-09 已修复**：`textures.js` `SEED_ATLAS/SEED_PAPER/SEED_NOISE` 各自独立常量（当前都取 20260906）。`buildAtlas`/`buildPaper`/`buildNoise` 函数开头 `trng = NL.mulberry32(SEED_*)`——不再依赖 boot 顺序 `atlas→paper→noise`，中间插入消费 `trng()` 的代码不会再造成下游纹理外观漂移。**注意**：buildPaper 原先依赖 buildAtlas 末尾 trng 状态，重置后纸张纹理外观会略有变化（程序化水墨风格近似，无参照基准，可接受一次漂移换取确定可复现）。
 
 ---
 
@@ -188,6 +201,7 @@
 10. **P7** dynamic 调用缓存
 11. **P8** 服务端缓存 LRU 上限
 12. **R1–R13** 按需排期（防抖、ETag、视锥剔除、in-flight 去重等）
+    - **2026-09-09 全部闭合 ✔**：R1 静态层 200ms 节流 / R2 静态 ETag+304+小文件内存缓存 / R3 整数轴向偏移替代浮点反解 / R4 keepR/keepC/keepChunk 回填校验 / R5 tile 150ms 防抖 / R6 ApiRateLimitMiddleware 5s/120/IP tile+fields / R7 渲染视锥粗剔除 / R8 tile+fieldGrid LRU（fieldGrid 纯确定性 / tile 按 region epoch 失效） / R9 chunk/region/comm per-key in-flight 去重 / R10 DEBUG 门控 / R11 configure() 清 region+settle+road+roadFail / R12 NET_CFG 常量收敛 + warmRoadsStep 死代码清理 / R13 buildAtlas/buildPaper/buildNoise 各自显式重置种子。
 
 ---
 

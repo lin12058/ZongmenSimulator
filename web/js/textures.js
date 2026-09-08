@@ -673,7 +673,12 @@
    *       第 7 行   = 立体精灵: 0/1 山B 2/3 雪B 4/5 草丘 6/7 孤树 (56..63) */
   var VEIN_ROW = 4;
   var ATLAS_ROWS = 8;
+  /* R13: 各纹理构建函数在自身开头显式重置 trng 种子 —— 不再依赖 boot 的
+     (atlas→paper→noise) 固定调用顺序; 中间插入任何消费 trng() 的代码不会
+     再造成下游纹理外观漂移。种子为各自独立常量, 调用次序无关。 */
+  var SEED_ATLAS = 20260906, SEED_PAPER = 20260906, SEED_NOISE = 20260906;
   function buildAtlas() {
+    trng = NL.mulberry32(SEED_ATLAS);
     var cv = makeCanvas(PX * COLS, PX * ATLAS_ROWS);
     var ctx = cv.getContext('2d');
     for (var b = 0; b < 8; b++) {
@@ -766,6 +771,7 @@
 
   /* ---------- 宣纸 ---------- */
   function buildPaper() {
+    trng = NL.mulberry32(SEED_PAPER);      // R13: 显式重置, 不继承 atlas 残留流
     var S = 512;
     var cv = makeCanvas(S, S);
     var ctx = cv.getContext('2d');
@@ -799,6 +805,7 @@
 
   /* ---------- 笔触噪声图 (R 枯笔 / G 纤维 / B 团渍) ---------- */
   function buildNoise() {
+    trng = NL.mulberry32(SEED_NOISE);      // R13: 显式重置 (当前未消费 trng, 防御未来)
     var S = 256;
     var cv = makeCanvas(S, S);
     var ctx = cv.getContext('2d');

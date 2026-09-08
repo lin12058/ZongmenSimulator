@@ -358,6 +358,8 @@
     var cc = chunkCenter(ca, cb);
     var R = CHUNK_SCAN;
     var centers = [], tiles = [], elevs = [], hashes = [], neigh = [];
+    var qrel = [], rrel = [];       // R3: tile 相对区块中心的整数轴向偏移 (dq,dr),
+                                    //     供服务端直存整数偏移, 不做浮点反解
     var propCenters = [], propSprites = [], propHashes = [], propElevs = [];
     var propList = [];
     var bbox = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
@@ -369,6 +371,7 @@
         if (own.q !== cc.q || own.r !== cc.r) continue;
         var f = fields(q, r);
         centers.push(f.x, f.y);
+        qrel.push(dq); rrel.push(dr);
         tiles.push(f.biome * 4 + f.variant);   // 格底回归自然地形, 灵脉不再覆写深色底 (精灵仍按 disp 出灵脉峰)
         elevs.push(f.e);
         hashes.push(f.hash);
@@ -406,6 +409,7 @@
       count: tiles.length,
       data: {
         centers: new Float32Array(centers),
+        qrel: qrel, rrel: rrel,          // R3: 整数轴向相对偏移 (与 centers 同序)
         tiles: new Float32Array(tiles),
         elevs: new Float32Array(elevs),
         hashes: new Float32Array(hashes),
@@ -668,22 +672,6 @@
     return out;
   }
 
-  /* 主循环渐进预热: 道路 A* 是"建一次存坐标"的纯缓存计算,
-   * 已算成的路存 roadCache、不可达的进 roadFail, 均不再重算。
-   * 本函数每被调用最多推进一次 5×5 旋转扫描、至多产出 1 条新路;
-   * 节流由 main.js 的 warmGap 帧间隔控制, 相机静止时根本不调用。 */
-  var warmIdx = 0;
-  function warmRoadsStep(camQ, camR) {
-    var M = REGION_M;
-    var ci = Math.floor(camQ / M), cj = Math.floor(camR / M);
-    var before = roadCache.size + roadFail.size;
-    for (var n = 0; n < 25; n++) {
-      var idx = warmIdx++;
-      roadsNear(ci + (idx % 5) - 2, cj + (((idx / 5) | 0) % 5) - 2, 1);
-      if (roadCache.size + roadFail.size > before) return;  // 本帧产出 1 条即停
-    }
-  }
-
   /* ---------- 灵气场 / 群落 / 灵脉 (设定: 先定灵脉, 后造山河) ---------- */
 
   /* 灵气场 (设定 §九): 以 (0,0) 为灵气中枢, 欧氏直线距离单调衰减,
@@ -817,7 +805,9 @@
     return n;
   }
 
-  /* §十二: 运行时覆写参数 (合并进 CFG 并清空相关缓存) */
+  /* §十二: 运行时覆写参数 (合并进 CFG 并清空全部派生缓存)
+     R11: region/settle/road/roadFail 也须一并清空 —— 若覆写参数影响区域生成
+     (REGION_M 未来可配置等), 只清 comm/elev/field 会造成新旧参数混用。 */
   function configure(patch) {
     if (!patch) return;
     for (var k in patch) {
@@ -825,6 +815,8 @@
     }
     commCache.clear(); veinNearCache.clear();
     elevCache.clear(); fieldCache.clear();
+    regionCache.clear(); settleCache.clear();
+    roadCache.clear(); roadFail.clear();
   }
 
   /* ---------- 导出 ---------- */
@@ -839,7 +831,6 @@
     regionInfo: regionInfo,
     settlementsFor: settlementsFor,
     roadsNear: roadsNear,
-    warmRoadsStep: warmRoadsStep,
     spiritAt: spiritAt,
     communityOf: communityOf,
     communityNear: communityNear,

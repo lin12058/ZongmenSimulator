@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const URL2 = 'http://127.0.0.1:8140/index.html?seed=42&qt=10&rt=5&zm=2.5&nofade=1';
+const URL2 = 'http://127.0.0.1:8140/index.html?seed=42&qt=10&rt=5&zm=2.5&nofade=1&debug=1';
 const PORT = 9400 + Math.floor(Math.random() * 300);
 const profile = path.join(process.env.TEMP || 'C:/Windows/Temp', `wb-probe-${Date.now()}`);
 fs.mkdirSync(profile, { recursive: true });

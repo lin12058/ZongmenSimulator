@@ -56,13 +56,12 @@
     var oPdx = 11 * n, oPdy = oPdx + 4 * pn, oPsp = oPdy + 4 * pn,
         oPh = oPsp + pn, oPe = oPh + 2 * pn;
     var i, k;
+    /* R3: cq/cr 直接用 buildChunk 记录的实际轴向偏移 d.qrel/d.rrel (整数),
+       不做「世界像素 → 反解轴坐标」的浮点往返 — 大坐标下避免错位一格。
+       客户端仍按 ca*S+(cq-16) 正向还原绝对格坐标, 语义完全一致。 */
     for (i = 0; i < n; i++) {
-      var fx = d.centers[i * 2], fy = d.centers[i * 2 + 1];
-      /* 反解轴坐标: y=12r(精确), x=HEX_W*(q+r/2) */
-      var r = Math.round(fy / (1.5 * HEX_R));
-      var q = Math.round(fx / HEX_W - r / 2);
-      dv.setUint8(oCq + i, (q - cc.q) + 16);           // 相对区块中心, +16 偏移
-      dv.setUint8(oCr + i, (r - cc.r) + 16);
+      dv.setUint8(oCq + i, d.qrel[i] + 16);        // 相对区块中心, +16 偏移 (u8)
+      dv.setUint8(oCr + i, d.rrel[i] + 16);
       dv.setUint8(oTiles + i, Math.round(d.tiles[i])); // biome*4+variant (整数语义)
       dv.setUint16(oElev + i * 2, Math.max(0, Math.min(65535, Math.round(d.elevs[i] * 65535))), true);
       dv.setUint16(oHash + i * 2, Math.max(0, Math.min(65535, Math.round(d.hashes[i] * 65535))), true);

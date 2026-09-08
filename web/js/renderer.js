@@ -404,9 +404,20 @@
   };
 
   /* 上传一个区块的实例数据, 建独立 VAO (底图 + 立体精灵两套) */
-  InkRenderer.prototype.uploadChunk = function (key, data) {
+  InkRenderer.prototype.uploadChunk = function (key, data, bbox) {
     var gl = this.gl;
     this.dropChunk(key);
+    /* R7: 记录该 chunk 世界 AABB (来自地块中心 min/max), 供渲染循环粗剔除。
+       精灵可高出格面, 剔除时另加余量(见 render 的 propPad)。 */
+    if (!bbox) {
+      bbox = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
+      var ct = data.centers;
+      for (var bi = 0; bi < data.count; bi++) {
+        var bx = ct[bi * 2], by = ct[bi * 2 + 1];
+        if (bx < bbox.x0) bbox.x0 = bx; if (bx > bbox.x1) bbox.x1 = bx;
+        if (by < bbox.y0) bbox.y0 = by; if (by > bbox.y1) bbox.y1 = by;
+      }
+    }
     var vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
 
@@ -453,7 +464,7 @@
     }
     this.chunks.set(key, { vao: vao, bufs: bufs, count: data.tiles.length,
                            propVao: propVao, propBufs: propBufs, propCount: propCount,
-                           born: performance.now() / 1000 });
+                           bbox: bbox, born: performance.now() / 1000 });
   };
 
   InkRenderer.prototype.dropChunk = function (key) {
@@ -505,6 +516,18 @@
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   };
 
+  /* R7: 可视世界矩形 + bbox 相交测试 —— 只绘制与视口相交的 chunk。
+     世界可视宽/高 = FBO CSS 尺寸 / zoom (uRes 以 CSS px 计, 与相机同空间) */
+  InkRenderer.prototype._viewBox = function (cam) {
+    var w = this.fboW / this.dpr, h = this.fboH / this.dpr;
+    var hw = w * 0.5 / cam.zoom, hh = h * 0.5 / cam.zoom;
+    return { x0: cam.x - hw, y0: cam.y - hh, x1: cam.x + hw, y1: cam.y + hh };
+  };
+  function boxHits(box, vb, pad) {
+    return box && box.x1 >= vb.x0 - pad && box.x0 <= vb.x1 + pad &&
+           box.y1 >= vb.y0 - pad && box.y0 <= vb.y1 + pad;
+  }
+
   InkRenderer.prototype.render = function (cam, timeSec) {
     var gl = this.gl;
     var w = this.fboW, h = this.fboH;
@@ -552,11 +575,15 @@
     gl.bindTexture(gl.TEXTURE_2D, this.texAtlas);
     gl.uniform1i(u.atlas, 0);
 
+    /* R7: Pass1 只画与视口相交的 chunk (六边形盘 ± 少量余量); 精灵遍另加高余量 */
+    var vb = this._viewBox(cam);
+    var hexPad = this.hexR * 2.2;
     var it = this.chunks.values();
     var node;
     while ((node = it.next())) {
       if (node.done) break;
       var c = node.value;
+      if (!boxHits(c.bbox, vb, hexPad)) continue;
       var age = timeSec - c.born;
       var fade = this.noFade ? 1 : Math.min(1, age / 0.6);
       fade = fade * fade * (3 - 2 * fade);
@@ -622,11 +649,14 @@
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texAtlasLin);
     gl.uniform1i(up.atlas, 0);
+    /* 精灵可高出格面, 余量取较大值避免山顶/树冠被误剔 */
+    var propPad = this.hexR * 12;
     it = this.chunks.values();
     while ((node = it.next())) {
       if (node.done) break;
       var cp = node.value;
       if (!cp.propCount) continue;
+      if (!boxHits(cp.bbox, vb, propPad)) continue;
       var ageP = timeSec - cp.born;
       var fadeP = this.noFade ? 1 : Math.min(1, ageP / 0.6);
       fadeP = fadeP * fadeP * (3 - 2 * fadeP);

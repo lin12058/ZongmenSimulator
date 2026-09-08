@@ -18,6 +18,10 @@
   var cam = { x: 0, y: 0, zoom: 2.2, tx: 0, ty: 0, tzoom: 2.2 };
   var minZoom = 0.7, maxZoom = 6;
   var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  /* R10: 调试句柄门控 —— 仅 URL 带 debug=1 (或 capture=1 的 headless 验证) 时暴露,
+     平时不向全局泄漏内部状态。 */
+  var DEBUG = new URLSearchParams(location.search).get('debug') === '1' ||
+              new URLSearchParams(location.search).get('capture') === '1';
   var hoverTile = null, selectedTile = null;
   var showVeins = true, showLabels = true;
 
@@ -26,11 +30,18 @@
   var commCells = new Map();        // 'ci,cj' -> CommunityPack
   var chunkQueue = [], chunkBusy = new Map(), chunkFail = new Set();
   var chunkRetry = new Map();   // key -> { attempt, at }: 可重试失败(网络/5xx)的退避计划, at 为下次可入队时间
-  var CHUNK_RETRY_BASE_MS = 800;    // 指数退避基数
-  var CHUNK_RETRY_MAX_MS = 30000;   // 单次退避上限
   var regionBusy = new Set(), commBusy = new Set();
   var regionQueue = [], commQueue = [];
-  var CONC_CHUNK = 3, CONC_EXTRA = 6;
+  /* R12: 并发/重试等网络常数收敛到单一配置对象, 不再散落魔法数字 */
+  var NET_CFG = {
+    concChunk: 3,          // 区块并发请求数
+    concExtra: 6,          // 区域/群落并发请求数
+    retryBaseMs: 800,      // 失败重试指数退避基数
+    retryMaxMs: 30000      // 单次退避上限
+  };
+  /* R4: 当前视野窗口内的 chunk/region/comm key 集合 (updateStreaming 全量重建时
+     刷新; 异步回调落库前据此校验, 防止把已卸载格子数据回填/重复上传 GPU) */
+  var keepChunk = new Set(), keepR = new Set(), keepC = new Set();
 
   var timeSec = 0, lastT = 0;
   var minimapDirty = true, minimapTimer = 0;
@@ -41,6 +52,29 @@
   var staticLayer = null;
   var staticCam = { x: NaN, y: NaN, zoom: NaN, w: 0, h: 0 };
   var staticDirty = true;
+  /* R1: 静态层 dirty 200ms 节流合并 —— 连续加载 N 个 chunk/区域/群落时,
+     各上传回调不再逐一置 staticDirty(每帧全量重绘 N 次), 而是合并到
+     最后一次标记后 200ms 统一重绘一次。 */
+  var staticSchedTimer = null;
+  var lastStaticDraw = 0;          // performance.now() 上次静态层重绘时刻
+
+  /* 数据到达类脏标记(浪线/地名/道路补齐): 距上次重绘 <200ms 时延迟合并,
+     已 ≥200ms 或 staticDirty 已挂起则立即置位由下一帧消费 */
+  function markStaticDirty() {
+    if (staticDirty) return;
+    var now = performance.now();
+    if (now - lastStaticDraw >= 200 || lastStaticDraw === 0) { staticDirty = true; return; }
+    if (staticSchedTimer) return;
+    staticSchedTimer = setTimeout(function () {
+      staticSchedTimer = null;
+      staticDirty = true;          // 下一帧 staticNeedsRedraw 消费
+    }, 200);
+  }
+  /* 卸载/重铸等必须尽快消除残影的置位: 不节流 */
+  function forceStaticDirty() {
+    if (staticSchedTimer) { clearTimeout(staticSchedTimer); staticSchedTimer = null; }
+    staticDirty = true;
+  }
   var lastPan = { x: 0, y: 0, zoom: 0 };
   /* P1: 流式需求集增量阈值 —— 记录上次全量重算时的相机状态,
      NaN 初始值强制首帧重算; regenerate() 时重置回 NaN。 */
@@ -131,7 +165,7 @@
     var cj0 = Math.floor(t.rmin / CL) - 1, cj1 = Math.floor(t.rmax / CL) + 1;
 
     /* 卸载视野外 (区块 + 区域/群落数据) */
-    var keepR = new Set(), keepC = new Set();
+    keepR = new Set(); keepC = new Set();   // 模块级: 供异步回调校验回填 (R4)
     for (var ri = i0; ri <= i1; ri++) for (var rj = j0; rj <= j1; rj++) keepR.add(cellKey(ri, rj));
     for (var ui = ci0; ui <= ci1; ui++) for (var uj = cj0; uj <= cj1; uj++) keepC.add(cellKey(ui, uj));
     regionCells.forEach(function (_p, k) { if (!keepR.has(k)) regionCells.delete(k); });
@@ -145,14 +179,19 @@
     var a0 = Math.floor((tb.qmin - m2) / geo.chunkS), a1 = Math.floor((tb.qmax + m2) / geo.chunkS);
     var b0 = Math.floor((tb.rmin - m2) / geo.chunkS), b1 = Math.floor((tb.rmax + m2) / geo.chunkS);
     var need = {};
+    keepChunk = new Set();   // 模块级: 本帧仍需的 chunk key, 供 loadChunk 回调校验 (R4)
     for (var ca = a0; ca <= a1; ca++) {
-      for (var cb = b0; cb <= b1; cb++) need[chunkKey(ca, cb)] = { ca: ca, cb: cb };
+      for (var cb = b0; cb <= b1; cb++) {
+        var kk = chunkKey(ca, cb);
+        need[kk] = { ca: ca, cb: cb };
+        keepChunk.add(kk);
+      }
     }
     chunkData.forEach(function (_info, key) {
       if (!need[key]) {
         renderer.dropChunk(key);
         chunkData.delete(key);
-        staticDirty = true;
+        forceStaticDirty();                    // 内容移除: 尽快重绘清除残影 (R1)
       }
     });
 
@@ -203,8 +242,8 @@
     var gen = worldSeed;
     MC.chunk(gen, job.ca, job.cb).then(function (arrays) {
       if (gen !== worldSeed) return;                 // 世界已重铸, 丢弃旧响应
+      if (!keepChunk.has(job.key)) return;           // R4: 已出视野被卸载, 不回填/不重复上传 GPU
       if (!chunkData.has(job.key)) {
-        renderer.uploadChunk(job.key, arrays);
         var bb = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
         var ct = arrays.centers;
         for (var i = 0; i < arrays.count; i++) {
@@ -212,9 +251,10 @@
           if (x < bb.x0) bb.x0 = x; if (x > bb.x1) bb.x1 = x;
           if (y < bb.y0) bb.y0 = y; if (y > bb.y1) bb.y1 = y;
         }
+        renderer.uploadChunk(job.key, arrays, bb);   // R7: bbox 供渲染粗剔除
         chunkData.set(job.key, { arrays: arrays, bbox: bb });
         minimapDirty = true;
-        staticDirty = true;                          // 浪线等随新区块补齐
+        markStaticDirty();                   // R1: 连续 N 个 chunk 合并 200ms 重绘一次
       }
     }).catch(function (err) {
       console.error('chunk 加载失败', job.key, err);
@@ -243,12 +283,12 @@
     var r = chunkRetry.get(job.key);
     var attempt = r ? r.attempt : 0;
     attempt++;
-    var delay = Math.min(CHUNK_RETRY_BASE_MS * Math.pow(2, attempt - 1), CHUNK_RETRY_MAX_MS);
+    var delay = Math.min(NET_CFG.retryBaseMs * Math.pow(2, attempt - 1), NET_CFG.retryMaxMs);
     chunkRetry.set(job.key, { attempt: attempt, at: performance.now() + delay });
   }
 
   function pumpChunks() {
-    while (chunkBusy.size < CONC_CHUNK && chunkQueue.length) {
+    while (chunkBusy.size < NET_CFG.concChunk && chunkQueue.length) {
       var job = chunkQueue.shift();
       if (chunkData.has(job.key) || chunkBusy.has(job.key) || chunkFail.has(job.key)) continue;
       chunkBusy.set(job.key, true);
@@ -264,9 +304,16 @@
       : MC.comm(gen, job.ci, job.cj);
     p.then(function (pack) {
       if (gen !== worldSeed) return;
-      if (kind === 'region') regionCells.set(job.key, pack);
-      else commCells.set(job.key, pack);
-      staticDirty = true;
+      /* R4: 回填前校验 key 仍在本帧视野窗口内 —— 请求在途时用户可能已平移
+         相机使该区域/群落被卸载, 迟到数据不得塞回 (防短暂残留 + 与卸载冲突) */
+      if (kind === 'region') {
+        if (!keepR.has(job.key)) return;
+        regionCells.set(job.key, pack);
+      } else {
+        if (!keepC.has(job.key)) return;
+        commCells.set(job.key, pack);
+      }
+      markStaticDirty();                    // R1: 数据补齐合并节流重绘
     }).catch(function (err) {
       console.error(kind + ' 加载失败', job.key, err);
     }).then(function () {
@@ -277,7 +324,7 @@
 
   function pumpExtra(queue, busy, kind) {
     var launches = 0;
-    while (busy.size < CONC_EXTRA && queue.length && launches < CONC_EXTRA) {
+    while (busy.size < NET_CFG.concExtra && queue.length && launches < NET_CFG.concExtra) {
       var job = queue.shift();
       if (busy.has(job.key)) continue;
       var loaded = kind === 'region' ? regionCells.has(job.key) : commCells.has(job.key);
@@ -644,6 +691,8 @@
     staticCam.x = cam.x; staticCam.y = cam.y;
     staticCam.zoom = cam.zoom; staticCam.w = els.app.clientWidth; staticCam.h = els.app.clientHeight;
     staticDirty = false;
+    lastStaticDraw = performance.now();      // R1: 供 markStaticDirty 判断合并窗口
+    if (staticSchedTimer) { clearTimeout(staticSchedTimer); staticSchedTimer = null; }  // 本轮已含最新数据, 取消挂起节流
   }
 
   function geoElementColor(el) {
@@ -691,7 +740,19 @@
 
   /* ---------- 信息面板 (后端单格详情) ---------- */
   var panelBusy = false;
+  /* R5: tile 详情请求 150ms 防抖 —— 连点多个格子时只发最后一次的请求 */
+  var infoTimer = null, infoPending = null;
   function showInfo(tile) {
+    if (!tile) return;
+    infoPending = tile;                        // 保留最近一次点击目标
+    if (infoTimer) clearTimeout(infoTimer);
+    infoTimer = setTimeout(function () {
+      infoTimer = null;
+      var t = infoPending; infoPending = null;
+      requestTileInfo(t);
+    }, 150);
+  }
+  function requestTileInfo(tile) {
     if (!tile || panelBusy) return;
     panelBusy = true;
     els.infoBody.innerHTML = '<div class="row"><span class="k">山川志</span><span class="v">参详中…</span></div>';
@@ -734,7 +795,10 @@
       els.infoBody.innerHTML = '<div class="row"><span class="k">山川志</span><span class="v">未察明</span></div>';
     });
   }
-  function hideInfo() { els.info.classList.add('hidden'); }
+  function hideInfo() {
+    if (infoTimer) { clearTimeout(infoTimer); infoTimer = null; infoPending = null; }  // R5: 关闭面板取消挂起的防抖请求
+    els.info.classList.add('hidden');
+  }
 
   /* ---------- 世界重建 ---------- */
   function seedEra(seedStr) {
@@ -756,6 +820,8 @@
     chunkData.clear();
     regionCells.clear();
     commCells.clear();
+    keepChunk = new Set();                            // R4: 世界重铸后旧窗口失效, 待 updateStreaming 重建
+    keepR = new Set(); keepC = new Set();
     chunkQueue.length = 0;
     chunkFail.clear();
     chunkRetry.clear();
@@ -774,7 +840,7 @@
     seedEra(worldSeed);
     hideInfo();
     minimapDirty = true;
-    staticDirty = true;
+    forceStaticDirty();               // R1: 重铸需立即全量重绘 (清节流定时器)
   }
 
   function updateStats() {
@@ -1005,9 +1071,12 @@
       }
       bindInput();
 
-      window.__cam = cam;
-      window.__renderer = renderer;
-      window.__data = function () { return { chunks: chunkData.size, regions: regionCells.size, comms: commCells.size }; };
+      /* R10: 调试句柄仅 DEBUG 模式 (debug=1 / capture=1) 暴露 */
+      if (DEBUG) {
+        window.__cam = cam;
+        window.__renderer = renderer;
+        window.__data = function () { return { chunks: chunkData.size, regions: regionCells.size, comms: commCells.size }; };
+      }
 
       /* 调试钩子: capture=1 时, 4s 后把 canvas 合成图回传后端, 用于 headless 截图验证 */
       if (new URLSearchParams(location.search).get('capture') === '1') {
