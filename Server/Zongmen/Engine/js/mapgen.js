@@ -114,10 +114,15 @@
   var commCache = new Map();     // "i,j" -> 群落 | null
   var veinNearCache = new Map(); // "q,r" -> 灵脉近邻 {d, v} | null
   var roadFail = new Set();      // "a|b" -> 不可达聚落对 (A* 失败, 终身跳过)
-  /* 缓存满额时淘汰旧一半 (Map 保持插入序), 避免 clear() 造成全量重算尖峰 */
-  function evictHalf(m) {
-    var n = m.size >> 1, it = m.keys();
-    while (n-- > 0) m.delete(it.next().value);
+  /* P3: 地块级缓存固定容量 (Map 保持插入序)。超限时每次淘汰最旧 1 条,
+     单条 delete 的开销摊薄到每次插入 → 不再有「超大 Map 一次性删半」的长停顿;
+     内存有界; 淘汰仅影响命中率, 不改变确定性结果。 */
+  var ELEV_CAP = 40000;    // 海拔缓存: 视野区 + 探路邻域 ≈ 数十区块
+  var FIELD_CAP = 30000;   // 完整地块场缓存 (每项含对象, 容量略小)
+  var VEIN_CAP = 40000;    // 灵脉近邻缓存
+  function cacheSet(m, key, val, cap) {
+    m.set(key, val);
+    if (m.size > cap) m.delete(m.keys().next().value);   // 淘汰最旧插入项
   }
 
   /* ---------- 基础工具 ---------- */
@@ -167,6 +172,12 @@
 
   /* ---------- 海拔场 (纯函数, 带缓存) ---------- */
   function elevAt(q, r) {
+    return elevAtVN(q, r, null);
+  }
+
+  /* 海拔内部实现: vn 由调用方传入时复用, 避免 fields() 对同一格重复做
+     「灵脉近邻」全量扫描 (elevAt 需要它迁就地貌, fields 还要它做生态/覆写) */
+  function elevAtVN(q, r, vn) {
     var key = q + ',' + r;
     var c = elevCache.get(key);
     if (c !== undefined) return c;
@@ -182,7 +193,7 @@
     var e = NL.clamp(0.06 + e01 * (0.50 + 0.60 * mask) + Math.pow(rg, 2.6) * 0.55 * mask
            + spawn * spawn * 0.30, 0, 1);
     /* 灵脉地形迁就 (设定 §八): 灵脉必是山, 水中灵脉必是岛; 周边过渡山丘 */
-    var vn = veinNear(q, r);
+    if (!vn) vn = veinNear(q, r);
     if (vn) {
       var coreE = CFG.LIFT_CORE[vn.v.level] || 0.70;
       if (vn.d === 0) {                       // 中心格: 高山档
@@ -199,8 +210,7 @@
         if (t3 > e) e = e + (t3 - e) * 0.35;
       }
     }
-    if (elevCache.size > 150000) evictHalf(elevCache);
-    elevCache.set(key, e);
+    cacheSet(elevCache, key, e, ELEV_CAP);
     return e;
   }
 
@@ -210,7 +220,9 @@
     var c = fieldCache.get(key);
     if (c) return c;
 
-    var e = elevAt(q, r);
+    /* P3: 灵脉近邻只取一次, 同时供 海拔迁就(elevAtVN) 与 下方生态偏置/灵脉覆写 复用 */
+    var vn = veinNear(q, r);
+    var e = elevAtVN(q, r, vn);
     var s = 0.022;
     var m = NL.clamp(NL.fbm(nMoist, q * s * 0.55 + 31, r * s * 0.55 - 17, 4) * 0.5 + 0.5, 0, 1);
     // 气候带: 沿 y 方向的周期纬度 + 噪声 + 海拔递减
@@ -224,7 +236,6 @@
 
     /* 灵根生态呼应 (设定 §六): 灵脉 d≤3 范围湿度/温度按灵根偏置
        水/木湿润生林, 火干热化焦土, 金微干石化 */
-    var vn = veinNear(q, r);
     if (vn && vn.d <= 3) {
       var ew = vn.d === 1 ? 1 : vn.d === 2 ? 0.55 : 0.25;
       var ee = vn.v.element;
@@ -265,8 +276,7 @@
     var w = tileToWorld(q, r);
     c = { q: q, r: r, x: w.x, y: w.y, e: e, m: m, t: t,
           biome: biome, disp: disp, vein: vinfo, variant: variant, hash: h };
-    if (fieldCache.size > 150000) evictHalf(fieldCache);
-    fieldCache.set(key, c);
+    cacheSet(fieldCache, key, c, FIELD_CAP);
     return c;
   }
 
@@ -365,7 +375,7 @@
         var packed = 0;
         for (var k = 0; k < 6; k++) {
           var nf = fields(q + NEIGH_SLOTS[k][0], r + NEIGH_SLOTS[k][1]);
-          packed += Math.min(nf.biome, 7) * Math.pow(8, k);
+          packed |= Math.min(nf.biome, 7) << (k * 3);   // P2: 3bit/邻居, 移位打包 (等价 *8^k)
         }
         neigh.push(packed);
         /* 立体精灵: 山/雪峰加噪声聚类偏移; 灵脉峰/林/沙/草保持原位 */
@@ -796,8 +806,7 @@
       }
     }
     var out = (best && bd <= 3) ? { d: bd, v: best } : null;
-    if (veinNearCache.size > 200000) evictHalf(veinNearCache);
-    veinNearCache.set(key, out);
+    cacheSet(veinNearCache, key, out, VEIN_CAP);
     return out;
   }
 

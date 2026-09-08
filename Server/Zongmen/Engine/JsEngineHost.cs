@@ -14,6 +14,9 @@ public sealed class JsWorldVm : IDisposable
 {
     private readonly V8ScriptEngine _engine;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    /* P7: MapGenServer dynamic 句柄每 VM 只取一次缓存, 免每次 Call 重新
+       访问 _engine.Script 属性 (高频 chunk/tile 调用的 DLR 属性解析开销) */
+    private readonly dynamic _svc;
     public string Seed { get; }
     public long LastUsed { get; private set; }
 
@@ -22,6 +25,7 @@ public sealed class JsWorldVm : IDisposable
         Seed = seed;
         _engine = new V8ScriptEngine();
         _engine.Evaluate(bundle);
+        _svc = _engine.Script.MapGenServer;
         Call("init", seed);       // MapGen.init(seed)
         Touch();
     }
@@ -35,17 +39,16 @@ public sealed class JsWorldVm : IDisposable
         _gate.Wait();
         try
         {
-            dynamic s = _engine.Script.MapGenServer;
             return fn switch
             {
-                "init" => (string)s.init(args[0]),
-                "chunkJson" => (string)s.chunkJson(args[0], args[1]),
-                "regionJson" => (string)s.regionJson(args[0], args[1]),
-                "commJson" => (string)s.commJson(args[0], args[1]),
-                "tileJson" => (string)s.tileJson(args[0], args[1]),
-                "fieldGridJson" => (string)s.fieldGridJson(args[0], args[1], args[2], args[3]),
-                "metaJson" => (string)s.metaJson(),
-                "_countVeins" => (string)s._countVeins(),
+                "init" => (string)_svc.init(args[0]),
+                "chunkJson" => (string)_svc.chunkJson(args[0], args[1]),
+                "regionJson" => (string)_svc.regionJson(args[0], args[1]),
+                "commJson" => (string)_svc.commJson(args[0], args[1]),
+                "tileJson" => (string)_svc.tileJson(args[0], args[1]),
+                "fieldGridJson" => (string)_svc.fieldGridJson(args[0], args[1], args[2], args[3]),
+                "metaJson" => (string)_svc.metaJson(),
+                "_countVeins" => (string)_svc._countVeins(),
                 _ => throw new InvalidOperationException($"未知 JS 函数: {fn}")
             };
         }
@@ -83,7 +86,9 @@ public sealed class JsEngineHost : IDisposable
 
     public JsWorldVm GetOrCreate(string seed)
     {
-        seed = seed.Length > 80 ? seed[..80] : seed;
+        // 注意: 不可截断 seed 再作 key —— 此前 [..80] 会让「前 80 字符相同」的不同种子
+        // 命中同一 VM, 而 DB 持久化键(WorldKeys.SeedPrefix)是对完整 seed 做 SHA1,
+        // 两端口径不一致 → LRU 命中错世界, 破坏离线确定性。key 与 init(seed) 均用完整字符串。
         lock (_lock)
         {
             if (_vms.TryGetValue(seed, out var vm)) { vm.Touch(); return vm; }
@@ -105,6 +110,18 @@ public sealed class JsEngineHost : IDisposable
     }
 
     public int LiveSeeds => _vms.Count;
+
+    /// <summary>当前常驻(活跃)VM 的 seed 列表快照, 供 SQLite 清理按 seed 前缀过滤。</summary>
+    public List<string> Seeds
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return new List<string>(_vms.Keys);
+            }
+        }
+    }
 
     public void Dispose()
     {

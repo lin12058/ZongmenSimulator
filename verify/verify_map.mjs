@@ -140,6 +140,16 @@ async function verifyComm(seed, ci, cj) {
 /* ---------- 单格详情 ---------- */
 async function verifyTile(seed, q, r) {
   GS.init(seed);
+  /* P4 语义: tileJson 的 onRoad = 只读已生成道路 (点击不触发 A*)。
+     真实客户端点击前必已流式拉取周围 3×3 区域包 → 服务端 VM 已生成这些路;
+     参考端 init() 会清缓存, 故先同样「流式」生成 3×3 区域道路, 两端缓存对齐后再比。 */
+  const ri = Math.floor(q / ref.REGION_M), rj = Math.floor(r / ref.REGION_M);
+  for (let di = -1; di <= 1; di++) {
+    for (let dj = -1; dj <= 1; dj++) {
+      GS.regionJson(ri + di, rj + dj);
+      await getBinary(`/api/map/region?seed=${seed}&i=${ri + di}&j=${rj + dj}`);
+    }
+  }
   const local = JSON.parse(GS.tileJson(q, r));
   const buf = await getBinary(`/api/map/tile?seed=${seed}&q=${q}&r=${r}`);
   const got = PB.decodeTileMsg(buf);

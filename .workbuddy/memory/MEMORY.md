@@ -45,3 +45,13 @@
 - **构建命令**：`dotnet build Server/Zongmen/Zongmen.csproj`（必须给 .csproj 文件；拿目录当参数报 MSB1009，只有 `dotnet run --project` 接收目录）。启动后端 = 仓库根直接跑 `./Server/Zongmen/bin/Debug/net8.0/Zongmen.exe`。
 - **本机 curl 探测 127.0.0.1 必须加 `--noproxy "*"`**：否则请求走环境代理，返回 "upstream connect failed / 积极拒绝" 误判服务已死（甚至可能 exit=0）。后端存活判定一律 `curl -s --noproxy "*" http://127.0.0.1:8140/api/map/meta`。
 - **run_in_background 的后台进程会被外部终止（用户手动 Stop-Process / 会话清理），特征=日志无异常戛然而止**；判定"被杀"而非崩溃看日志尾部无 exception。PowerShell 工具直出输出常被吞，进程盘点用 CIM 落盘临时文件再 Read。
+
+## 性能热点闭合（2026-09-09 P1~P8，待办清单 review.md 已 ✅ 闭环）
+- **`MapWorldService.GetRegionBytes` 必须总是经 JS 生成**（不直读 SQLite 命中），同会话由 `_mem` 缓存兜底。**原因**：P4 把 `tileJson.onRoad` 改为只读 `roadCache`（预算 0，点击零 A*），若区域包从 SQLite 旧行直接命中返回，VM `roadCache` 不热 → `onRoad` 与地图已绘制道路不一致。chunk 端无此问题（其内容纯确定性读、无 VM 共享状态依赖），保留 mem→sqlite 读路径。
+- **`verify/verify_map.mjs verifyTile`** 在 `GS.init(seed)` 后、对比 `tileJson` 前，**先模拟客户端流式 3×3 区域包**（`GS.regionJson(ri+d, rj+d)` + HTTP `/api/map/region`），与 P4「只读缓存」语义一致；否则 Node 端 init 清空 roadCache、server 端 VM 仍热，导致 tile(-8,5) of seed=20260909 onRoad 不稳定 FAIL。修复后 3 次连跑全绿。
+- **`SqliteVirtualContext`**：每操作短连接（`Pooling=True` + `PRAGMA busy_timeout=8000`），启动时 `PRAGMA journal_mode=WAL`（库级持久，使读/写可并发）。写：原 `SetData` 改为入 `ConcurrentQueue<...>`；后台 `Task.Run(WriterLoopAsync)` 每 250ms `BeginTransaction` 批写，失败退回队列重试不阻塞请求路径。`MapWorldService.Store → SetDataDeferred`；`StatsJson` 与 `Dispose` 前必须 `Flush()`，否则 `dbRows` 滞后。
+- **`MemoryVirtualContext`** 加容量上限（默认 8192）：`SetData` 走 `TryAdd` 区分新/旧，仅新项入 `ConcurrentQueue<string> _order`；`_map.Count>cap` 时按入队序逐条 `TryRemove`（残留 entry 用 TryRemove false 容错，不影响语义）。所有条目均确定性可重建，淘汰只损命中率。
+- **`SqliteVirtualContext.PruneExcept(seedPrefixes)`** 拼接 `DELETE ... WHERE NOT (Key LIKE $p0 OR $p1 ...)` 仅保留活跃 seed 前缀（`w:<seed sha1_16>:%`）。`MapWorldService.StatsJson` 每 20 次 stats 调用触发一次 prune，活跃 seed 前缀取自 `JsEngineHost.Seeds` 快照（lock 下 ToList 拷贝）。
+- **`JsEngineHost`**：`private readonly dynamic _svc = _engine.Script.MapGenServer;` 构造时一次缓存，`Call` 7 个 switch 分支全部走 `_svc.xxx`（避免每次取 Script 属性的 DLR 解析）。`Call("init", seed)` 顺序调到 `_svc` 赋值之后。新增 `public List<string> Seeds { get; }` 快照活跃 seed。
+- **`mapgen.js` 缓存**：删 `evictHalf`（超大 Map 半量 delete 一次长停顿），新增 `cacheSet(m,key,val,cap)` 每次插入超 cap 即 `m.delete(m.keys().next().value)` 单条淘汰（摊薄成本）。容量：`ELEV_CAP=40000 / FIELD_CAP=30000 / VEIN_CAP=40000`。新增内部 `elevAtVN(q,r,vn)`；`fields()` 先 `vn=veinNear(q,r)` 一次再传 `elevAtVN`，消除 fields/elevAt 对同格重复扫描。
+- **`mapgen-server.js chunkJson` 单段定宽缓冲**：输出 `{ca,cb,count,pn,d:<base64>}`，布局 11nB 地块（cq/cr/tiles u8 + elev/hash u16le + neigh u32le）+ 13pnB 精灵（pdx/pdy f32le + psp u8 + ph/pe u16le），全小端。`MapWorldService.BuildChunk` 用 `Slice(raw,o,len)` 切回 `ChunkPayload`，含长度断言。删除旧 `f32bytes/u16bytes/u32bytes/u8bytes/tileBytes/toU8` 辅助。

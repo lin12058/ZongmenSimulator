@@ -25,6 +25,9 @@
   var regionCells = new Map();      // 'i,j' -> RegionPack
   var commCells = new Map();        // 'ci,cj' -> CommunityPack
   var chunkQueue = [], chunkBusy = new Map(), chunkFail = new Set();
+  var chunkRetry = new Map();   // key -> { attempt, at }: 可重试失败(网络/5xx)的退避计划, at 为下次可入队时间
+  var CHUNK_RETRY_BASE_MS = 800;    // 指数退避基数
+  var CHUNK_RETRY_MAX_MS = 30000;   // 单次退避上限
   var regionBusy = new Set(), commBusy = new Set();
   var regionQueue = [], commQueue = [];
   var CONC_CHUNK = 3, CONC_EXTRA = 6;
@@ -39,6 +42,9 @@
   var staticCam = { x: NaN, y: NaN, zoom: NaN, w: 0, h: 0 };
   var staticDirty = true;
   var lastPan = { x: 0, y: 0, zoom: 0 };
+  /* P1: 流式需求集增量阈值 —— 记录上次全量重算时的相机状态,
+     NaN 初始值强制首帧重算; regenerate() 时重置回 NaN。 */
+  var lastStream = { x: NaN, y: NaN, zoom: NaN, w: 0, h: 0 };
 
   function $(id) { return document.getElementById(id); }
   function chunkKey(ca, cb) { return ca + ',' + cb; }
@@ -91,6 +97,30 @@
   }
 
   function updateStreaming() {
+    var vw = els.app.clientWidth, vh = els.app.clientHeight;
+    /* P1: 相机位移/缩放/视口尺寸超过阈值才全量重建需求集 (阈值公式与
+       staticNeedsRedraw 的 scale 同思路, 随 zoom 缩小);
+       相机静止且无到期重试时, 只推进存量队列, 不做三层象限扫描/卸载/排序。 */
+    var stScale = 16 / (cam.zoom * 0.75 + 0.25);
+    var moved = lastStream.x !== lastStream.x ||          // 首帧 / regenerate 后为 NaN → 必须重算
+                vw !== lastStream.w || vh !== lastStream.h ||
+                Math.abs(cam.x - lastStream.x) > stScale ||
+                Math.abs(cam.y - lastStream.y) > stScale ||
+                Math.abs(cam.zoom - lastStream.zoom) > 0.02;
+    if (!moved) {
+      var tNow0 = performance.now();
+      var retryDue = false;
+      chunkRetry.forEach(function (rr) { if (rr.at <= tNow0) retryDue = true; });
+      if (!retryDue) {
+        pumpChunks();                                     // 在途完成回调也会自 pump
+        if (regionQueue.length) pumpExtra(regionQueue, regionBusy, 'region');
+        if (commQueue.length) pumpExtra(commQueue, commBusy, 'comm');
+        return;
+      }
+    }
+    lastStream.x = cam.x; lastStream.y = cam.y;
+    lastStream.zoom = cam.zoom; lastStream.w = vw; lastStream.h = vh;
+
     var b = viewBounds();
     var t = tileBoundsOf(b, 2);
     /* 视野区域/群落格窗口 */
@@ -126,16 +156,21 @@
       }
     });
 
-    /* 队列重建: 未加载 && 未在途 && 未失败, 距相机排序 */
+    /* 队列重建: 未加载 && 未在途 && 未失败 && 不在退避期内, 距相机排序 */
     chunkQueue.length = 0;
+    var tNow = performance.now();
     for (var key in need) {
-      if (!chunkData.has(key) && !chunkBusy.has(key) && !chunkFail.has(key)) {
+      var rr = chunkRetry.get(key);
+      if (!chunkData.has(key) && !chunkBusy.has(key) && !chunkFail.has(key) &&
+          (!rr || rr.at <= tNow)) {
         var cc = need[key];
         var w = MC.tileToWorld(cc.ca * geo.chunkS, cc.cb * geo.chunkS);
         var d = (w.x - cam.x) * (w.x - cam.x) + (w.y - cam.y) * (w.y - cam.y);
         chunkQueue.push({ ca: cc.ca, cb: cc.cb, key: key, d: d });
       }
     }
+    /* 已离开视野的退避记录及时清理, 防止无界增长; 重回视野时重试窗口从零计 */
+    chunkRetry.forEach(function (_v, key) { if (!need[key]) chunkRetry.delete(key); });
     chunkQueue.sort(function (p, q) { return p.d - q.d; });
     pumpChunks();
 
@@ -182,13 +217,34 @@
         staticDirty = true;                          // 浪线等随新区块补齐
       }
     }).catch(function (err) {
-      chunkFail.add(job.key);                        // 失败不再空转重试
       console.error('chunk 加载失败', job.key, err);
+      if (gen !== worldSeed) return;                 // 旧世界失败不记账
+      if (isDefinitiveChunkError(err)) {
+        chunkRetry.delete(job.key);
+        chunkFail.add(job.key);                      // 404 等确定性错误: 重试无意义, 放弃
+      } else {
+        scheduleChunkRetry(job);                     // 网络/5xx/超时: 指数退避后自动重试
+      }
     }).then(function () {
       if (gen !== worldSeed) return;                 // 旧世界请求不动新世界的 busy 集
       chunkBusy.delete(job.key);
       pumpChunks();
     });
+  }
+
+  /* 判定确定性错误(HTTP 404): 重试无意义; 其余(网络中断/5xx/超时)按可重试处理 */
+  function isDefinitiveChunkError(err) {
+    return err && /^HTTP 404\b/.test(err.message || '');
+  }
+
+  /* 指数退避: 0.8s→1.6→3.2→6.4→12.8→…→30s 封顶, 之后保持 30s 周期重试,
+     直至块离开视野(记录被清理)或 regenerate() 重铸世界。不永久放弃, 服务抖动恢复后地图可自愈。 */
+  function scheduleChunkRetry(job) {
+    var r = chunkRetry.get(job.key);
+    var attempt = r ? r.attempt : 0;
+    attempt++;
+    var delay = Math.min(CHUNK_RETRY_BASE_MS * Math.pow(2, attempt - 1), CHUNK_RETRY_MAX_MS);
+    chunkRetry.set(job.key, { attempt: attempt, at: performance.now() + delay });
   }
 
   function pumpChunks() {
@@ -406,7 +462,7 @@
         if (biome === 1) {
           var nv = neigh[i];
           for (var wn = 0; wn < 6; wn++) {
-            var nb = Math.floor(nv / Math.pow(8, wn)) % 8;
+            var nb = (nv >> (wn * 3)) & 7;      // P2: 3bit/邻居 移位掩码解码, 免逐邻居 Math.pow(8,wn)
             if (nb > 1) { nearLand = true; break; }
           }
         }
@@ -702,7 +758,9 @@
     commCells.clear();
     chunkQueue.length = 0;
     chunkFail.clear();
+    chunkRetry.clear();
     chunkBusy.clear();                // 旧世界在途回调带 gen 守卫, 不会误删新世界标记
+    lastStream.x = NaN;               // P1: 重置流式增量状态 → 首帧强制全量重建
     regionBusy.clear();
     commBusy.clear();
     mmData = null;

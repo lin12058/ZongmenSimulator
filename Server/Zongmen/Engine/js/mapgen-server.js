@@ -33,35 +33,7 @@
     }
     return out;
   }
-  function toU8(ta) { return new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength); }
-
-  /* Float32Array → uint8 (LE 字节序直出) */
-  function f32bytes(ta) {
-    var u = toU8(ta);
-    return b64FromBytes(u);           // 本机一律小端, V8 强制小端
-  }
-  function u16bytes(ta) {
-    var u = new Uint8Array(ta.length * 2), dv = new DataView(u.buffer);
-    for (var i = 0; i < ta.length; i++) dv.setUint16(i * 2, ta[i], true);
-    return b64FromBytes(u);
-  }
-  function u32bytes(ta) {
-    var u = new Uint8Array(ta.length * 4), dv = new DataView(u.buffer);
-    for (var i = 0; i < ta.length; i++) dv.setUint32(i * 4, ta[i], true);
-    return b64FromBytes(u);
-  }
-  function u8bytes(ta) {
-    var u = new Uint8Array(ta.length), dv = new DataView(u.buffer);
-    for (var i = 0; i < ta.length; i++) dv.setUint8(i, ta[i]);
-    return b64FromBytes(u);
-  }
-  /* 地块字节: Float32Array 中存放的是整数语义 biome*4+variant, 逐值转 u8 */
-  function tileBytes(ta) {
-    var u = new Uint8Array(ta.length);
-    for (var i = 0; i < ta.length; i++) u[i] = Math.round(ta[i]);
-    return b64FromBytes(u);
-  }
-  /* 全局降噪: V8 里个别 .NET 宿主不会给 Math.imul 之外的标准库, 无需处理 */
+  /* P5: 定宽字段已并入 chunkJson 单段缓冲, 不再需要逐段 b64 辅助函数 */
 
   /* ---------- 区块: 相对区块中心 + u16 量化 ---------- */
   function chunkJson(ca, cb) {
@@ -71,42 +43,39 @@
     var cc = { q: ca * S, r: cb * S };            // 区块中心格 (与 mapgen chunkCenter 一致)
     var cqx = MG.tileToWorld(cc.q, cc.r);         // 区块中心世界像素 (绝对)
 
-    var cq = new Uint8Array(n), cr = new Uint8Array(n);
-    var elev = new Uint16Array(n), hash = new Uint16Array(n);
-    var neigh = new Uint32Array(n);
-    var dx = d.centers, dy = d.centers;       // centers 交错 x,y
-    var cy;
-    for (var i = 0; i < n; i++) {
-      var fx = dx[i * 2], fy = dy[i * 2 + 1];
+    /* P5: 全部定宽字段按段连续拼进单段缓冲 → 仅 1 次 base64 + 少量 JSON key,
+       替代原先 13 段独立 base64 + JSON 序列化/双转码的开销。
+       布局 (全部小端, 与 C# MapWorldService.BuildChunk 逐段切片严格对应):
+         地块段: cq[n] | cr[n] | tiles[n] | elev[2n] | hash[2n] | neigh[4n]   (小计 11n)
+         精灵段: pdx[4pn] | pdy[4pn] | psp[pn] | ph[2pn] | pe[2pn]            (小计 13pn) */
+    var pn = d.propCenters.length / 2;
+    var buf = new Uint8Array(n * 11 + pn * 13);
+    var dv = new DataView(buf.buffer);
+    var oCq = 0, oCr = n, oTiles = 2 * n;
+    var oElev = 3 * n, oHash = 5 * n, oNeigh = 7 * n;
+    var oPdx = 11 * n, oPdy = oPdx + 4 * pn, oPsp = oPdy + 4 * pn,
+        oPh = oPsp + pn, oPe = oPh + 2 * pn;
+    var i, k;
+    for (i = 0; i < n; i++) {
+      var fx = d.centers[i * 2], fy = d.centers[i * 2 + 1];
       /* 反解轴坐标: y=12r(精确), x=HEX_W*(q+r/2) */
       var r = Math.round(fy / (1.5 * HEX_R));
       var q = Math.round(fx / HEX_W - r / 2);
-      cq[i] = (q - cc.q) + 16;                // 相对区块中心, +16 偏移
-      cr[i] = (r - cc.r) + 16;
-      var e = d.elevs[i];
-      elev[i] = Math.max(0, Math.min(65535, Math.round(e * 65535)));
-      var h = d.hashes[i];
-      hash[i] = Math.max(0, Math.min(65535, Math.round(h * 65535)));
-      neigh[i] = Math.round(d.neigh[i]);
+      dv.setUint8(oCq + i, (q - cc.q) + 16);           // 相对区块中心, +16 偏移
+      dv.setUint8(oCr + i, (r - cc.r) + 16);
+      dv.setUint8(oTiles + i, Math.round(d.tiles[i])); // biome*4+variant (整数语义)
+      dv.setUint16(oElev + i * 2, Math.max(0, Math.min(65535, Math.round(d.elevs[i] * 65535))), true);
+      dv.setUint16(oHash + i * 2, Math.max(0, Math.min(65535, Math.round(d.hashes[i] * 65535))), true);
+      dv.setUint32(oNeigh + i * 4, Math.round(d.neigh[i]), true);
     }
-    var pc = d.propCenters, pn = pc.length / 2;
-    var pdx = new Float32Array(pn), pdy = new Float32Array(pn);
-    var psp = new Uint8Array(pn), ph = new Uint16Array(pn), pe = new Uint16Array(pn);
-    for (var k = 0; k < pn; k++) {
-      pdx[k] = pc[k * 2] - cqx.x;             // 相对区块中心世界坐标 (px)
-      pdy[k] = pc[k * 2 + 1] - cqx.y;
-      psp[k] = d.propSprites[k];
-      ph[k] = Math.max(0, Math.min(65535, Math.round(d.propHashes[k] * 65535)));
-      pe[k] = Math.max(0, Math.min(65535, Math.round(d.propElevs[k] * 65535)));
+    for (k = 0; k < pn; k++) {
+      dv.setFloat32(oPdx + k * 4, d.propCenters[k * 2] - cqx.x, true);   // 相对区块中心世界像素 (px)
+      dv.setFloat32(oPdy + k * 4, d.propCenters[k * 2 + 1] - cqx.y, true);
+      dv.setUint8(oPsp + k, d.propSprites[k]);
+      dv.setUint16(oPh + k * 2, Math.max(0, Math.min(65535, Math.round(d.propHashes[k] * 65535))), true);
+      dv.setUint16(oPe + k * 2, Math.max(0, Math.min(65535, Math.round(d.propElevs[k] * 65535))), true);
     }
-    return JSON.stringify({
-      ca: ca, cb: cb, count: n,
-      cq: b64FromBytes(cq), cr: b64FromBytes(cr),
-      tiles: tileBytes(d.tiles),
-      elev: u16bytes(elev), hash: u16bytes(hash), neigh: u32bytes(neigh),
-      pn: pn, pdx: f32bytes(pdx), pdy: f32bytes(pdy),
-      psp: u8bytes(psp), ph: u16bytes(ph), pe: u16bytes(pe)
-    });
+    return JSON.stringify({ ca: ca, cb: cb, count: n, pn: pn, d: b64FromBytes(buf) });
   }
 
   /* ---------- 区域包: 区域信息 + 聚落 + 道路(A* 权威) ---------- */
@@ -174,13 +143,15 @@
       }
       wd = found;
     }
-    /* 是否在路上: 3x3 区域格 roadsNear 的 tiles 集合成员判定 */
+    /* 是否在路上: 3x3 区域格只读已缓存道路 (预算 0 = 纯读 roadCache, 点击绝不触发 A*)。
+       道路生成由「区域包流式加载」按区域一次性完成并写入 roadCache 供全局复用;
+       未流式到的区域其路也未画到地图上, 此处保守返回 false 与画面一致。 */
     var onRoad = false;
     var ci = Math.floor(q / MG.REGION_M), cj = Math.floor(r / MG.REGION_M);
     outer:
     for (var di = -1; di <= 1; di++) {
       for (var dj = -1; dj <= 1; dj++) {
-        var roads = MG.roadsNear(ci + di, cj + dj, 9999);
+        var roads = MG.roadsNear(ci + di, cj + dj, 0);
         for (var t = 0; t < roads.length; t++) {
           if (roads[t].tiles && roads[t].tiles.has(q + ',' + r)) { onRoad = true; break outer; }
         }

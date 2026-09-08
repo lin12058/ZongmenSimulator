@@ -439,7 +439,7 @@
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
       var pd = [data.propCenters, data.propSprites, data.propHashes, data.propElevs];
       var pl = [1, 2, 3, 4];
-      for (k = 0; k < 3; k++) {
+      for (k = 0; k < 4; k++) {   // 4 通道全绑: centers/sprites/hashes/iElev, 漏绑 iElev 会让山/雪峰高度恒为最低档
         var pb = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, pb);
         gl.bufferData(gl.ARRAY_BUFFER, pd[k], gl.STATIC_DRAW);

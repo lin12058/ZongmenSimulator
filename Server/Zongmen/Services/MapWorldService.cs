@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text.Json;
 using Zongmen.Domain;
 using Zongmen.Engine;
@@ -52,24 +53,34 @@ public sealed class MapWorldService : IDisposable
         var json = vm.Call("chunkJson", ca, cb);
         using var d = JsonDocument.Parse(json);
         var root = d.RootElement;
+        var count = root.GetProperty("count").GetInt32();
+        var pn = root.GetProperty("pn").GetInt32();
         var p = new ChunkPayload
         {
             Ca = root.GetProperty("ca").GetInt32(),
             Cb = root.GetProperty("cb").GetInt32(),
-            Count = root.GetProperty("count").GetInt32(),
-            Cq = B64(root, "cq"),
-            Cr = B64(root, "cr"),
-            Tiles = B64(root, "tiles"),
-            Elev = B64(root, "elev"),
-            Hash = B64(root, "hash"),
-            Neigh = B64(root, "neigh"),
-            Pn = root.GetProperty("pn").GetInt32(),
-            Pdx = B64(root, "pdx"),
-            Pdy = B64(root, "pdy"),
-            Psp = B64(root, "psp"),
-            Ph = B64(root, "ph"),
-            Pe = B64(root, "pe"),
+            Count = count,
+            Pn = pn,
         };
+        /* P5: 单段定宽缓冲解包。JS 布局 (全小端):
+             地块段 n×11B = [cq u8][cr u8][tiles u8][elev u16][hash u16][neigh u32]
+             精灵段 pn×13B = [pdx f32][pdy f32][psp u8][ph u16][pe u16] */
+        const int tileBytes = 11, propBytes = 13;
+        var raw = B64(root, "d");
+        int o = 0;
+        p.Cq = Slice(raw, o, count); o += count;
+        p.Cr = Slice(raw, o, count); o += count;
+        p.Tiles = Slice(raw, o, count); o += count;
+        p.Elev = Slice(raw, o, count * 2); o += count * 2;
+        p.Hash = Slice(raw, o, count * 2); o += count * 2;
+        p.Neigh = Slice(raw, o, count * 4); o += count * 4;
+        if (o != count * tileBytes) throw new InvalidDataException("chunk 地块段长度不符");
+        p.Pdx = Slice(raw, o, pn * 4); o += pn * 4;
+        p.Pdy = Slice(raw, o, pn * 4); o += pn * 4;
+        p.Psp = Slice(raw, o, pn); o += pn;
+        p.Ph = Slice(raw, o, pn * 2); o += pn * 2;
+        p.Pe = Slice(raw, o, pn * 2); o += pn * 2;
+        if (o != raw.Length) throw new InvalidDataException("chunk 缓冲长度不符");
         var proto = ProtoCodec.SerToByte(p);
         return GZipCodec.Compress(proto);
     }
@@ -78,7 +89,10 @@ public sealed class MapWorldService : IDisposable
     public byte[] GetRegionBytes(string seed, int i, int j)
     {
         var key = WorldKeys.Region(seed, i, j);
-        var hit = _mem.GetDataBytes(key) ?? _sql?.GetDataBytes(key);
+        /* 区域包含 A* 道路且 tileJson 的 onRoad 依赖 VM roadCache 热状态:
+           若直接命中 SQLite 旧行, VM 不执行生成 → 道路缓存与画面/详情不一致。
+           故区域包总是经 JS 生成(确定性, 与历史字节一致), 同会话由 _mem 缓存兜底。 */
+        var hit = _mem.GetDataBytes(key);
         if (hit != null) return hit;
 
         var vm = World(seed);
@@ -259,22 +273,44 @@ public sealed class MapWorldService : IDisposable
         return json;
     }
 
+    private int _statsCalls;
+
     public string StatsJson()
-        => System.Text.Json.JsonSerializer.Serialize(new
+    {
+        /* P6: 先排空批量落库队列, 计数才反映真实落库进度 */
+        _sql?.Flush();
+        /* P8: 节流触发清理「非活跃 seed」的旧缓存行 (世界可按 seed 确定性重建) */
+        if (_sql != null && _host.LiveSeeds > 0 && (++_statsCalls % 20) == 0)
+        {
+            var prefixes = new List<string>();
+            foreach (var seed in _host.Seeds)
+                prefixes.Add("w:" + WorldKeys.SeedPrefix(seed) + ":");
+            _sql.PruneExcept(prefixes);
+        }
+        return System.Text.Json.JsonSerializer.Serialize(new
         {
             liveSeeds = _host.LiveSeeds,
             dbRows = _sql?.Count() ?? 0,
             memRows = _mem.Count(),
         });
+    }
 
     private void Store(string key, byte[] gz)
     {
         _mem.SetData(key, gz);
-        _sql?.SetData(key, gz);
+        _sql?.SetDataDeferred(key, gz);     // P6: 冷生成异步批量落库, 不阻塞请求路径
     }
 
     private static byte[] B64(JsonElement e, string name)
         => Convert.FromBase64String(e.GetProperty(name).GetString() ?? "");
+
+    private static byte[] Slice(byte[] src, int offset, int len)
+    {
+        if (len <= 0) return [];
+        var dst = new byte[len];
+        Buffer.BlockCopy(src, offset, dst, 0, len);
+        return dst;
+    }
 
     private static float F(JsonElement e, string name)
         => e.GetProperty(name).GetSingle();
@@ -282,6 +318,7 @@ public sealed class MapWorldService : IDisposable
     public void Dispose()
     {
         _host.Dispose();
+        _sql?.Flush();              // P6: 退出前排空批量写入, 尽量落库
         _sql?.Dispose();
         _mem.Dispose();
     }
