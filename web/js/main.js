@@ -231,8 +231,13 @@
   function loadChunk(job) {
     var gen = worldSeed;
     MC.block(gen, job.ca, job.cb).then(function (resp) {
-      if (gen !== worldSeed) return;                 // 世界已重铸, 丢弃旧响应
-      if (!keepChunk.has(job.key)) return;           // R4: 已出视野被卸载, 不回填/不重复上传 GPU
+      /* 修复「个别色块无贴图」(待办/色块无贴图bug排查): MapClient.onFrame 收到
+         响应即无条件写 revs 缓存; 若本块此刻已被丢弃 (出视野/世界重铸), 数据不会
+         经 applyBlock 落 chunkData —— revs 残留会让下次请求携带旧 lastRevs,
+         服务端按 rev 未变缺省下发 → 块永久空白。故两个丢弃分支都主动 blockForget,
+         维持不变量「revs 有记录 ⇒ chunkData 有数据」。 */
+      if (gen !== worldSeed) { MC.blockForget(job.key); return; }   // 世界已重铸, 丢弃旧响应
+      if (!keepChunk.has(job.key)) { MC.blockForget(job.key); return; }  // R4: 已出视野被卸载
       applyBlock(job, resp);
     }).catch(function (err) {
       console.error('块加载失败', job.key, err);
@@ -252,6 +257,15 @@
 
     /* 图层0 静态地形 (子消息缺省 = rev 未变, 保留已上传 GPU 的数据) */
     var arrays = resp.chunk ? PB.chunkToArrays(resp.chunk, geo) : null;
+    /* 兜底防御: chunk 缺省 (=服务端按 rev 未变不重发) 但本地从未持有该块 —
+       说明 revs 缓存与 chunkData 不一致 (旧版竞态已造成的坏状态, 或不可达
+       的遗漏路径)。清 rev 后重新入队, 下一次请求不带 lastRevs → 服务端全量
+       下发, 消除永久空白。 */
+    if (!arrays && !chunkData.has(job.key)) {
+      MC.blockForget(job.key);
+      chunkQueue.push(job);          // 本回调 finally 的 pumpChunks 会立即消费
+      return;
+    }
     if (arrays && !chunkData.has(job.key)) {
       var bb = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
       var ct = arrays.centers;
