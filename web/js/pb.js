@@ -305,11 +305,211 @@
     return m;
   }
 
+  /* ============================================================
+   * WebSocket 单块协议 (设计 §三)
+   *   帧格式: [1 字节类型][载荷]; TileResponse 载荷为 gzip(protobuf)。
+   *   服务端契约: Server/Zongmen/Domain/MapMessages.cs (WsFrame 起始)。
+   * ============================================================ */
+
+  var FRAME = { LOGIN: 1, TILE: 2, PING: 3 };
+  var MASK = { CHUNK: 1, REGION: 2, SETTLE: 4, POI: 8, COMM: 16, ALL: 31 };
+
+  /* ---------------- 微型编码器 (仅覆盖本协议所需) ---------------- */
+  function Writer() { this.a = []; }              // 字节数组 (Array<number> → Uint8Array)
+  Writer.prototype.done = function () { return new Uint8Array(this.a); };
+  function wvi(w, v) {                            // 无符号 varint (v ≥ 0, ≤ 2^53)
+    v = Math.round(v);
+    while (v >= 128) { w.a.push((v % 128) | 128); v = Math.floor(v / 128); }
+    w.a.push(v);
+  }
+  function wzz(w, v) { wvi(w, v >= 0 ? v * 2 : -v * 2 - 1); }   // sint zigzag
+  function wtag(w, field, wire) { wvi(w, field * 8 + wire); }
+  function wstr(w, field, s) {
+    var u = new TextEncoder().encode(s || '');
+    wtag(w, field, 2); wvi(w, u.length);
+    for (var i = 0; i < u.length; i++) w.a.push(u[i]);
+  }
+  function wbytes(w, field, u8) {
+    wtag(w, field, 2); wvi(w, u8.length);
+    for (var i = 0; i < u8.length; i++) w.a.push(u8[i]);
+  }
+  /* encodeTileRequest({op,seed,i,j,mask,seq,lastRevs}) → Uint8Array */
+  function encodeTileRequest(o) {
+    var w = new Writer();
+    if (o.op) { wtag(w, 1, 0); wvi(w, o.op); }
+    if (o.seed) wstr(w, 2, o.seed);
+    wtag(w, 3, 0); wzz(w, o.i | 0);
+    wtag(w, 4, 0); wzz(w, o.j | 0);
+    wtag(w, 5, 0); wvi(w, o.mask || 0);
+    if (o.seq) { wtag(w, 6, 0); wvi(w, o.seq); }
+    if (o.lastRevs && o.lastRevs.length) {
+      var tmp = new Writer();
+      for (var k = 0; k < o.lastRevs.length; k++) wvi(tmp, Math.max(0, o.lastRevs[k] | 0));
+      wbytes(w, 7, tmp.a.length ? new Uint8Array(tmp.a) : new Uint8Array(0));
+    }
+    return w.done();
+  }
+  /* encodeLogin({account,token}) → Uint8Array */
+  function encodeLogin(o) {
+    var w = new Writer();
+    if (o.account) wstr(w, 1, o.account);
+    if (o.token) wstr(w, 2, o.token);
+    return w.done();
+  }
+
+  function decodeLoginResponse(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { ok: false, err: '', account: '' };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.ok = (t.wire === 0) ? r.vi() === 1 : (r.skip(t.wire), false);
+      else if (t.field === 2) m.err = rdStr(r, t);
+      else if (t.field === 3) m.account = rdStr(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+
+  /* ---------------- TileResponse ---------------- */
+  /* 1i 2j zz | 3mask 4deniedMask u32 | 5err str | 6seq u32 | 7revs packed |
+     10 chunk(ChunkPayload 原始字节) | 11 regions[] | 12 settle | 13 poi | 14 comms[] */
+  function decodeTileResponse(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { i: 0, j: 0, mask: 0, deniedMask: 0, err: '', seq: 0, revs: [],
+              chunk: null, regions: [], settle: null, poi: null, comms: [] };
+    while (r.p < r.end) {
+      var t = r.tag();
+      switch (t.field) {
+        case 1: m.i = rdSInt(r, t); break;
+        case 2: m.j = rdSInt(r, t); break;
+        case 3: m.mask = rdInt(r, t); break;
+        case 4: m.deniedMask = rdInt(r, t); break;
+        case 5: m.err = rdStr(r, t); break;
+        case 6: m.seq = rdInt(r, t); break;
+        case 7:                                     // repeated int32 (packed / 非packed 兼容)
+          if (t.wire === 2) {
+            var e7 = r.p + r.vi();
+            while (r.p < e7) m.revs.push(r.vi());
+          } else if (t.wire === 0) m.revs.push(r.vi());
+          else r.skip(t.wire);
+          break;
+        case 10: m.chunk = decodeChunkMsg(r.bin(rdLen(r, t))); break;
+        case 11: m.regions.push(parseRegionData(r.bin(rdLen(r, t)))); break;
+        case 12: m.settle = parseEntityData(r.bin(rdLen(r, t))); break;
+        case 13: m.poi = parseEntityData(r.bin(rdLen(r, t))); break;
+        case 14: m.comms.push(decodeCommMsg(r.bin(rdLen(r, t)))); break;
+        default: r.skip(t.wire);
+      }
+    }
+    return m;
+  }
+
+  /* RegionData: 1i 2j zz | 3 region 信息 | 4 roads[] */
+  function parseRegionData(u8) {
+    var r = new Reader(u8);
+    var m = { i: 0, j: 0, region: null, roads: [] };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.i = rdSInt(r, t);
+      else if (t.field === 2) m.j = rdSInt(r, t);
+      else if (t.field === 3 && t.wire === 2) m.region = parseRegionInfo(r.bin(rdLen(r, t)));
+      else if (t.field === 4 && t.wire === 2) m.roads.push(parseRoad(r.bin(rdLen(r, t))));
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  function parseRegionInfo(u8) {
+    var r = new Reader(u8);
+    var m = { q: 0, r: 0, x: 0, y: 0, biome: 0, name: '' };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.q = rdSInt(r, t);
+      else if (t.field === 2) m.r = rdSInt(r, t);
+      else if (t.field === 3) m.x = rdF32(r, t);
+      else if (t.field === 4) m.y = rdF32(r, t);
+      else if (t.field === 5) m.biome = rdInt(r, t);
+      else if (t.field === 6) m.name = rdStr(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  function parseRoad(u8) {
+    var r = new Reader(u8);
+    var m = { key: '', x0: 0, y0: 0, x1: 0, y1: 0, pts: null };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.key = rdStr(r, t);
+      else if (t.field === 2) m.x0 = rdF32(r, t);
+      else if (t.field === 3) m.y0 = rdF32(r, t);
+      else if (t.field === 4) m.x1 = rdF32(r, t);
+      else if (t.field === 5) m.y1 = rdF32(r, t);
+      else if (t.field === 6 && t.wire === 2) m.pts = toF32(r.bin(rdLen(r, t)));
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+
+  /* SettleData/PoiData: 1 groups[] */
+  function parseEntityData(u8) {
+    var r = new Reader(u8);
+    var m = { groups: [] };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1 && t.wire === 2) m.groups.push(parseEntityGroup(r.bin(rdLen(r, t))));
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  /* EntityGroup: 1i 2j zz | 3 items[] */
+  function parseEntityGroup(u8) {
+    var r = new Reader(u8);
+    var m = { i: 0, j: 0, items: [] };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.i = rdSInt(r, t);
+      else if (t.field === 2) m.j = rdSInt(r, t);
+      else if (t.field === 3 && t.wire === 2) m.items.push(parsePlaceEntity(r.bin(rdLen(r, t))));
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  /* PlaceEntity: 1id 2type | 3q 4r zz | 5x 6y f32 | 7name | 8pop | 9owner | 10tier | 11state | 12expireTs */
+  function parsePlaceEntity(u8) {
+    var r = new Reader(u8);
+    var m = { id: '', type: '', q: 0, r: 0, x: 0, y: 0, name: '', pop: 0,
+              owner: '', tier: 0, state: 0, expireTs: 0 };
+    while (r.p < r.end) {
+      var t = r.tag();
+      switch (t.field) {
+        case 1: m.id = rdStr(r, t); break;
+        case 2: m.type = rdStr(r, t); break;
+        case 3: m.q = rdSInt(r, t); break;
+        case 4: m.r = rdSInt(r, t); break;
+        case 5: m.x = rdF32(r, t); break;
+        case 6: m.y = rdF32(r, t); break;
+        case 7: m.name = rdStr(r, t); break;
+        case 8: m.pop = rdInt(r, t); break;
+        case 9: m.owner = rdStr(r, t); break;
+        case 10: m.tier = rdInt(r, t); break;
+        case 11: m.state = rdInt(r, t); break;
+        case 12: m.expireTs = rdInt(r, t); break;
+        default: r.skip(t.wire);
+      }
+    }
+    return m;
+  }
+
   g.PB = {
     decodeChunkMsg: decodeChunkMsg,
     chunkToArrays: chunkToArrays,
     decodeRegionMsg: decodeRegionMsg,
     decodeCommMsg: decodeCommMsg,
-    decodeTileMsg: decodeTileMsg
+    decodeTileMsg: decodeTileMsg,
+    FRAME: FRAME,
+    MASK: MASK,
+    encodeTileRequest: encodeTileRequest,
+    encodeLogin: encodeLogin,
+    decodeLoginResponse: decodeLoginResponse,
+    decodeTileResponse: decodeTileResponse
   };
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));

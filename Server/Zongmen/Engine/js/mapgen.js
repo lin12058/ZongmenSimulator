@@ -545,10 +545,18 @@
                 : type === 'town' ? (hash01(i, j, 93) * 6000 + 4000) | 0
                 : (hash01(i, j, 94) * 900 + 200) | 0;
         if (inVeinDomain && type !== 'sect') pop = (pop * 1.3) | 0;
+        /* 实体骨架字段 (WebSocket 单块接口设计 §3.4): tier 等级/规模,
+           state 状态机位 (0活跃 1被毁 2刷新中 3事件态), owner 归属,
+           expireTs 到期刷新 (0=永久)。当前世界为确定性无事件态:
+           state 恒 0、owner 空、expireTs 恒 0, 字段先落地供事件系统接入。 */
+        var tier = type === 'sect' ? 1 + ((hash01(i, j, 95) * 3) | 0)
+                 : type === 'city' ? 3
+                 : type === 'town' ? 2 : 1;
         arr.push({
           id: i + '_' + j + '_' + k, type: type,
           q: placed.q, r: placed.r, x: placed.x, y: placed.y,
-          name: genName(type, i, j, k), pop: pop
+          name: genName(type, i, j, k), pop: pop,
+          owner: '', tier: tier, state: 0, expireTs: 0
         });
       }
       // 秘境: 8% 的区域格, 落在荒僻地块
@@ -558,7 +566,8 @@
         var pf = fields(pq, pr);
         if (pf.biome >= BIOME.FOREST && pf.biome !== BIOME.BEACH) {
           arr.push({ id: i + '_' + j + '_p', type: 'poi', q: pq, r: pr, x: pf.x, y: pf.y,
-                     name: genName('poi', i, j, 9), pop: 0 });
+                     name: genName('poi', i, j, 9), pop: 0,
+                     owner: '', tier: 1 + ((hash01(i, j, 96) * 2) | 0), state: 0, expireTs: 0 });
         }
       }
     }
@@ -681,7 +690,12 @@
         if (!road) {
           if (budget <= 0) continue;               // 预算用尽: 本帧不算
           budget--;
-          var path = astar(a.q, a.r, b.q, b.r);
+          /* 方向归一化: A* 端点固定按 id 序 (小→大), 使道路点列方向
+             与「哪个聚落先发起建路」无关 —— 否则热缓存命中与冷生成
+             会得到同一路径的相反点列, 破坏跨会话一致性。 */
+          var pA = a, pB = b;
+          if (b.id < a.id) { pA = b; pB = a; }
+          var path = astar(pA.q, pA.r, pB.q, pB.r);
           if (!path) { setAdd(roadFail, rkey, ROADFAIL_CAP); continue; }
           var pts = [], tset = new Set();
           for (var pj = 0; pj < path.length; pj++) {

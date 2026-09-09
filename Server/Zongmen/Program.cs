@@ -21,10 +21,12 @@ builder.Services.AddSingleton(new MapWorldService(options, contentRoot));
 
 var app = builder.Build();
 
-/* 前端代理在前, /api/* 自动放行给端点 */
+/* 前端代理在前, /api/* 与 /ws/* 自动放行给端点 */
 app.UseMiddleware<StaticWebMiddleware>(webDir);
 app.UseMiddleware<ApiRateLimitMiddleware>();   // R6: per-IP 限流, 保护 tile/fields 即时计算不被钉死
+app.UseWebSockets();                           // WebSocket 单块接口 (设计 §三/§五)
 MapEndpoints.Map(app, app.Services.GetRequiredService<MapWorldService>());
+MapWsHandler.Map(app, app.Services.GetRequiredService<MapWorldService>());
 MapEndpoints.MapDebug(app, Path.Combine(ZongmenPaths.FindRoot(contentRoot), "verify", "capture.png"));
 
 app.Lifetime.ApplicationStarted.Register(() =>

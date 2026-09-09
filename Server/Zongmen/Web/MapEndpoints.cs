@@ -4,9 +4,9 @@ namespace Zongmen.Web;
 
 /* ============================================================
  * API 端点 — /api/map/*
- *   chunk / region / comm / tile: gzip(protobuf) 二进制下发
- *     (设置 Content-Encoding: gzip, 客户端 fetch 透明解压)
- *   meta / fields / stats: JSON
+ *   WebSocket 单块重构后 (设计 §一.3): 图数据 (chunk/region/comm)
+ *   全部走 ws://…/ws/map, HTTP 不再保留任何拉图接口 (验收 §8.4)。
+ *   meta / stats / tile / fields: JSON 或 gzip(protobuf)
  * ============================================================ */
 
 public static class MapEndpoints
@@ -20,15 +20,6 @@ public static class MapEndpoints
 
         app.MapGet("/api/map/stats", () =>
             Results.Text(svc.StatsJson(), "application/json; charset=utf-8"));
-
-        app.MapGet("/api/map/chunk", (string seed, int ca, int cb, HttpContext ctx) =>
-            Binary(ctx, svc.GetChunkBytes(seed, ca, cb)));
-
-        app.MapGet("/api/map/region", (string seed, int i, int j, HttpContext ctx) =>
-            Binary(ctx, svc.GetRegionBytes(seed, i, j)));
-
-        app.MapGet("/api/map/comm", (string seed, int ci, int cj, HttpContext ctx) =>
-            Binary(ctx, svc.GetCommBytes(seed, ci, cj)));
 
         app.MapGet("/api/map/tile", (string seed, int q, int r, HttpContext ctx) =>
             Binary(ctx, svc.GetTileBytes(seed, q, r)));

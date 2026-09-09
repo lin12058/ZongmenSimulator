@@ -173,6 +173,12 @@ public sealed class MapWorldService : IDisposable
                 Y = F(s, "y"),
                 Name = s.GetProperty("name").GetString() ?? "",
                 Pop = s.GetProperty("pop").GetInt32(),
+                /* WebSocket 单块接口 (设计 §3.4): 实体骨架字段 */
+                Owner = s.TryGetProperty("owner", out var ow) && ow.ValueKind == JsonValueKind.String
+                    ? ow.GetString() ?? "" : "",
+                Tier = s.TryGetProperty("tier", out var tr) ? tr.GetInt32() : 0,
+                State = s.TryGetProperty("state", out var stt) ? stt.GetInt32() : 0,
+                ExpireTs = s.TryGetProperty("expireTs", out var ex) ? ex.GetInt64() : 0,
             });
         }
         foreach (var rd in r.GetProperty("roads").EnumerateArray())
@@ -270,6 +276,153 @@ public sealed class MapWorldService : IDisposable
             }
         }
     }
+
+    /* ---------------- WebSocket 单块统一接口 (设计 §3/§4) ----------------
+     * GetTileBlock(i, j, mask, lastRevs): 一个块 = 一个 TileResponse,
+     * 内含 chunk/region/settle/poi/comm 五个独立子消息, mask 按位选层。
+     * 主块坐标系 = 区块格 (方案 A): i,j 即 chunk (ca,cb);
+     * 块覆盖的 region/comm 格由 JS blockLayersJson 权威给出。
+     * Revs: 按块的图层版本 (对齐 roadVer 思路)。当前世界确定性无事件,
+     * rev 恒 1; 客户端带 lastRevs 且未变化时该层子消息缺省 (响应最小化)。
+     * 未来建筑事件只需 BumpBlockRev 后让客户端重拉该块即可。 */
+    private sealed class BlockRevs
+    {
+        public int Chunk = 1, Region = 1, Settle = 1, Poi = 1, Comm = 1;
+        public int ByBit(int bit) => bit switch
+        {
+            0 => Chunk, 1 => Region, 2 => Settle, 3 => Poi, _ => Comm
+        };
+        public void Bump(uint mask)
+        {
+            if ((mask & (uint)TileMask.Chunk) != 0) Chunk++;
+            if ((mask & (uint)TileMask.Region) != 0) Region++;
+            if ((mask & (uint)TileMask.Settle) != 0) Settle++;
+            if ((mask & (uint)TileMask.Poi) != 0) Poi++;
+            if ((mask & (uint)TileMask.Comm) != 0) Comm++;
+        }
+    }
+
+    private readonly ConcurrentDictionary<string, BlockRevs> _blockRev = new();
+
+    /// <summary>事件钩子 (预留): 置某块某图层脏, 客户端下次带旧 rev 重拉时才会收到该层数据。</summary>
+    public void BumpBlockRev(string seed, int i, int j, TileMask layers)
+    {
+        var revs = _blockRev.GetOrAdd("blk:" + WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j,
+                                      _ => new BlockRevs());
+        revs.Bump((uint)layers);
+    }
+
+    public TileResponse GetTileBlock(string seed, int i, int j, uint maskReq, List<int>? lastRevs)
+    {
+        var mask = maskReq == 0 ? (uint)TileMask.All : maskReq & (uint)TileMask.All;
+        var revs = _blockRev.GetOrAdd("blk:" + WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j,
+                                      _ => new BlockRevs());
+        int[] revArr = [revs.Chunk, revs.Region, revs.Settle, revs.Poi, revs.Comm];
+        var resp = new TileResponse { I = i, J = j, Mask = mask, Revs = [.. revArr] };
+
+        /* 图层是否需要下发: mask 命中 且 (客户端未持有 或 rev 已变化) */
+        bool Need(int bit)
+        {
+            if ((mask & (1u << bit)) == 0) return false;
+            var lr = lastRevs != null && bit < lastRevs.Count ? lastRevs[bit] : 0;
+            return lr <= 0 || lr != revArr[bit];
+        }
+        bool needChunk = Need(0), needRegion = Need(1), needSettle = Need(2),
+             needPoi = Need(3), needComm = Need(4);
+        if (!needChunk && !needRegion && !needSettle && !needPoi && !needComm)
+            return resp;   // 全层 rev 未变: 最小响应 (验收 §8.6)
+
+        var vm = World(seed);
+        if (needChunk)
+            resp.Chunk = GzUnwrap(GetChunkBytes(seed, i, j));
+
+        /* 块归属映射: 仅在需要 region/settle/poi/comm 层时向 JS 取一次 */
+        ((int, int)[] regions, (int, int)[] comms)? layers =
+            (needRegion || needSettle || needPoi || needComm) ? GetBlockLayers(vm, i, j) : null;
+
+        /* 图层1/2/3 共用区域包: 聚落实体从 RegionPack.settlements 拆出 */
+        if (needRegion || needSettle || needPoi)
+        {
+            var settleGroups = new List<EntityGroup>();
+            var poiGroups = new List<EntityGroup>();
+            foreach (var (ri, rj) in layers!.Value.regions)
+            {
+                var pack = DesFromGz<RegionPack>(GetRegionBytes(seed, ri, rj));
+                if (needRegion)
+                {
+                    resp.Regions.Add(new RegionData
+                    {
+                        I = ri, J = rj, Info = pack.Region, Roads = pack.Roads,
+                    });
+                }
+                if (needSettle)
+                {
+                    var items = new List<PlaceEntity>();
+                    foreach (var s in pack.Settlements)
+                    {
+                        if (s.Type == "poi") continue;
+                        items.Add(ToEntity(s));
+                    }
+                    if (items.Count > 0) settleGroups.Add(new EntityGroup { I = ri, J = rj, Items = items });
+                }
+                if (needPoi)
+                {
+                    var items = new List<PlaceEntity>();
+                    foreach (var s in pack.Settlements)
+                    {
+                        if (s.Type != "poi") continue;
+                        items.Add(ToEntity(s));
+                    }
+                    if (items.Count > 0) poiGroups.Add(new EntityGroup { I = ri, J = rj, Items = items });
+                }
+            }
+            if (needSettle && settleGroups.Count > 0) resp.Settle = new SettleData { Groups = settleGroups };
+            if (needPoi && poiGroups.Count > 0) resp.Poi = new PoiData { Groups = poiGroups };
+        }
+
+        /* 图层4: 群落包原样嵌入 (CommunityPack protobuf) */
+        if (needComm)
+        {
+            foreach (var (ci, cj) in layers!.Value.comms)
+                resp.Comms.Add(GzUnwrap(GetCommBytes(seed, ci, cj)));
+        }
+        return resp;
+    }
+
+    private static PlaceEntity ToEntity(SettlementDto s) => new()
+    {
+        Id = s.Id, Type = s.Type, Q = s.Q, R = s.R, X = s.X, Y = s.Y,
+        Name = s.Name, Pop = s.Pop, Owner = s.Owner,
+        Tier = s.Tier, State = s.State, ExpireTs = s.ExpireTs,
+    };
+
+    /* 块归属映射: (regions[], comms[]) — JS 权威 (blockLayersJson) */
+    private ((int, int)[] regions, (int, int)[] comms) GetBlockLayers(JsWorldVm vm, int i, int j)
+    {
+        using var d = JsonDocument.Parse(vm.Call("blockLayersJson", i, j));
+        var r = d.RootElement;
+        var regions = ReadPairs(r.GetProperty("regions"));
+        var comms = ReadPairs(r.GetProperty("comms"));
+        return (regions, comms);
+    }
+
+    private static (int, int)[] ReadPairs(JsonElement arr)
+    {
+        var outp = new (int, int)[arr.GetArrayLength()];
+        var n = 0;
+        foreach (var p in arr.EnumerateArray())
+        {
+            var it = p.EnumerateArray().GetEnumerator();
+            it.MoveNext(); var a = it.Current.GetInt32();
+            it.MoveNext(); var b = it.Current.GetInt32();
+            outp[n++] = (a, b);
+        }
+        return outp;
+    }
+
+    private static byte[] GzUnwrap(byte[] gz) => GZipCodec.Decompress(gz);
+
+    private static T DesFromGz<T>(byte[] gz) => ProtoCodec.DesFromByte<T>(GzUnwrap(gz));
 
     /* T8: SQLite 命中后回填 _mem, 同一 key 后续读取不再走库 */
     private byte[]? ReadSqlBackfill(string key)

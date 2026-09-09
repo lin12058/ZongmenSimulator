@@ -1,9 +1,17 @@
 # 宗门模拟器 demo3 · 项目长期备忘
 
+## WebSocket 单块接口（2026-09-09 下午落地，当前图数据通道）
+- **通道**：`/ws/map`，帧格式 `[type][payload]`；类型 Login=1/Tile=2/Ping=3/Pong=4。登录门禁（guest 任意 token 放行）；TileResponse **恒 gzip**（消除压缩阈值歧义）；请求上限 1MB；取消异常静默。
+- **协议**（MapMessages.cs）：TileRequest{op,seed,i,j,mask,seq,lastRevs}；TileResponse{I,J,Mask,Seq,Err,Revs,Chunk,Settles,Pois,Comms + ChunkHas/SettlesHas/PoisHas/CommsHas 显式空标记}；LoginResponse{Ok,Err}。统一块坐标系=方案B：块=chunk 格(CHUNK_S=21)，region/comm 仅生成时逻辑层，`blockLayersJson(ca,cb)` 是块→覆盖 region/comm 格的权威映射。
+- **服务**：MapWorldService.GetTileBlock(seed,i,j,mask,lastRevs) 编排（chunk+region 实体按块裁剪+comm 原样）+ BlockRevs 版本表（lastRevs 最小化下发，rev 未变的图层子消息缺省）。SettlementDto 扩 Owner/Tier/State。
+- **前端**：pb.js 增 Writer/encodeTileRequest/encodeLogin/decodeTileResponse/decodeLoginResponse；mapclient.js=WS 单块客户端（登录+重连指数退避+rev 缓存）；main.js=loadBlock/applyBlock 单块流式 + settleCells/poiCells 实体缓存驱动标注层/stats。HTTP chunk/region/comm 端点已删除；meta/stats/tile/fields/debug 保留。
+- **踩坑**：① resp.chunk 是原始 protobuf 消息，必须先 `PB.chunkToArrays()` 再 uploadChunk；② **A* 道路方向会话序依赖**——同一条路冷热缓存 astar 起点不同点列整条相反，已按端点 id 归一化方向修复；③ capture=1 截图改为「块数据到达+1.2s」触发（固定 4s 在 headless 真实时间下早于 WS 往返）。
+- **验证**：verify_map.mjs 已重写为 ws 单块对照（登录门禁/mask 过滤/rev 最小化/同块确定性/tile HTTP 对照），全部通过；headless 截图渲染正常。
+
 ## 当前形态（2026-09-09）：C# 后端 + 前端渲染
-- **C# Server/Zongmen**：.NET 8 + ClearScript.V8 + protobuf-net 3.2.30 + Microsoft.Data.Sqlite 8.0.8。Kestrel 默认 0.0.0.0:8140（appsettings "Zongmen.Port"）。单进程托管 web/ 静态 + /api/map/* + /api/debug/snap。
+- **C# Server/Zongmen**：.NET 8 + ClearScript.V8 + protobuf-net 3.2.30 + Microsoft.Data.Sqlite 8.0.8。Kestrel 默认 0.0.0.0:8140（appsettings "Zongmen.Port"）。单进程托管 web/ 静态 + /api/map/*（meta/stats/tile/fields/debug）+ /ws/map + /api/debug/snap。
 - **前端 web/**：index.html + js/{pb, mapclient, textures, renderer, main}.js + 极小 noiselib.js。noise.js / mapgen.js 已迁至 Server/Zongmen/Engine/js/；前端无任何地图生成/噪声/寻路逻辑。
-- **数据流**：JS 沙箱执行 noise.js+mapgen.js+mapgen-server.js → JSON → C# 装配 protobuf → gzip → SQLite (Data KV) + 内存 LRU；HTTP `Content-Encoding:gzip` 下发；前端 fetch 透明解压 → Float32Array 还原绝对坐标。
+- **数据流**：JS 沙箱执行 noise.js+mapgen.js+mapgen-server.js → JSON → C# 装配 protobuf → gzip → SQLite (Data KV) + 内存 LRU；图数据经 /ws/map 单块下发；tile/fields 仍 HTTP（gzip protobuf / JSON）。
 - **按区块加载**：区块 (seed,ca,cb)、群落 (seed,ci,cj) 持久化 SQLite；**区域包不再落库**（T2：只写不读纯写放大，会话内 `_regionHot` LRU 512 + `_mem` 兜底，重启后区域首访重走 JS 生成）；tile/fields 即时计算 + 进程内缓存（fields 纯确定性；tile 按 **roadVer 道路版本号**失效防 onRoad 过期）。
 
 ## 关键 protobuf 经验

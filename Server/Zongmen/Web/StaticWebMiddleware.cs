@@ -50,7 +50,10 @@ public sealed class StaticWebMiddleware
         var req = ctx.Request;
         var isGet = req.Method == HttpMethods.Get || req.Method == HttpMethods.Head;
         var path = req.Path.Value ?? "/";
-        if (!isGet || path.StartsWith("/api", StringComparison.OrdinalIgnoreCase))
+        /* /ws 升级握手 (WebSocket 单块接口) 与非 GET 一律放行交给端点 */
+        if (!isGet || path.StartsWith("/api", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/ws", StringComparison.OrdinalIgnoreCase)
+            || ctx.WebSockets.IsWebSocketRequest)
         {
             await _next(ctx);
             return;

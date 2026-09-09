@@ -1,13 +1,14 @@
 /* ============================================================
- * main.js — 山河图主程序 (服务端权威数据驱动版)
- *  - 区块流式加载: 向后端 /api/map/chunk 拉取 → 解码 → 上传 GPU
- *  - 覆盖层: 道路/聚落/区域/灵脉/浪线 全部基于后端下发数据绘制
- *  - 小地图字段采样 / 点击格详情: 后端即时计算
+ * main.js — 山河图主程序 (WebSocket 单块流式版)
+ *  - 单块流式加载: 视野切块 → ws TileRequest → TileResponse 多图层
+ *    子消息 (chunk/region/settle/poi/comm) 分发 (设计 §三)
+ *  - 覆盖层: 道路/聚落/景点/区域/灵脉/浪线 全部基于后端下发数据绘制
+ *  - 小地图字段采样 / 点击格详情: HTTP 后端即时计算
  *  - 前端不再执行任何地图生成/噪声/寻路判定
  * ============================================================ */
 (function () {
   'use strict';
-  var MC = MapClient, IT = InkTextures;
+  var MC = MapClient, IT = InkTextures, PB = window.PB;
 
   var els = {};
   var renderer = null;
@@ -25,17 +26,18 @@
   var hoverTile = null, selectedTile = null;
   var showVeins = true, showLabels = true;
 
-  var chunkData = new Map();        // key -> {arrays, bbox}
-  var regionCells = new Map();      // 'i,j' -> RegionPack
-  var commCells = new Map();        // 'ci,cj' -> CommunityPack
-  var chunkQueue = [], chunkBusy = new Map(), chunkFail = new Set();
-  var chunkRetry = new Map();   // key -> { attempt, at }: 可重试失败(网络/5xx)的退避计划, at 为下次可入队时间
-  var regionBusy = new Set(), commBusy = new Set();
-  var regionQueue = [], commQueue = [];
+  var chunkData = new Map();        // 'ca,cb' -> {arrays, bbox}
+  var regionCells = new Map();      // 'i,j'  -> {region, roads}   (图层1: 区域名+道路)
+  var commCells = new Map();        // 'ci,cj'-> CommunityPack     (图层4: 灵脉群落)
+  /* 图层2/3 动态实体 (设计 §二): 按 key '区域i,j' 分组缓存, 与服务端
+     EntityGroup 键一致 → 邻块重复携带同一区域时以键覆盖去重 */
+  var settleCells = new Map();      // 'i,j' -> [PlaceEntity]  聚落实体
+  var poiCells = new Map();         // 'i,j' -> [PlaceEntity]  景点实体
+  var chunkQueue = [], chunkBusy = new Map();
+  var chunkRetry = new Map();   // key -> { attempt, at }: 可重试失败(网络/超时)的退避计划, at 为下次可入队时间
   /* R12: 并发/重试等网络常数收敛到单一配置对象, 不再散落魔法数字 */
   var NET_CFG = {
-    concChunk: 3,          // 区块并发请求数
-    concExtra: 6,          // 区域/群落并发请求数
+    concChunk: 4,          // 单块 WebSocket 并发请求数
     retryBaseMs: 800,      // 失败重试指数退避基数
     retryMaxMs: 30000      // 单次退避上限
   };
@@ -141,7 +143,7 @@
     var vw = els.app.clientWidth, vh = els.app.clientHeight;
     /* P1: 相机位移/缩放/视口尺寸超过阈值才全量重建需求集 (阈值公式与
        staticNeedsRedraw 的 scale 同思路, 随 zoom 缩小);
-       相机静止且无到期重试时, 只推进存量队列, 不做三层象限扫描/卸载/排序。 */
+       相机静止且无到期重试时, 只推进存量队列, 不做象限扫描/卸载/排序。 */
     var stScale = 16 / (cam.zoom * 0.75 + 0.25);
     var moved = lastStream.x !== lastStream.x ||          // 首帧 / regenerate 后为 NaN → 必须重算
                 vw !== lastStream.w || vh !== lastStream.h ||
@@ -154,8 +156,6 @@
       chunkRetry.forEach(function (rr) { if (rr.at <= tNow0) retryDue = true; });
       if (!retryDue) {
         pumpChunks();                                     // 在途完成回调也会自 pump
-        if (regionQueue.length) pumpExtra(regionQueue, regionBusy, 'region');
-        if (commQueue.length) pumpExtra(commQueue, commBusy, 'comm');
         return;
       }
     }
@@ -164,21 +164,24 @@
 
     var b = viewBounds();
     var t = tileBoundsOf(b, 2);
-    /* 视野区域/群落格窗口 */
+    /* 视野区域/群落格窗口: 供 regionCells/commCells/settleCells/poiCells
+       窗口失活与回填校验 (块响应的子消息可能落在窗口外, 交给邻块负责) */
     var M = geo.regionM, CL = geo.commCl;
     var i0 = Math.floor(t.qmin / M) - 1, i1 = Math.floor(t.qmax / M) + 1;
     var j0 = Math.floor(t.rmin / M) - 1, j1 = Math.floor(t.rmax / M) + 1;
     var ci0 = Math.floor(t.qmin / CL) - 1, ci1 = Math.floor(t.qmax / CL) + 1;
     var cj0 = Math.floor(t.rmin / CL) - 1, cj1 = Math.floor(t.rmax / CL) + 1;
 
-    /* 卸载视野外 (区块 + 区域/群落数据) */
+    /* 卸载视野外 (区域/群落数据 + 实体层) */
     keepR = new Set(); keepC = new Set();   // 模块级: 供异步回调校验回填 (R4)
     for (var ri = i0; ri <= i1; ri++) for (var rj = j0; rj <= j1; rj++) keepR.add(cellKey(ri, rj));
     for (var ui = ci0; ui <= ci1; ui++) for (var uj = cj0; uj <= cj1; uj++) keepC.add(cellKey(ui, uj));
     regionCells.forEach(function (_p, k) { if (!keepR.has(k)) regionCells.delete(k); });
     commCells.forEach(function (_p, k) { if (!keepC.has(k)) commCells.delete(k); });
+    settleCells.forEach(function (_l, k) { if (!keepR.has(k)) settleCells.delete(k); });
+    poiCells.forEach(function (_l, k) { if (!keepR.has(k)) poiCells.delete(k); });
 
-    /* 区块 need 集合 */
+    /* 单块 need 集合 (主块 = 区块格, 设计 §六 方案 A) */
     var pad = geo.hexW * 2;
     var tb = tileBoundsOf(
       { x0: b.x0 - pad, y0: b.y0 - pad, x1: b.x1 + pad, y1: b.y1 + pad }, 0);
@@ -186,7 +189,7 @@
     var a0 = Math.floor((tb.qmin - m2) / geo.chunkS), a1 = Math.floor((tb.qmax + m2) / geo.chunkS);
     var b0 = Math.floor((tb.rmin - m2) / geo.chunkS), b1 = Math.floor((tb.rmax + m2) / geo.chunkS);
     var need = {};
-    keepChunk = new Set();   // 模块级: 本帧仍需的 chunk key, 供 loadChunk 回调校验 (R4)
+    keepChunk = new Set();   // 模块级: 本帧仍需的块 key, 供 loadChunk 回调校验 (R4)
     for (var ca = a0; ca <= a1; ca++) {
       for (var cb = b0; cb <= b1; cb++) {
         var kk = chunkKey(ca, cb);
@@ -198,16 +201,17 @@
       if (!need[key]) {
         renderer.dropChunk(key);
         chunkData.delete(key);
-        forceStaticDirty();                    // 内容移除: 尽快重绘清除残影 (R1)
+        MC.blockForget(key);                 // rev 缓存同步失效: 重进视野须全量重取
+        forceStaticDirty();                  // 内容移除: 尽快重绘清除残影 (R1)
       }
     });
 
-    /* 队列重建: 未加载 && 未在途 && 未失败 && 不在退避期内, 距相机排序 */
+    /* 队列重建: 未加载 && 未在途 && 不在退避期内, 距相机排序 */
     chunkQueue.length = 0;
     var tNow = performance.now();
     for (var key in need) {
       var rr = chunkRetry.get(key);
-      if (!chunkData.has(key) && !chunkBusy.has(key) && !chunkFail.has(key) &&
+      if (!chunkData.has(key) && !chunkBusy.has(key) &&
           (!rr || rr.at <= tNow)) {
         var cc = need[key];
         var w = MC.tileToWorld(cc.ca * geo.chunkS, cc.cb * geo.chunkS);
@@ -219,59 +223,21 @@
     chunkRetry.forEach(function (_v, key) { if (!need[key]) chunkRetry.delete(key); });
     chunkQueue.sort(function (p, q) { return p.d - q.d; });
     pumpChunks();
-
-    /* 区域/群落: 视野窗口格数据补齐 */
-    regionQueue.length = 0;
-    for (var ri2 = i0; ri2 <= i1; ri2++) {
-      for (var rj2 = j0; rj2 <= j1; rj2++) {
-        var rk = cellKey(ri2, rj2);
-        if (!regionCells.has(rk) && !regionBusy.has(rk))
-          regionQueue.push({ i: ri2, j: rj2, key: rk });
-      }
-    }
-    pumpExtra(regionQueue, regionBusy, 'region');
-    commQueue.length = 0;
-    for (var ui2 = ci0; ui2 <= ci1; ui2++) {
-      for (var uj2 = cj0; uj2 <= cj1; uj2++) {
-        var ck = cellKey(ui2, uj2);
-        if (!commCells.has(ck) && !commBusy.has(ck))
-          commQueue.push({ ci: ui2, cj: uj2, key: ck });
-      }
-    }
-    pumpExtra(commQueue, commBusy, 'comm');
   }
 
-  /* 单个区块请求的生命周期独立成函数: job 必须被本次请求闭包独占。
+  /* 单个块请求的生命周期独立成函数: job 必须被本次请求闭包独占。
      (此前 var job 在 while 循环里被所有并发回调共享, 回调里读到的永远是
-      最后一个 job → chunkBusy 只删掉最后一个 key, 前两个 key 永久卡死,
-      对应区块永不重试 → 屏幕中心出现菱形黑区。) */
+      最后一个 job → chunkBusy 只删掉最后一个 key, 前几个 key 永久卡死。) */
   function loadChunk(job) {
     var gen = worldSeed;
-    MC.chunk(gen, job.ca, job.cb).then(function (arrays) {
+    MC.block(gen, job.ca, job.cb).then(function (resp) {
       if (gen !== worldSeed) return;                 // 世界已重铸, 丢弃旧响应
       if (!keepChunk.has(job.key)) return;           // R4: 已出视野被卸载, 不回填/不重复上传 GPU
-      if (!chunkData.has(job.key)) {
-        var bb = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
-        var ct = arrays.centers;
-        for (var i = 0; i < arrays.count; i++) {
-          var x = ct[i * 2], y = ct[i * 2 + 1];
-          if (x < bb.x0) bb.x0 = x; if (x > bb.x1) bb.x1 = x;
-          if (y < bb.y0) bb.y0 = y; if (y > bb.y1) bb.y1 = y;
-        }
-        renderer.uploadChunk(job.key, arrays, bb);   // R7: bbox 供渲染粗剔除
-        chunkData.set(job.key, { arrays: arrays, bbox: bb });
-        minimapDirty = true;
-        markStaticDirty();                   // R1: 连续 N 个 chunk 合并 200ms 重绘一次
-      }
+      applyBlock(job, resp);
     }).catch(function (err) {
-      console.error('chunk 加载失败', job.key, err);
+      console.error('块加载失败', job.key, err);
       if (gen !== worldSeed) return;                 // 旧世界失败不记账
-      if (isDefinitiveChunkError(err)) {
-        chunkRetry.delete(job.key);
-        chunkFail.add(job.key);                      // 404 等确定性错误: 重试无意义, 放弃
-      } else {
-        scheduleChunkRetry(job);                     // 网络/5xx/超时: 指数退避后自动重试
-      }
+      scheduleChunkRetry(job);                       // 网络/超时/断线: 指数退避后自动重试
     }).then(function () {
       if (gen !== worldSeed) return;                 // 旧世界请求不动新世界的 busy 集
       chunkBusy.delete(job.key);
@@ -279,9 +245,62 @@
     });
   }
 
-  /* 判定确定性错误(HTTP 404): 重试无意义; 其余(网络中断/5xx/超时)按可重试处理 */
-  function isDefinitiveChunkError(err) {
-    return err && /^HTTP 404\b/.test(err.message || '');
+  /* TileResponse 子消息分发 (设计 §3.2): chunk→GPU, region→道路/地名,
+     settle/poi→实体层, comm→灵脉。rev 未变的图层服务端缺省, 保留旧数据。 */
+  function applyBlock(job, resp) {
+    if (resp.err) console.warn('块 ' + job.key + ' 部分图层不可用:', resp.err);
+
+    /* 图层0 静态地形 (子消息缺省 = rev 未变, 保留已上传 GPU 的数据) */
+    var arrays = resp.chunk ? PB.chunkToArrays(resp.chunk, geo) : null;
+    if (arrays && !chunkData.has(job.key)) {
+      var bb = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
+      var ct = arrays.centers;
+      for (var i = 0; i < arrays.count; i++) {
+        var x = ct[i * 2], y = ct[i * 2 + 1];
+        if (x < bb.x0) bb.x0 = x; if (x > bb.x1) bb.x1 = x;
+        if (y < bb.y0) bb.y0 = y; if (y > bb.y1) bb.y1 = y;
+      }
+      renderer.uploadChunk(job.key, arrays, bb);   // R7: bbox 供渲染粗剔除
+      chunkData.set(job.key, { arrays: arrays, bbox: bb });
+      minimapDirty = true;
+      markStaticDirty();                   // R1: 连续 N 个块合并 200ms 重绘一次
+    }
+
+    /* 图层1 区域 (区域名 + 道路; 实体已拆分到图层2/3) */
+    for (var rg2 = 0; rg2 < resp.regions.length; rg2++) {
+      var rg = resp.regions[rg2];
+      var rk = rg.i + ',' + rg.j;
+      if (!keepR.has(rk)) continue;                // 窗口外: 交给覆盖该区域的邻块
+      regionCells.set(rk, { region: rg.region, roads: rg.roads });
+      roadsDirty = true;                           // T7: 路网数据变化 → 重绘重建道路几何
+    }
+
+    /* 图层2/3 实体 (按区域格键覆盖, 天然去重邻块重复携带) */
+    if (resp.settle) {
+      for (var sg = 0; sg < resp.settle.groups.length; sg++) {
+        var g = resp.settle.groups[sg];
+        var gk = g.i + ',' + g.j;
+        if (keepR.has(gk)) settleCells.set(gk, g.items);
+      }
+      markStaticDirty();
+    }
+    if (resp.poi) {
+      for (var pg = 0; pg < resp.poi.groups.length; pg++) {
+        var gp = resp.poi.groups[pg];
+        var gk2 = gp.i + ',' + gp.j;
+        if (keepR.has(gk2)) poiCells.set(gk2, gp.items);
+      }
+      markStaticDirty();
+    }
+
+    /* 图层4 灵脉群落 */
+    for (var cm2 = 0; cm2 < resp.comms.length; cm2++) {
+      var cm = resp.comms[cm2];
+      var ck = cm.ci + ',' + cm.cj;
+      if (!keepC.has(ck)) continue;
+      commCells.set(ck, cm);
+      markStaticDirty();
+    }
   }
 
   /* 指数退避: 0.8s→1.6→3.2→6.4→12.8→…→30s 封顶, 之后保持 30s 周期重试,
@@ -297,49 +316,9 @@
   function pumpChunks() {
     while (chunkBusy.size < NET_CFG.concChunk && chunkQueue.length) {
       var job = chunkQueue.shift();
-      if (chunkData.has(job.key) || chunkBusy.has(job.key) || chunkFail.has(job.key)) continue;
+      if (chunkData.has(job.key) || chunkBusy.has(job.key)) continue;
       chunkBusy.set(job.key, true);
       loadChunk(job);
-    }
-  }
-
-  /* 区域/群落请求同样独立成函数 (与 loadChunk 同因: 共享 var 会互相踩 key) */
-  function loadExtra(job, busy, kind) {
-    var gen = worldSeed;
-    var p = kind === 'region'
-      ? MC.region(gen, job.i, job.j)
-      : MC.comm(gen, job.ci, job.cj);
-    p.then(function (pack) {
-      if (gen !== worldSeed) return;
-      /* R4: 回填前校验 key 仍在本帧视野窗口内 —— 请求在途时用户可能已平移
-         相机使该区域/群落被卸载, 迟到数据不得塞回 (防短暂残留 + 与卸载冲突) */
-      if (kind === 'region') {
-        if (!keepR.has(job.key)) return;
-        regionCells.set(job.key, pack);
-        roadsDirty = true;                    // T7: 路网数据变化 → 下次重绘重建道路几何
-      } else {
-        if (!keepC.has(job.key)) return;
-        commCells.set(job.key, pack);
-      }
-      markStaticDirty();                    // R1: 数据补齐合并节流重绘
-    }).catch(function (err) {
-      console.error(kind + ' 加载失败', job.key, err);
-    }).then(function () {
-      if (gen !== worldSeed) return;
-      busy.delete(job.key);
-    });
-  }
-
-  function pumpExtra(queue, busy, kind) {
-    var launches = 0;
-    while (busy.size < NET_CFG.concExtra && queue.length && launches < NET_CFG.concExtra) {
-      var job = queue.shift();
-      if (busy.has(job.key)) continue;
-      var loaded = kind === 'region' ? regionCells.has(job.key) : commCells.has(job.key);
-      if (loaded) continue;
-      busy.add(job.key);
-      launches++;
-      loadExtra(job, busy, kind);
     }
   }
 
@@ -675,16 +654,18 @@
       }
     }
 
-    /* 聚落图标 + 名牌 */
+    /* 聚落/景点实体图标 + 名牌 (图层2/3: 动态实体独立于静态地形层, 设计 §二) */
     var zoomClamp = Math.max(z, 0.55);
-    regionCells.forEach(function (pack) {
-      var sts = pack.settlements;
-      for (var s2 = 0; s2 < sts.length; s2++) {
-        var st = sts[s2];
+    function drawEntityList(entities) {
+      for (var s2 = 0; s2 < entities.length; s2++) {
+        var st = entities[s2];
+        if (st.state === 1) continue;              // 被毁实体: 不再绘制 (事件系统接入后可改残迹)
         var ps2 = w2s(st.x, st.y);
         if (ps2.x < -60 || ps2.y < -70 || ps2.x > vw + 60 || ps2.y > vh + 70) continue;
-        var baseSize = { sect: 17, city: 15, town: 12, village: 10, poi: 11 }[st.type];
-        ICON_FN[st.type](ctx, ps2.x, ps2.y, baseSize * zoomClamp);
+        var fn = ICON_FN[st.type];
+        if (!fn) continue;
+        var baseSize = { sect: 17, city: 15, town: 12, village: 10, poi: 11 }[st.type] || 10;
+        fn(ctx, ps2.x, ps2.y, baseSize * zoomClamp);
         var showName = st.type === 'sect' || st.type === 'city' || st.type === 'poi' || z > 0.72;
         if (showLabels && showName) {
           var nfs = 11.5 * Math.max(z, 0.75);
@@ -699,7 +680,9 @@
           ctx.fillText(st.name, ps2.x, ly);
         }
       }
-    });
+    }
+    settleCells.forEach(drawEntityList);
+    poiCells.forEach(drawEntityList);
 
     staticCam.x = cam.x; staticCam.y = cam.y;
     staticCam.zoom = cam.zoom; staticCam.w = els.app.clientWidth; staticCam.h = els.app.clientHeight;
@@ -833,16 +816,16 @@
     chunkData.clear();
     regionCells.clear();
     commCells.clear();
+    settleCells.clear();
+    poiCells.clear();
+    MC.blockForgetAll();                             // rev 缓存随世界重铸失效
     keepChunk = new Set();                            // R4: 世界重铸后旧窗口失效, 待 updateStreaming 重建
     keepR = new Set(); keepC = new Set();
     chunkQueue.length = 0;
-    chunkFail.clear();
     chunkRetry.clear();
     chunkBusy.clear();                // 旧世界在途回调带 gen 守卫, 不会误删新世界标记
     roadsDirty = true;                // T7: 世界重铸 → 路网几何强制重建
     lastStream.x = NaN;               // P1: 重置流式增量状态 → 首帧强制全量重建
-    regionBusy.clear();
-    commBusy.clear();
     mmData = null;
     hoverTile = null;
     selectedTile = null;
@@ -859,10 +842,9 @@
 
   function updateStats() {
     var st = 0, rd = 0, veins = 0;
-    regionCells.forEach(function (pack) {
-      st += pack.settlements.length;
-      rd += pack.roads.length;
-    });
+    settleCells.forEach(function (list) { st += list.length; });
+    poiCells.forEach(function (list) { st += list.length; });
+    regionCells.forEach(function (pack) { rd += pack.roads.length; });
     commCells.forEach(function (cm) { if (cm.exists) veins += cm.veins.length; });
     els.stats.textContent = '已探明 宗门村镇 ' + st + ' · 墨路 ' + rd + ' · 灵脉 ' + veins;
   }
@@ -1092,9 +1074,14 @@
         window.__data = function () { return { chunks: chunkData.size, regions: regionCells.size, comms: commCells.size }; };
       }
 
-      /* 调试钩子: capture=1 时, 4s 后把 canvas 合成图回传后端, 用于 headless 截图验证 */
+      /* 调试钩子: capture=1 时等待块数据真实到达 (≥3 块或 25s 兜底) 再把
+         canvas 合成图回传后端, 用于 headless 截图验证。
+         不用固定 4s 定时: WS 单块首次构建含 V8 冷启动+A* 道路, 耗时波动大。 */
       if (new URLSearchParams(location.search).get('capture') === '1') {
-        setTimeout(function () {
+        var snapStart = Date.now();
+        var trySnap = function () {
+          var ready = chunkData.size >= 3 && regionCells.size >= 1;
+          if (!ready && Date.now() - snapStart < 25000) { setTimeout(trySnap, 500); return; }
           try {
             var canvas = document.createElement('canvas');
             canvas.width = els.app.clientWidth;
@@ -1107,7 +1094,8 @@
               fetch('/api/debug/snap', { method: 'POST', body: b }).catch(console.error);
             }, 'image/png');
           } catch (e) { console.error(e); }
-        }, 4000);
+        };
+        setTimeout(trySnap, 1000);
       }
 
       requestAnimationFrame(loop);

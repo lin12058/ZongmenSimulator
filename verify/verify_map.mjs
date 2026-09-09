@@ -1,9 +1,11 @@
 /* ============================================================
- * verify_map.mjs — 地图数据准确性三方对照验证
+ * verify_map.mjs — 地图数据准确性三方对照验证 (WebSocket 单块版)
  *   ① 参考基准: Node 加载 Engine/js 原始脚本, 直接调 MapGen 生成
- *   ② 服务端:   C# 走同一脚本 (ClearScript) 产出 gzip(protobuf)
+ *   ② 服务端:   C# 走同一脚本 (ClearScript), 图数据经 ws://…/ws/map
+ *               TileResponse 下发 (gzip protobuf 多图层子消息)
  *   ③ 解码端:   浏览器同款 web/js/pb.js 还原
- *   对照: 区块(坐标/地貌/海拔/哈希/邻域/精灵) 与 区域/群落/单格。
+ *   对照: 单块 (chunk/region/settle/poi/comm 五图层) + mask 位选 +
+ *        rev 最小化响应 + 未登录门禁 + 单格详情。
  *
  * 用法: node verify/verify_map.mjs [baseUrl]   (默认 http://127.0.0.1:8140)
  * ============================================================ */
@@ -27,6 +29,7 @@ const PBcode = fs.readFileSync(path.join(ROOT, 'web', 'js', 'pb.js'), 'utf8');
 
 const ref = global.MapGen;                 // 原始生成逻辑 (参考基准)
 const GS = global.MapGenServer;            // 原始生成逻辑的 JSON 适配 (服务端同源)
+const PB = global.PB;                      // 浏览器同款解码器
 
 let failures = 0;
 function check(name, cond, detail = '') {
@@ -46,43 +49,183 @@ async function getJson(url) {
   return r.json();
 }
 
-/* ---------- 区块对照 ---------- */
-async function verifyChunk(seed, ca, cb) {
+/* ---------- WebSocket 单块客户端 (与 web/js/mapclient.js 同帧协议) ---------- */
+class WsClient {
+  constructor(baseUrl) {
+    this.url = baseUrl.replace(/^http/, 'ws') + '/ws/map';
+    this.seq = 0;
+    this.pending = new Map();
+    this.loginWaiter = null;
+    this.closed = false;
+  }
+  async connect() {
+    this.sock = new WebSocket(this.url);
+    this.sock.binaryType = 'arraybuffer';
+    await new Promise((res, rej) => {
+      this.sock.onopen = res;
+      this.sock.onerror = () => rej(new Error('ws 连接失败 ' + this.url));
+    });
+    this.sock.onmessage = (ev) => this.onFrame(new Uint8Array(ev.data));
+    this.sock.onclose = () => { this.closed = true; };
+  }
+  frame(type, body) {
+    const f = new Uint8Array(1 + body.length);
+    f[0] = type;
+    f.set(body, 1);
+    this.sock.send(f);
+  }
+  onFrame(u8) {
+    const type = u8[0], payload = u8.subarray(1);
+    if (type === PB.FRAME.LOGIN) {
+      const lr = PB.decodeLoginResponse(payload);
+      if (this.loginWaiter) { this.loginWaiter(lr); this.loginWaiter = null; }
+      return;
+    }
+    if (type === PB.FRAME.TILE) {
+      gunzip(payload).then((buf) => {
+        const resp = PB.decodeTileResponse(buf);
+        const p = this.pending.get(resp.seq);
+        if (!p) return;
+        this.pending.delete(resp.seq);
+        clearTimeout(p.timer);
+        p.resolve(resp);
+      }).catch((e) => console.error('TileResponse 解码失败', e));
+    }
+  }
+  async login(account = 'verify', token = 'demo') {
+    const p = new Promise((res) => { this.loginWaiter = res; });
+    this.frame(1, PB.encodeLogin({ account, token }));
+    const lr = await p;
+    if (!lr.ok) throw new Error('登录失败: ' + lr.err);
+    return lr;
+  }
+  async tile(seed, i, j, mask = 0, lastRevs = []) {
+    const sseq = ++this.seq;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pending.delete(sseq); reject(new Error('ws 请求超时')); }, 30000);
+      this.pending.set(sseq, { resolve, reject, timer });
+      this.frame(2, PB.encodeTileRequest({ op: 1, seed, i, j, mask, seq: sseq, lastRevs }));
+    });
+  }
+  close() { try { this.sock.close(); } catch { /* 忽略 */ } }
+}
+async function gunzip(u8) {
+  const ds = new DecompressionStream('gzip');
+  return new Response(new Blob([u8]).stream().pipeThrough(ds)).arrayBuffer();
+}
+
+/* ---------- 单块五图层对照 ---------- */
+const GEO = { hexR: 8, hexW: Math.sqrt(3) * 8, chunkS: 21 };
+
+function verifyChunkArrays(tag, arrays, d) {
+  const n = d.tiles.length;
+  check(`${tag} count`, arrays.count === n, `${arrays.count} vs ${n}`);
+  check(`${tag} tiles 精确`, arrays.tiles.length === n && sameF(arrays.tiles, d.tiles), '');
+  check(`${tag} neigh 精确`, sameF(arrays.neigh, d.neigh), '');
+  check(`${tag} centers ≤1e-3px`, sameFtol(arrays.centers, d.centers, 1e-3), maxDiff(arrays.centers, d.centers).toExponential(2));
+  check(`${tag} elevs u16容差`, maxAbs(arrays.elevs, d.elevs) <= 1.6e-5, '');
+  const pn = d.propSprites.length;
+  check(`${tag} 精灵数`, (arrays.propSprites || []).length === pn, `${(arrays.propSprites || []).length} vs ${pn}`);
+  if (pn) {
+    check(`${tag} 精灵 sprite 精确`, sameF(arrays.propSprites, d.propSprites), '');
+    check(`${tag} 精灵中心 ≤0.02px`, sameFtol(arrays.propCenters, d.propCenters, 0.02), '');
+  }
+}
+
+async function verifyBlock(ws, seed, ca, cb) {
+  const tag = `block(${ca},${cb})`;
   GS.init(seed);
   const built = ref.buildChunk(ca, cb);
-  const d = built.data;
-  const n = d.tiles.length;
+  const layers = JSON.parse(GS.blockLayersJson(ca, cb));
 
-  const buf = await getBinary(`/api/map/chunk?seed=${seed}&ca=${ca}&cb=${cb}`);
-  const msg = PB.decodeChunkMsg(buf);
-  const geo = { hexR: 8, hexW: Math.sqrt(3) * 8, chunkS: 21 };
-  const arr = PB.chunkToArrays(msg, geo);
+  const resp = await ws.tile(seed, ca, cb);
+  check(`${tag} 回显坐标`, resp.i === ca && resp.j === cb, `${resp.i},${resp.j}`);
+  check(`${tag} mask=ALL`, resp.mask === 31, String(resp.mask));
+  check(`${tag} revs 5 位`, resp.revs.length === 5 && resp.revs.every((v) => v > 0), JSON.stringify(resp.revs));
 
-  check(`count (seed=${seed} chunk=${ca},${cb})`, arr.count === n, `${arr.count} vs ${n}`);
-  check(`tiles 精确`, arr.tiles.length === n && sameF(arr.tiles, d.tiles), '');
-  check(`neigh 精确`, sameF(arr.neigh, d.neigh), '');
-  check(`centers ≤1e-4px`, sameFtol(arr.centers, d.centers, 1e-3), maxDiff(arr.centers, d.centers).toExponential(2));
-  check(`elevs u16容差`, maxAbs(arr.elevs, d.elevs) <= 1.6e-5, maxAbs(arr.elevs, d.elevs).toExponential(2));
-  check(`hashes u16容差`, maxAbs(arr.hashes, d.hashes) <= 1.6e-5, maxAbs(arr.hashes, d.hashes).toExponential(2));
-  const pn = d.propSprites.length;
-  check(`精灵数`, (arr.propSprites || []).length === pn, `${(arr.propSprites || []).length} vs ${pn}`);
-  if (pn) {
-    check(`精灵 sprite 精确`, sameF(arr.propSprites, d.propSprites), '');
-    check(`精灵中心 ≤0.02px`, sameFtol(arr.propCenters, d.propCenters, 0.02), maxDiff(arr.propCenters, d.propCenters).toExponential(2));
-    check(`精灵 elev/hash 容差`, maxAbs(arr.propElevs, d.propElevs) <= 1.6e-5 && maxAbs(arr.propHashes, d.propHashes) <= 1.6e-5, '');
+  /* 图层0 chunk */
+  check(`${tag} 图层0 chunk 存在`, !!resp.chunk, '');
+  if (resp.chunk) verifyChunkArrays(tag, PB.chunkToArrays(resp.chunk, GEO), built.data);
+
+  /* 图层1 region (区域名 + 道路; 聚落已拆出) */
+  check(`${tag} 图层1 region 存在`, resp.regions.length === layers.regions.length,
+    `${resp.regions.length} vs ${layers.regions.length}`);
+  for (const [i, j] of layers.regions) {
+    const local = JSON.parse(GS.regionJson(i, j));
+    const got = resp.regions.find((r) => r.i === i && r.j === j);
+    if (!got) { check(`${tag} region(${i},${j}) 存在`, false); continue; }
+    check(`${tag} region(${i},${j}) 名`, got.region && got.region.name === local.region.name,
+      `${got.region?.name} vs ${local.region.name}`);
+    const lkeys = new Set(local.roads.map((x) => x.key));
+    const gkeys = new Set(got.roads.map((x) => x.key));
+    check(`${tag} region(${i},${j}) 道路 key 一致`, lkeys.size === gkeys.size && [...lkeys].every((k) => gkeys.has(k)), '');
+    for (const lr2 of local.roads) {
+      const gr = got.roads.find((x) => x.key === lr2.key);
+      if (!gr) { check(`${tag} 道路 ${lr2.key} 存在`, false); continue; }
+      check(`${tag} 道路 ${lr2.key} 点列`, gr.pts && gr.pts.length === lr2.pts.length &&
+        sameFtol(gr.pts, Float32Array.from(lr2.pts), 1e-3),
+        `len ${gr.pts ? gr.pts.length : 'null'} vs ${lr2.pts.length}`);
+    }
   }
-  /* 与原 buildChunk 的绝对中心逐点抽查 (还原偏差验证) */
-  const ccX = geo.hexW * (ca * geo.chunkS + cb * geo.chunkS / 2);
-  let worst = 0;
-  for (let i = 0; i < n; i++) {
-    const qa = ca * geo.chunkS + (msg.cq[i] - 16);
-    const ra = cb * geo.chunkS + (msg.cr[i] - 16);
-    const rx = geo.hexW * (qa + ra / 2) - d.centers[i * 2];
-    const ry = 12 * ra - d.centers[i * 2 + 1];
-    worst = Math.max(worst, Math.abs(rx), Math.abs(ry));
+
+  /* 图层2/3 settle/poi (按区域分组, 实体含骨架字段) */
+  let settleN = 0, poiN = 0;
+  for (const [i, j] of layers.regions) {
+    const local = JSON.parse(GS.regionJson(i, j));
+    const expSettle = local.settlements.filter((s) => s.type !== 'poi');
+    const expPoi = local.settlements.filter((s) => s.type === 'poi');
+    const gSettle = (resp.settle?.groups || []).find((g) => g.i === i && g.j === j);
+    const gPoi = (resp.poi?.groups || []).find((g) => g.i === i && g.j === j);
+    if (expSettle.length) {
+      check(`${tag} settle 分组(${i},${j}) 存在`, !!gSettle, '');
+      if (gSettle) { settleN += gSettle.items.length; cmpEntities(tag, `settle(${i},${j})`, gSettle.items, expSettle); }
+    }
+    if (expPoi.length) {
+      check(`${tag} poi 分组(${i},${j}) 存在`, !!gPoi, '');
+      if (gPoi) { poiN += gPoi.items.length; cmpEntities(tag, `poi(${i},${j})`, gPoi.items, expPoi); }
+    }
   }
-  check('相对坐标还原 ≤1e-3px', worst <= 1e-3, worst.toExponential(2));
+  /* 空区域不应产生空分组 */
+  if (resp.settle) check(`${tag} settle 无空分组`, resp.settle.groups.every((g) => g.items.length > 0), '');
+  if (resp.poi) check(`${tag} poi 无空分组`, resp.poi.groups.every((g) => g.items.length > 0), '');
+
+  /* 图层4 comm */
+  check(`${tag} 图层4 comm 数`, resp.comms.length === layers.comms.length,
+    `${resp.comms.length} vs ${layers.comms.length}`);
+  for (const [ci, cj] of layers.comms) {
+    const local = JSON.parse(GS.commJson(ci, cj));
+    const got = resp.comms.find((c) => c.ci === ci && c.cj === cj);
+    if (!got) { check(`${tag} comm(${ci},${cj}) 存在`, false); continue; }
+    check(`${tag} comm(${ci},${cj}) 存在标记`, got.exists === local.exists, '');
+    if (!local.exists) continue;
+    check(`${tag} comm(${ci},${cj}) 主格/五行`, got.q === local.q && got.r === local.r && got.element === local.element, '');
+    check(`${tag} comm(${ci},${cj}) 灵脉数`, got.veins.length === local.veins.length, '');
+    for (let v = 0; v < local.veins.length; v++) {
+      const a = got.veins[v], b = local.veins[v];
+      check(`${tag} 灵脉#${v} ${b.name}`, a.q === b.q && a.r === b.r && a.element === b.element &&
+        (a.variant || '') === (b.variant || '') && a.level === b.level && a.name === b.name, '');
+    }
+  }
+  return { resp, settleN, poiN };
 }
+
+function cmpEntities(tag, gname, items, exp) {
+  const byId = new Map(items.map((e) => [e.id, e]));
+  for (const b of exp) {
+    const a = byId.get(b.id);
+    check(`${tag} ${gname} 实体 ${b.id}`, !!a &&
+      a.q === b.q && a.r === b.r && a.type === b.type && a.name === b.name &&
+      a.pop === b.pop && a.x !== undefined && a.y !== undefined,
+      a ? JSON.stringify(a) + ' vs ' + JSON.stringify(b) : '缺失');
+    if (a) {
+      check(`${tag} ${gname} 实体 ${b.id} 骨架字段`,
+        a.owner === (b.owner || '') && a.tier === (b.tier || 0) &&
+        a.state === (b.state || 0) && a.expireTs === (b.expireTs || 0), '');
+    }
+  }
+  check(`${tag} ${gname} 实体数`, items.length === exp.length, `${items.length} vs ${exp.length}`);
+}
+
 function sameF(a, b) {
   if (!a || !b || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -95,59 +238,23 @@ function sameFtol(a, b, tol) {
 function maxAbs(a, b) { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; }
 function maxDiff(a, b) { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; }
 
-/* ---------- 区域包对照 (直接同源函数 vs HTTP 解码) ---------- */
-async function verifyRegion(seed, i, j) {
-  GS.init(seed);
-  const local = JSON.parse(GS.regionJson(i, j));
-  const buf = await getBinary(`/api/map/region?seed=${seed}&i=${i}&j=${j}`);
-  const got = PB.decodeRegionMsg(buf);
-  check(`region 名 (${i},${j})`, got.region && got.region.name === local.region.name, `${got.region?.name} vs ${local.region.name}`);
-  check(`region 聚落数`, got.settlements.length === local.settlements.length, `${got.settlements.length} vs ${local.settlements.length}`);
-  for (let s = 0; s < local.settlements.length; s++) {
-    const a = got.settlements[s], b = local.settlements[s];
-    check(`聚落#${s} ${b.type}:${b.name}`, a.q === b.q && a.r === b.r && a.type === b.type &&
-      a.name === b.name && a.pop === b.pop, JSON.stringify(a) + ' vs ' + JSON.stringify(b));
-  }
-  const lkeys = new Set(local.roads.map((x) => x.key));
-  const gkeys = new Set(got.roads.map((x) => x.key));
-  check(`道路 key 集合一致`, lkeys.size === gkeys.size && [...lkeys].every((k) => gkeys.has(k)), '');
-  for (const lr of local.roads) {
-    const gr = got.roads.find((x) => x.key === lr.key);
-    if (!gr) { check(`道路 ${lr.key} 存在`, false); continue; }
-    check(`道路 ${lr.key} 点列`, gr.pts && gr.pts.length === lr.pts.length &&
-      sameFtol(gr.pts, Float32Array.from(lr.pts), 1e-3), '');
-  }
-}
-
-/* ---------- 群落包对照 ---------- */
-async function verifyComm(seed, ci, cj) {
-  GS.init(seed);
-  const local = JSON.parse(GS.commJson(ci, cj));
-  const buf = await getBinary(`/api/map/comm?seed=${seed}&ci=${ci}&cj=${cj}`);
-  const got = PB.decodeCommMsg(buf);
-  check(`群落存在标记 (${ci},${cj})`, got.exists === local.exists, `${got.exists} vs ${local.exists}`);
-  if (!local.exists) return;
-  check(`群落主格/五行`, got.q === local.q && got.r === local.r && got.element === local.element, '');
-  check(`灵脉数`, got.veins.length === local.veins.length, `${got.veins.length} vs ${local.veins.length}`);
-  for (let v = 0; v < local.veins.length; v++) {
-    const a = got.veins[v], b = local.veins[v];
-    check(`灵脉#${v} ${b.name}`, a.q === b.q && a.r === b.r && a.element === b.element &&
-      (a.variant || '') === (b.variant || '') && a.level === b.level && a.name === b.name,
-      JSON.stringify(a) + ' vs ' + JSON.stringify(b));
-  }
-}
-
-/* ---------- 单格详情 ---------- */
+/* ---------- 单格详情 (HTTP 保留接口) ---------- */
 async function verifyTile(seed, q, r) {
   GS.init(seed);
   /* P4 语义: tileJson 的 onRoad = 只读已生成道路 (点击不触发 A*)。
-     真实客户端点击前必已流式拉取周围 3×3 区域包 → 服务端 VM 已生成这些路;
-     参考端 init() 会清缓存, 故先同样「流式」生成 3×3 区域道路, 两端缓存对齐后再比。 */
+     参考端 init() 会清缓存, 故先对齐两端道路缓存:
+     - 参考端: GS.regionJson (预算充足) 生成 3×3 区域道路;
+     - 服务端: 经 ws 拉取覆盖这些区域格的单块 (每格 2×2 块保证
+       hexDist(seed, 块中心) ≤ 33 的归属条件必命中) → 区域包伴随道路落成。 */
   const ri = Math.floor(q / ref.REGION_M), rj = Math.floor(r / ref.REGION_M);
   for (let di = -1; di <= 1; di++) {
     for (let dj = -1; dj <= 1; dj++) {
       GS.regionJson(ri + di, rj + dj);
-      await getBinary(`/api/map/region?seed=${seed}&i=${ri + di}&j=${rj + dj}`);
+      const sq = (ri + di) * ref.REGION_M, sr = (rj + dj) * ref.REGION_M;
+      const c0 = Math.floor(sq / ref.CHUNK_S), c1 = Math.floor(sr / ref.CHUNK_S);
+      for (let dca = 0; dca <= 1; dca++)
+        for (let dcb = 0; dcb <= 1; dcb++)
+          await wsTileOnce(seed, c0 + dca, c1 + dcb);
     }
   }
   const local = JSON.parse(GS.tileJson(q, r));
@@ -170,38 +277,113 @@ async function verifyTile(seed, q, r) {
   check(`tile onRoad`, got.onRoad === local.onRoad, `${got.onRoad} vs ${local.onRoad}`);
 }
 
+/* ws 单块拉取 (无对照, 只为驱动服务端 VM 道路生成) */
+let sharedWs = null;
+async function wsTileOnce(seed, ca, cb) {
+  if (!sharedWs) {
+    sharedWs = new WsClient(BASE);
+    await sharedWs.connect();
+    await sharedWs.login('verify-warm', 'demo');
+  }
+  await sharedWs.tile(seed, ca, cb).catch(() => {});
+}
+
 /* ---------- 主流程 ---------- */
 const seeds = ['42', '20260909'];
-const chunks = [[0, 0], [1, 0], [0, 1], [-1, 1], [-2, 3], [5, 7]];
-const regions = [[0, 0], [-1, 0], [0, 1], [1, -1], [4, 3]];
-const comms = [[0, 0], [1, 0], [0, 1], [-1, 0], [-1, 1], [2, 2]];
+const blocks = [[0, 0], [1, 0], [0, 1], [-1, 1], [-2, 3], [5, 7]];
 const tiles = [[0, 0], [3, -2], [-8, 5], [12, 9], [-3, -4]];
 
-console.log('== 元信息 ==');
+console.log('== 元信息 (HTTP) ==');
 const meta = await getJson('/api/map/meta?seed=x');
 check('meta 几何常量', meta.hexR === 8 && meta.chunkS === 21 && Math.abs(meta.hexW - Math.sqrt(3) * 8) < 1e-9, '');
 check('meta 图例13', meta.biomeMeta.length === 13, String(meta.biomeMeta?.length));
+check('HTTP 图数据端点已下线 (chunk)',
+  (await fetch(BASE + '/api/map/chunk?seed=42&ca=0&cb=0')).status === 404, '验收 §8.4');
+check('HTTP 图数据端点已下线 (region)',
+  (await fetch(BASE + '/api/map/region?seed=42&i=0&j=0')).status === 404, '验收 §8.4');
+check('HTTP 图数据端点已下线 (comm)',
+  (await fetch(BASE + '/api/map/comm?seed=42&ci=0&cj=0')).status === 404, '验收 §8.4');
+
+/* ---- 未登录门禁 (验收 §8.5) ---- */
+console.log('\n== 未登录门禁 ==');
+{
+  const anon = new WsClient(BASE);
+  await anon.connect();
+  const resp = await anon.tile('42', 0, 0);
+  check('未登录: chunk/region 可取', !!resp.chunk && resp.regions.length > 0, '');
+  const denied = 4 | 8 | 16;
+  check('未登录: deniedMask = Settle|Poi|Comm', resp.deniedMask === denied, String(resp.deniedMask));
+  check('未登录: 不含实体/群落层', !resp.settle && !resp.poi && resp.comms.length === 0, '');
+  anon.close();
+}
+
+/* ---- 登录后单块全量对照 ---- */
+const ws = new WsClient(BASE);
+await ws.connect();
+const lr = await ws.login('verify', 'demo');
+check('登录成功', lr.ok && lr.account === 'verify', JSON.stringify(lr));
 
 for (const seed of seeds) {
-  console.log(`\n== 区块对照 seed=${seed} ==`);
-  for (const [ca, cb] of chunks) await verifyChunk(seed, ca, cb);
-
-  console.log(`== 区域包对照 seed=${seed} ==`);
-  for (const [i, j] of regions) await verifyRegion(seed, i, j);
-
-  console.log(`== 群落对照 seed=${seed} ==`);
-  for (const [ci, cj] of comms) await verifyComm(seed, ci, cj);
-
-  console.log(`== 单格详情 seed=${seed} ==`);
-  for (const [q, r] of tiles) await verifyTile(seed, q, r);
+  console.log(`\n== 单块五图层对照 seed=${seed} ==`);
+  for (const [ca, cb] of blocks) await verifyBlock(ws, seed, ca, cb);
 }
 
-console.log('\n== 确定性与缓存 ==');
+/* ---- mask 位选 (验收 §8.2) ---- */
+console.log('\n== mask 位选 ==');
 {
-  const b1 = await getBinary('/api/map/chunk?seed=42&ca=0&cb=0');
-  const b2 = await getBinary('/api/map/chunk?seed=42&ca=0&cb=0');
-  check('区块二次请求字节一致', b1.length === b2.length && b1.every((v, i) => v === b2[i]), '');
+  GS.init('42');
+  const resp = await ws.tile('42', 0, 0, 0x03);   // Chunk|Region
+  check('mask=0x03 回显', resp.mask === 3, String(resp.mask));
+  check('mask=0x03 含 chunk/region', !!resp.chunk && resp.regions.length > 0, '');
+  check('mask=0x03 不含 settle/poi/comm', !resp.settle && !resp.poi && resp.comms.length === 0, '');
+  const resp2 = await ws.tile('42', 0, 0, 0x10);  // Comm 单层
+  check('mask=0x10 仅 comm', resp2.mask === 16 && !resp2.chunk && resp2.regions.length === 0 &&
+    !resp2.settle && !resp2.poi, '');
 }
+
+/* ---- rev 最小化响应 (验收 §8.6) ---- */
+console.log('\n== rev 增量失效 ==');
+{
+  const first = await ws.tile('42', 1, 1);
+  check('首次全量', !!first.chunk && first.regions.length > 0, '');
+  const second = await ws.tile('42', 1, 1, 31, first.revs);
+  check('rev 相同 → 最小响应 (无任何图层子消息)',
+    !second.chunk && second.regions.length === 0 && !second.settle && !second.poi && second.comms.length === 0,
+    JSON.stringify({ c: !!second.chunk, r: second.regions.length, s: !!second.settle, p: !!second.poi, m: second.comms.length }));
+  check('最小响应回显 revs 一致', JSON.stringify(second.revs) === JSON.stringify(first.revs), '');
+  const bumped = first.revs.slice(); bumped[2] = bumped[2] + 1;   // settle 层版本前进
+  const third = await ws.tile('42', 1, 1, 31, bumped);
+  check('settle rev 变化 → 仅重发受影响层', !third.chunk && third.regions.length === 0 &&
+    !!third.settle && !third.poi && third.comms.length === 0,
+    JSON.stringify({ c: !!third.chunk, r: third.regions.length, s: !!third.settle, p: !!third.poi, m: third.comms.length }));
+}
+
+/* ---- 单格详情 (HTTP, 保留接口) ---- */
+console.log('\n== 单格详情 seed=42 ==');
+for (const [q, r] of tiles) await verifyTile('42', q, r);
+
+ws.close();
+if (sharedWs) sharedWs.close();
+
+console.log('\n== 确定性 ==');
+{
+  const a = await wsRequery('42', 2, 0);
+  const b = await wsRequery('42', 2, 0);
+  check('同块两次全量请求内容一致',
+    JSON.stringify(a.revs) === JSON.stringify(b.revs) &&
+    !!a.chunk && !!b.chunk &&
+    sameF(PB.chunkToArrays(a.chunk, GEO).tiles, PB.chunkToArrays(b.chunk, GEO).tiles) &&
+    a.regions.length === b.regions.length, '');
+}
+async function wsRequery(seed, ca, cb) {
+  const w = new WsClient(BASE);
+  await w.connect();
+  await w.login('verify-det', 'demo');
+  const r = await w.tile(seed, ca, cb);
+  w.close();
+  return r;
+}
+
 const stats = await getJson('/api/map/stats');
 check('SQLite 落库行数 > 0', stats.dbRows > 0, JSON.stringify(stats));
 

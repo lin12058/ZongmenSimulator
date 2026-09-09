@@ -1,7 +1,10 @@
 /* ============================================================
- * mapclient.js — 后端数据客户端 (权威世界数据拉取/解码/几何工具)
- *   前端不再运行任何地图生成/噪声/寻路判定;
- *   区块/区域/群落/单格详情/字段网格 全部由 /api/map 提供。
+ * mapclient.js — 后端数据客户端 (WebSocket 单块 + HTTP 辅助)
+ *   图数据 (chunk/region/settle/poi/comm) 全部走 ws://…/ws/map:
+ *   一个块一个 TileRequest, 响应为多图层子消息的 TileResponse
+ *   (设计 §三), mask 全量拉取, rev 按块缓存实现增量失效 (§四)。
+ *   HTTP 仅保留 meta / tile / fields (单格详情与字段网格)。
+ *   前端不运行任何地图生成/噪声/寻路判定。
  * ============================================================ */
 (function (g) {
   'use strict';
@@ -60,7 +63,150 @@
   }
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 
-  /* ---------- 拉取解码 ---------- */
+  /* ============================================================
+   * WebSocket 单块客户端 (设计 §三/§四/§五)
+   *   帧格式 [1B 类型][载荷]; TileResponse 载荷 gzip(protobuf)。
+   *   - 连接即 Login (demo 账号 guest); 登录前不发块请求。
+   *   - 纯请求/响应: block(i,j) 返回 Promise, 按 seq 关联。
+   *   - revs: 每块缓存最近一次响应的图层 rev, 下次请求携带 →
+   *     未变化图层服务端缺省下发 (验收 §8.6); forgetBlock 清缓存。
+   *   - 断线自动重连 (指数退避 0.5s→15s), 在途请求以网络错误拒绝,
+   *     由上层重试逻辑恢复。
+   * ============================================================ */
+  var sock = null;                 // 当前 WebSocket
+  var sockReady = null;            // Promise: 连接+登录完成 (每次连接重建)
+  var sockReadyRes = null, sockReadyRej = null;
+  var seq = 0;                     // 请求序号 (回显关联)
+  var pending = new Map();         // seq -> {resolve, reject, timer}
+  var revs = new Map();            // 'i,j' -> [chunk,region,settle,poi,comm]
+  var reconnectAt = 0;             // 下次允许重连时刻 (退避)
+  var WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') +
+               location.host + '/ws/map';
+  var REQ_TIMEOUT = 20000;         // 单请求超时 (视为可重试网络错误)
+
+  function wsSend(u8) {
+    try { sock.send(u8); return true; } catch (e) { return false; }
+  }
+
+  function gunzip(u8) {
+    /* TileResponse 载荷 gzip → ArrayBuffer (浏览器/Node 通用 DecompressionStream) */
+    var ds = new DecompressionStream('gzip');
+    return new Response(new Blob([u8]).stream().pipeThrough(ds)).arrayBuffer();
+  }
+
+  function connect() {
+    if (sock && (sock.readyState === 0 || sock.readyState === 1)) return sockReady;
+    sock = null;
+    sockReady = new Promise(function (resolve, reject) {
+      sockReadyRes = resolve;
+      sockReadyRej = reject;
+      var s;
+      try { s = new WebSocket(WS_URL); } catch (e) { reject(e); return; }
+      s.binaryType = 'arraybuffer';
+      sock = s;
+      s.onopen = function () {
+        /* 连接即登录 (设计 §五): demo 账号 guest */
+        var login = PB.encodeLogin({ account: 'guest', token: 'demo' });
+        var frame = new Uint8Array(1 + login.length);
+        frame[0] = PB.FRAME.LOGIN;
+        frame.set(login, 1);
+        wsSend(frame);
+      };
+      s.onmessage = function (ev) { onFrame(new Uint8Array(ev.data)); };
+      s.onclose = function () {
+        sock = null;
+        failAllPending(new Error('WS 连接已断开'));
+        if (sockReadyRej) { sockReadyRej(new Error('WS 连接已断开')); sockReadyRej = null; }
+        scheduleReconnect();
+      };
+      s.onerror = function () { /* onclose 随后触发, 统一走 onclose */ };
+    });
+    sockReady.catch(function () { /* 防未处理 rejection; 重连由 onclose 驱动 */ });
+    return sockReady;
+  }
+
+  function scheduleReconnect() {
+    var now = Date.now();
+    if (reconnectAt > now) return;
+    reconnectAt = now + 800;       // 主循环每帧都会 pump, 0.8s 冷却即自然的指数退避源
+  }
+  /* 暴露给 main.js: 距下次可重连的毫秒数 (<0 = 立即可连) */
+  function reconnectDue() { return Date.now() >= reconnectAt; }
+
+  function onFrame(u8) {
+    if (!u8.length) return;
+    var type = u8[0], payload = u8.subarray(1);
+    if (type === PB.FRAME.LOGIN) {
+      var lr = PB.decodeLoginResponse(payload);
+      if (lr.ok) { if (sockReadyRes) { sockReadyRes(lr); sockReadyRes = null; sockReadyRej = null; } }
+      else {
+        if (sockReadyRej) { sockReadyRej(new Error('登录失败: ' + lr.err)); sockReadyRej = null; sockReadyRes = null; }
+        try { sock.close(); } catch (e) { /* 忽略 */ }
+      }
+      return;
+    }
+    if (type === PB.FRAME.PING) return;         // 服务器不应主动 ping; 忽略
+    if (type === PB.FRAME.TILE) {
+      gunzip(payload).then(function (buf) {
+        var resp = PB.decodeTileResponse(buf);
+        var p = pending.get(resp.seq);
+        if (!p) return;                         // 重连前的迟到响应: 丢弃
+        pending.delete(resp.seq);
+        clearTimeout(p.timer);
+        /* 记录 rev 供下次增量请求 (无论响应是否含全部图层) */
+        if (resp.revs && resp.revs.length) {
+          revs.set(resp.i + ',' + resp.j, resp.revs.slice(0, 5));
+        }
+        p.resolve(resp);
+      }, function (err) {
+        console.error('TileResponse 解压/解码失败', err);
+      });
+    }
+  }
+
+  function failAllPending(err) {
+    pending.forEach(function (p) { clearTimeout(p.timer); p.reject(err); });
+    pending.clear();
+  }
+
+  /* 请求一个块 (mask 全量; rev 增量)。主块坐标 = 区块格 (i,j) = (ca,cb)。 */
+  function block(seed, i, j) {
+    return connect().then(function () {
+      return new Promise(function (resolve, reject) {
+        if (!sock || sock.readyState !== 1) { reject(new Error('WS 未就绪')); return; }
+        var last = revs.get(i + ',' + j);
+        var sseq = ++seq;
+        var body = PB.encodeTileRequest({
+          op: 1, seed: seed, i: i, j: j,
+          mask: PB.MASK.ALL, seq: sseq,
+          lastRevs: last || []
+        });
+        var frame = new Uint8Array(1 + body.length);
+        frame[0] = PB.FRAME.TILE;
+        frame.set(body, 1);
+        var entry = {
+          resolve: resolve, reject: reject,
+          timer: setTimeout(function () {
+            pending.delete(sseq);
+            reject(new Error('WS 请求超时'));
+          }, REQ_TIMEOUT)
+        };
+        pending.set(sseq, entry);
+        if (!wsSend(frame)) {
+          pending.delete(sseq);
+          clearTimeout(entry.timer);
+          reject(new Error('WS 发送失败'));
+        }
+      });
+    });
+  }
+
+  /* 块数据被上层卸载时必须调用: 否则 rev 命中会导致服务端缺省下发,
+     而客户端已无该块数据 (设计 §四 rev 失效的正确性前提) */
+  function blockForget(key) { revs.delete(key); }
+  function blockForgetAll() { revs.clear(); }
+
+  /* ---------- 单格详情 / 字段网格 (保留 HTTP) ---------- */
   function getProto(url) {
     return fetch(base + url).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + url);
@@ -68,34 +214,11 @@
     });
   }
 
-  /* 区块: 返回 renderer.uploadChunk 同构的 Float32Array 数据集 */
-  function chunk(seed, ca, cb) {
-    return fetchMeta()
-      .then(function () {
-        return getProto('/api/map/chunk?seed=' + enc(seed) + '&ca=' + ca + '&cb=' + cb);
-      })
-      .then(function (buf) {
-        var msg = PB.decodeChunkMsg(buf);
-        return PB.chunkToArrays(msg, geo());
-      });
-  }
-
-  function region(seed, i, j) {
-    return getProto('/api/map/region?seed=' + enc(seed) + '&i=' + i + '&j=' + j)
-      .then(function (buf) { return PB.decodeRegionMsg(buf); });
-  }
-
-  function comm(seed, ci, cj) {
-    return getProto('/api/map/comm?seed=' + enc(seed) + '&ci=' + ci + '&cj=' + cj)
-      .then(function (buf) { return PB.decodeCommMsg(buf); });
-  }
-
   function tile(seed, q, r) {
     return getProto('/api/map/tile?seed=' + enc(seed) + '&q=' + q + '&r=' + r)
       .then(function (buf) { return PB.decodeTileMsg(buf); });
   }
 
-  /* 字段网格 (小地图/批量采样): 只返回显示用的 disp 编号字节 */
   function fieldGrid(seed, q0, q1, r0, r1) {
     return fetch(base + '/api/map/fields?seed=' + enc(seed) +
       '&q0=' + q0 + '&q1=' + q1 + '&r0=' + r0 + '&r1=' + r1)
@@ -120,9 +243,12 @@
     tileToWorld: tileToWorld,
     pxToTile: pxToTile,
     clamp: clamp,
-    chunk: chunk,
-    region: region,
-    comm: comm,
+    /* WebSocket 单块接口 */
+    block: block,
+    blockForget: blockForget,
+    blockForgetAll: blockForgetAll,
+    reconnectDue: reconnectDue,
+    /* HTTP 辅助接口 */
     tile: tile,
     fieldGrid: fieldGrid
   };

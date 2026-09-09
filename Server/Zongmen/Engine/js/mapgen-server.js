@@ -87,7 +87,9 @@
     for (var s = 0; s < sts.length; s++) {
       var st = sts[s];
       stArr.push({ id: st.id, type: st.type, q: st.q, r: st.r,
-                   x: st.x, y: st.y, name: st.name, pop: st.pop });
+                   x: st.x, y: st.y, name: st.name, pop: st.pop,
+                   owner: st.owner || '', tier: st.tier || 0,
+                   state: st.state || 0, expireTs: st.expireTs || 0 });
     }
     for (var m = 0; m < roads.length; m++) {
       var rd = roads[m], pts = [];
@@ -115,6 +117,38 @@
     return JSON.stringify({ exists: true, ci: ci, cj: cj,
       q: cm.q, r: cm.r, x: cm.x, y: cm.y, element: cm.element, spirit: cm.spirit,
       veins: vArr });
+  }
+
+  /* ---------- 单块归属映射 (WebSocket 单块接口, 设计 §6 方案 A) ----------
+   * 主块 = 区块格 (ca, cb)。一个块天然覆盖若干区域格与群落格:
+   *   region: 区域种子距块中心 ≤ CHUNK_SCAN + REGION_M
+   *           (块胞腔最远 11 格 + 区域 Voronoi 胞腔最大延伸 ~REGION_M)
+   *   comm:   群落主格距块中心 ≤ COMM_CL (群落晶格 150, 块胞腔 11 远小于它)
+   * 服务端 GetTileBlock 据此把 chunk/region/settle/poi/comm 各图层
+   * 拼进一个 TileResponse; 坐标映射只在此处权威定义。 */
+  function blockLayersJson(ca, cb) {
+    var ccq = ca * S, ccr = cb * S;
+    var M = MG.REGION_M, CL = MG.CFG.COMM_CL;
+    var reach = MG.CHUNK_SCAN + M;
+    var i0 = Math.floor((ccq - reach) / M) - 1, i1 = Math.floor((ccq + reach) / M) + 1;
+    var j0 = Math.floor((ccr - reach) / M) - 1, j1 = Math.floor((ccr + reach) / M) + 1;
+    var regions = [];
+    for (var i = i0; i <= i1; i++) {
+      for (var j = j0; j <= j1; j++) {
+        var ri = MG.regionInfo(i, j);
+        if (MG.hexDist(ri.q, ri.r, ccq, ccr) <= reach) regions.push([i, j]);
+      }
+    }
+    var k0 = Math.floor((ccq - CL) / CL) - 1, k1 = Math.floor((ccq + CL) / CL) + 1;
+    var l0 = Math.floor((ccr - CL) / CL) - 1, l1 = Math.floor((ccr + CL) / CL) + 1;
+    var comms = [];
+    for (var ci = k0; ci <= k1; ci++) {
+      for (var cj = l0; cj <= l1; cj++) {
+        var cm = MG.communityOf(ci, cj);
+        if (cm && MG.hexDist(cm.q, cm.r, ccq, ccr) <= CL) comms.push([ci, cj]);
+      }
+    }
+    return JSON.stringify({ ca: ca, cb: cb, regions: regions, comms: comms });
   }
 
   /* ---------- 单格详情 (信息面板权威数据) ---------- */
@@ -199,6 +233,7 @@
     chunkJson: chunkJson,
     regionJson: regionJson,
     commJson: commJson,
+    blockLayersJson: blockLayersJson,
     tileJson: tileJson,
     fieldGridJson: fieldGridJson,
     metaJson: metaJson,
