@@ -9,8 +9,11 @@ assets/snap_*.png
 Thumbs.db
 Desktop.ini
 
-# 调试截图 (agent-browser 临时产物)
-.workbuddy/shot*.jpg
+# AI 本地工作目录（会话记忆 / 临时截图等，不入库）
+.workbuddy/
+
+# 个人待办/排查记录（非项目交付物）
+待办事项/
 
 # ======== 运行时产物 (不入库) ========
 
