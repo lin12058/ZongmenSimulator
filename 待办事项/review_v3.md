@@ -1,118 +1,130 @@
-# 代码审查报告 · 宗门模拟器 · review_v3
+# 宗门模拟器 demo3 · 前后端整体代码审核 v3
 
-审查范围：最后一次提交（`git log -1`: `886675f`）全量代码
-覆盖：C# 后端（Server/Zongmen）、前端（web/js）、验证脚本（verify）
-审查日期：2026-09-09
-
----
-
-## 一、Bug（按严重度排序）
-
-### P0-1 立体精灵「海拔属性」从未上传 GPU —— 山峰/雪峰高度缩放失效
-
-- **文件**：`web/js/renderer.js` → `InkRenderer.prototype.uploadChunk`
-- **位置**：约第 440–450 行
-- **问题**：
-  ```js
-  var pd = [data.propCenters, data.propSprites, data.propHashes, data.propElevs];
-  var pl = [1, 2, 3, 4];
-  for (k = 0; k < 3; k++) {          // ← 数组/pl 是 4 个元素，循环只遍历 3
-      ...
-      gl.vertexAttribPointer(pl[k], ...);
-      gl.vertexAttribDivisor(pl[k], 1);
-  }
-  ```
-  最后一组 `propElevs`（对应 vertex shader `PROP_VS` 中 `layout(location=4) in float iElev`）**从未被 `vertexAttribPointer` 绑定**。
-- **后果**：location=4 属性数据恒为 0，shader 中
-  `hs = mix(0.55,1.30, clamp((iElev-0.70)/0.14,...))` 与雪峰 `mix(0.95,1.55,...)` 永远取到 0 档 → **所有山/雪峰精灵始终按最低高度渲染**，海拔驱动的高度变化、山峰高度差异全部丢失（视觉上所有同类山峰一样高）。
-- **修复**：`for (k = 0; k < 4; k++)` 或 `k < pl.length`。
-
-### P0-2 服务端 JS 沙箱全串行 —— 并发加载吞吐受限
-
-- **文件**：`Server/Zongmen/Engine/JsEngineHost.cs` → `JsWorldVm.Call`
-- **位置**：`SemaphoreSlim _gate = new(1,1)`，每次 `Call` 前 `_gate.Wait()`、finally 里 `Release()`。
-- **问题**：同一 seed 世界内所有 JS 计算（chunk / region / comm / tile 生成）被一把信号量**完全串行化**。前端 3–6 并发拉取 chunk 时，服务端实际逐个执行。
-- **后果**：多客户端同时进入新区域/多个 chunk 排队时首个耗时明显；V8 解释执行下含 `fields()` 递归的 `buildChunk` 本身不轻，串行会放大延迟。
-- **建议**：明确该串行是**为保证共享缓存线程安全**。若需提吞吐，可改为 per-world 细粒度锁或仅对「生成 + 写缓存」加锁、读缓存不加锁（先用 `TryGetValue` 无锁读，未命中再进 gate 生成）。
-
-### P1-3 服务端内存/磁盘缓存无上限 —— 长期漫游无限增长
-
-- **文件**：`Server/Zongmen/Services/MapWorldService.cs`（`_mem`、`SqliteVirtualContext`、`SetData`）
-- **问题**：
-  - `MemoryVirtualContext` 为 `ConcurrentDictionary`，只增不删；
-  - SQLite `Data` 表 `INSERT ... ON CONFLICT DO UPDATE`，同样只增；
-  - 前端会 `dropChunk` 释放 GPU 资源，但**服务端缓存永不回收**。
-- **后果**：玩家持续探索新区域 → 后端起每个 chunk/region/comm 的 gzip(proto) 无限累积 → 内存与 db 文件无限膨胀。
-- **建议**：为内存缓存加 LRU（可按 key 前缀区分 chunk/region），并定期清理 SQLite 中活跃种子之外的旧数据；或至少记录并给出清理策略。
-
-### P1-4 `buildChunk` 存在重复/嵌套缓存污染风险（冷启动偏慢）
-
-- **文件**：`Server/Zongmen/Engine/js/mapgen.js` → `buildChunk`
-- **问题**：对区块内每个 tile 都要对**自身 + 6 邻居**依次调 `fields()`，而 `fields()` 内部又可能触发 `elevAt`/`veinNear` 的递归缓存。第一帧加载多个 chunk 时构成较大的冷启动计算量。
-- **现状**：结果均有 `fieldCache`/`elevCache`/`veinNearCache` 跨区块复用，chunk 间不重复计算同格；`evictHalf` 在 >15 万条时淘汰一半。
-- **建议**：属可接受范围，但可在 `hexDist > CHUNK_SCAN` 时先短路扫描（当前已短路）。无需紧急处理；记录以防后续区块更大或尺度过大时性能退化。
-
-### P1-5 前端 overlay 静态层重建时全量重传道路数据
-
-- **文件**：`web/js/main.js` → `renderStaticInto`
-- **位置**：每帧 `drawOverlay` 先 `staticNeedsRedraw` 决定是否重算；一旦需要重算，则把 `roadHaloV`/`roadCoreV` **整批**重新 `bufferData`（`DYNAMIC_DRAW`），且灵脉辐射/名牌/聚落图标全部重绘。
-- **后果**：平移超过阈值或 `staticDirty` 频繁置位时，每次整批重建；道路点越多开销越大。
-- **建议**：对道路三角面增量/按可见区裁剪；或至少在相机小步平移时复用上一次已上传的 buffer（当前只有当 `|Δcam| > scale` 才触发，基本可接受）。
-
-### P1-6 `JsWorldVm.Call` 每次动态绑定 + `dynamic` 开销
-
-- **文件**：`Server/Zongmen/Engine/JsEngineHost.cs`
-- **问题**：每次调用都执行 `dynamic s = _engine.Script.MapGenServer;` 并通过 switch 分支；`dynamic` 调用较慢、无缓存。
-- **建议**：缓存 `MapGenServer` 对象为强类型/`COM` 或把 7 个方法名映射为固定委托；对高频 chunk/tile 调用收益明显。
+> 审核对象：`web/js/*`(main/mapclient/noiselib/pb/textures/renderer)、`Server/Zongmen/Engine/js/*`(noise/mapgen/mapgen-server)、
+> `Server/Zongmen/*.cs`(Program/Options/MapWorldService/JsEngineHost/MapEndpoints/StaticWebMiddleware/ApiRateLimit 及 Storage/Domain/Protocol/Web)。
+> 性质：性能 & 正确性 & 潜在 bug 定向扫描（v3 为在 v1/v2 基础上补充的新一轮深审，含跨文件一致性与遗漏面）。
+> 评级：🔴 高（正确性/需处理）· 🟠 中（可优化/风险）· 🟢 低（维护性/注释）。
 
 ---
 
-## 二、一致性 / 既定设计（确认无问题或低优先级）
+## 〇、v3 新增发现速览
 
-### P2 图集/宣纸/噪声纹理生成顺序耦合
-- **文件**：`web/js/textures.js`
-- `buildAtlas` 逐格重设模块级 `trng = NL.mulberry32(固定种子)`；`buildPaper`/`buildNoise` **不重置** `trng`，依赖 buildAtlas 结束后的随机游标。
-- 当前 `boot` 固定顺序 `buildAtlas → buildPaper → buildNoise`，因此纹理稳定。但该顺序是隐式依赖，若未来在中间插入任何额外 `trng()` 消费，paper/noise 将随之变化（外观漂移）。记录为脆弱点。
-
-### P2 前端 `showInfo`/tile 请求无防抖
-- 每次点击单独请求 /api/map/tile，无节流。点击节奏快时会产生连续小请求。可加 100–200ms 防抖。
-
-### P2 客户端 `warmRoadsStep` / `warmIdx` 为遗留死代码
-- `mapgen.js` 中 `warmRoadsStep`、`warmIdx` 与新注释引用 main.js `warmGap`，但当前前端不再运行生成逻辑，服务端用 `roadsNear(...,9999)` 全量计算。此函数已无调用方，仅增加代码困惑。建议后续清理（低优先级，不影响运行）。
-
-### P2 无符号 vs 有符号 水位字段 (waterD=-1 → 255)
-- 前端/后端对 `waterD` 使用 0–4 + 255 哨兵约定，mapgen.js 返回 `-1` 时 C# 转 `255`，前端按 `255 → "较远"` 处理。已核对一致，无 bug。
-
-### P2 chunk 数据相对偏移 int8（cq/cr +16）
-- 构建扫描半径 15，理论最大偏移 ±14(<15)，+16 后落在 2–30，均在 u8 内。当前不溢出。**仅当未来增大 CHUNK_SCAN >15 时需同步校验**（否则溢出导致错位）。
-
-### P2 SQLite 单连接 + 全局锁写盘
-- `SqliteVirtualContext` 单 `SqliteConnection` + `lock` 串行写。首次加载每个 chunk 同步写盘，存在磁盘 I/O 停顿。建议异步/批量落盘（P2 优化）。
+| # | 模块 | 级别 | 一句话 |
+|---|------|------|--------|
+| 1 | `MapWorldService.GetRegionBytes` | 🟠 | 区域包只写 SQLite、从不回读，落库纯属浪费（v2 提到但v3落实为「按 new seed 持续膨胀」后果） |
+| 2 | `SqliteVirtualContext` 单库无限膨胀 | 🟠 | `PruneExcept` 仅在 `/stats` 第 20 次请求触发，非活跃 seed 的各种历史世界数据长期占用磁盘(33MB+) |
+| 3 | `_regionEpoch` 每生成一次区域就全 seed 失效一次 | 🟠 | 使 tile 缓存（最多1024条）频繁整片清空，连点小地图反复重算 |
+| 4 | `MemoryVirtualContext` 淘汰触发 O(n) 扫描 | 🟢 | 每次超限用 `Take(cap/4)` 全量遍历，热点轮询时反复整表扫描 |
+| 5 | `ApiRateLimitMiddleware` 清理概率采样 | 🟢 | `(now & 0x3FF)==0` 按当前时间低位，非频率担保；仅防膨胀可用 |
+| 6 | `main.js` 静态层 drawOnDemand 链路 | 🟢 | `staticNeedsRedraw` 用相机位移阈值 + `setTimeout`，高 DPR 下可能产生绘制抖动（低） |
 
 ---
 
-## 三、性能总结（按影响排序）
+## 一、性能（前端）
 
-| 优先级 | 项 | 影响 |
-|---|---|---|
-| P0 | renderer 缺 propElevs 上传 | 山峰高度视觉数据丢失 |
-| P0 | JsWorldVm 全串行 gate | 并发 chunk 吞吐受限，latency 上升 |
-| P1 | 服务端内存/SQLite 无界增长 | 长期漫游内存与磁盘膨胀 |
-| P1 | overlay 重建时整批道路重传 | 平移/缩放时偶发卡顿 |
-| P1 | dynamic 调用无缓存 | 每 chunk 冷启动开销 |
-| P2 | 纹理生成顺序隐式耦合 | 潜在外观漂移（当前稳定） |
-| P2 | tile 请求无防抖 | 连续点击多发请求 |
-| P2 | SQLite 同步写盘 | 首次加载磁盘停顿 |
-| P2 | 死代码 / 哨兵常量 | 代码可维护性 |
+### 🟠 1.1 静态覆盖层每帧全量重建（路网 + 标注）
+`main.js drawOverlay()`（L706-L734）每帧：
+- 由 `staticNeedsRedraw()` 判断是否重绘；但 `regionCells.forEach` 生成 `haloV/coreV` 顶点数组，
+  每帧即使相机静止只要 `staticDirty` 或位移超阈值就全量重算并 `setRoads()` → `bufferData(DYNAMIC)` 重传整个路网。
+- 与 v2 #8 一致，但补充一个点：**当新 chunk/region 陆续到达时，`markStaticDirty` 的 200ms 节流能在“数据洪峰”合并，但一次全量重绘的成本仍与整张地图区域数成正比**。
 
----
+**建议**：把路网顶点、区域名/灵脉名标注拆成「分块缓存」；仅失效块重绘。或把路网烘焙到离屏 Canvas 作为图层，平移时只做 `drawImage` 位移。当前规模可接受，但地图越大越明显。
 
-## 四、优先修复建议（下一步动作）
+### 🟠 1.2 精灵层 `propPad` 余量过大
+`renderer.js` 中 `propPad = hexR*12`，Pass1.5 对每个 chunk 做 `boxHits(bbox, viewBox, propPad)` 粗剔除。
+`hexR=8 → pad=96px`，远大于实际精灵高度（约 3.3~4.5 倍半径 ≈ 26~36px）。
+- 影响：视口外的 chunk 常因 pad 过大仍进 Pass1.5，绘制成本略高；但只多画不入 buffer，无正确性问题。
 
-1. **立即修复 P0-1**：`renderer.js` 第 442 行 `for(k=0;k<3;k++)` → `k<4`（一行改动），恢复山/雪峰海拔高度渲染。
-2. **评估 P0-2**：改进 `JsWorldVm` 并发策略（读缓存无锁、生成加锁），降低多客户端/多区块同时加载延迟。
-3. **规划 P1-3**：为 chunk/region/comm 缓存引入 LRU 淘汰与 SQLite 清理策略。
+### 🟢 1.3 `pxToTile`/`tileToWorld` 无条件重算（同 v2 #9）
+Canvas2D 小地图每像素调 `pxToTile`，无 tile 级缓存；dPR=2 与全屏缩放时逐像素成本累积。低优先级，热点出现再优化。
 
 ---
 
-*本报告由全量代码审查生成，标注文件与行号对应当前提交。*
+## 二、性能（后端）
+
+### 🟠 2.1 区域包只写而不读 → SQL 落库与磁盘双重浪费
+`MapWorldService.GetRegionBytes`（L126-154）：
+```csharp
+var hit = _mem.GetDataBytes(key);          // 只查内存
+if (hit != null) return hit;
+...
+Store(key, gz);                            // _sql?.SetDataDeferred(...) 照写
+```
+- 每次区域**冷回访**都走 JS VM 全量 `regionJson`（含 A*），与 SQLite 中既有行无关。
+- 结论：`db/zongmen.sqlite` 中 `w:…:region:…` 记录自写入起永不回读，仅做无意义持久化 + 占磁盘。
+- **建议**：要么不再写 region 行（省 IO/磁盘），要么为 `tileJson.onRoad` 引入与道路生成同源的版本号，使 region 可安全走 SQLite 冷读（v1/v2 已提，v3 建议直接落地其一）。
+
+### 🟠 2.2 SQLite / 缓存无界增长（新增后果分析）
+- `MaxSeeds=3` 只限制 V8 实例；每次 `regenerate` 或新 seed 都会把一整套 chunk/region/comm 写入 SQLite。
+- `PruneExcept(prefixes)` 只在 `/stats` 偶发触发（每 20 次统计），且只按“当前存活 seed”过滤；历史 seed 若已被 LRU 淘汰，其数据永不清除。
+- 现 `db/zongmen.sqlite` 已 33MB；长期多 seed 使用会持续膨胀。
+- **建议**：a) 为 persistent 加 TTL/大小预算，按最近访问或 seed 时间淘汰；b) 将 prune 移到运行期定时（后台任务），而非依赖 `/stats` 调用；c) `region` 不落库后体积可大幅回落。
+
+### 🟢 2.3 `_regionEpoch` 失效粒度过粗（同 v2 #3 的落实方案）
+- `GetRegionBytes` 每次生成后 `++_regionEpoch[seed]`，使该 seed 全部 tile 缓存条目失效。建议按 `(seed,i,j)` 粒度维护，只失效「当前区域内的 tile」。
+
+### 🟢 2.4 `MemoryVirtualContext` 淘汰 O(n)
+`EvictIfOver()` 用 `Take(cap/4)` 遍历 Keys 再删除。容量大或热点轮询时反复整表扫描。建议用有序结构（`LinkedHashMap`/`OrderedDictionary`）或固定分片。
+
+---
+
+## 三、正确性 / 潜在 Bug
+
+### 🔴 3.1（确认无碍）chunk 坐标还原 — 校验通过
+`mapclient.chunkToArrays`：`qa = ca*S + (cq[i]-16)`，服务端 `dq+16` → 还原 `dq=q-ca*S`，`qa=q`。配 `Path.resolve` 与 `NEIGH_SLOTS` 一致，未发现坐标错位。✔
+
+### 🟠 3.2 `ApiRateLimitMiddleware` 清理采样的伪随机性
+`if (_hits.Count > 1024 && (now & 0x3FF) == 0) Prune(now)`：
+- 用当前时钟低位作“每隔约1024次请求”触发器，但触发时机不可控（可能与窗口边界无关）。
+- 结果：不至于无限增长（rate 上限 <120/5s），但到达上限附近时可能长时间不清理窗口 → 内存短暂上升。低风险，可接受。
+
+### 🟠 3.3 `loadExtra`/`pump` 的 `regionBusy/commBusy` 与 `keepR/keepC` 竞态（已核对无 bug）
+`loadExtra` 完成后先判 `keepR/keepC` 再写 map；`busy.delete` 恒在末尾。卸载与回归竞态下**不会把已卸载格重新填回**。✔ 但 `regionQueue`/`commQueue` 重建逻辑里，`pumpExtra` 可能在 `queue.length=0` 后仍被在途回调调用——已确认安全（判断 `busy.has`）。✔
+
+### 🟢 3.4 注释/命名不一致（低）
+- `textures.js` 头注释写“共7行”，实际 `ATLAS_ROWS=8` 且第5/6/7行放精灵；注释滞后于实现（v2 已提，v3 确认仍在）。
+- `mapgen.js` 的 `COUNT_VEINS` 刷星 `configuration` 语义与 `R11` 注释有待同步。
+
+---
+
+## 四、跨文件一致性审计（v3 新增）
+
+| 契约 | 服务端 | 前端 | 结论 |
+|------|--------|------|------|
+| 区块字段顺序/字节宽 | `BuildChunk` 单段 11n+13pn | `pb.decodeChunkMsg/chunkToArrays` 同序同宽 | ✔ |
+| 区域/群路点数 | `regionJson.roads[].pts` 交错 f32 | `toF32(rdLen)` | ✔ |
+| 灵脉灯色 | `ELEMENT_RGB`(5) | `geoElementColor` 数组一致 | ✔ |
+| `meta` 几何 | `CHUNK_S/SCAN/REGION_M/COMM_CL/R` | `geo()` 同名映射 | ✔ |
+| 精灵行号 | `propSpriteFor` 40..63 | `PROP_FS` 行号整除 8 | ✔(受 ATLAS_ROWS 耦合，见v2#1) |
+| 限流窗口 | tile/fields | 仅命中这两个端点 | ✔ |
+
+---
+
+## 五、测试覆盖缺口
+
+- `verify_map.mjs` 主要覆盖区块坐标/地貌/海拔/哈希/邻域/精灵、区域、群落、单格，310 项。未覆盖：
+  1. **SQLite 冷读路径**（当前 region 根本不读库，所以无路径可测 —— 印证 2.1）。
+  2. **`_regionEpoch` 失效后的 tile 重算正确性**（连点小地图）。
+  3. **多 seed 切换后 SQLite 膨胀/清理**。
+  4. **限流触发后 429 行为**与前端重试。
+  5. **`renderer` 分块/精灵边界**（无 WebGL 单测，仅页面级验证）。
+  6. `capture.png`/`shot_*.png` 回归基线仅机器可见，建议加入 diff 阈值告警。
+
+---
+
+## 六、建议处理顺序
+
+1. **2.1 + 2.2**：`region` 不落库或为 `onRoad` 引入版本号；SQLite 加定时整理/按 seed 预算。（影响磁盘与冷启动）
+2. **2.3**：epoch 按区域粒度失效，减少 tile 缓存无谓清空。
+3. **1.1**：路网/标注分块缓存，降低平移 & 数据洪峰期重绘成本。
+4. **2.4 / 3.2**：淘汰与清理改用有序结构，去掉依赖 `/stats` 的偶发清理。
+5. **4.0 注记**：`ATLAS_ROWS` 抽公共常量 + 构建期断言（承接 v2#1）。
+
+---
+
+## 七、总体结论
+
+- 架构（C# 权威 + V8 沙箱 + protobuf/gzip + 两级缓存 + 前端纯渲染）**设计正确、无明显结构性缺陷**；
+- 正确性上未发现会导致画面错版或数据损坏的确定性 bug；坐标/字节序/元数据/色彩跨文件一致。
+- 主要风险集中在**持久化生命周期**（region 只写不读、SQLite 无限膨胀、epoch 粗粒度失效）与**渲染静态层全量重绘**；
+- 建议把 v3 的 2.1/2.2/2.3 与 v2 的 #1/#2/#3 合并为一个「存储与缓存生命周期」迭代，前端分块预烘焙为后续优化。

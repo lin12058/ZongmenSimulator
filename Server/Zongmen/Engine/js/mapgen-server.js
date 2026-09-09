@@ -33,7 +33,8 @@
     }
     return out;
   }
-  /* P5: 定宽字段已并入 chunkJson 单段缓冲, 不再需要逐段 b64 辅助函数 */
+  /* P5: 逐段 b64 已并入 chunkJson 单段缓冲; b64FromBytes 仍用于
+     单段缓冲 / 字段网格的整体编码 (T14: 原注释「不再需要」与事实不符, 已修正) */
 
   /* ---------- 区块: 相对区块中心 + u16 量化 ---------- */
   function chunkJson(ca, cb) {
@@ -201,6 +202,8 @@
     tileJson: tileJson,
     fieldGridJson: fieldGridJson,
     metaJson: metaJson,
+    /* 道路版本号: tile 缓存新鲜度校验用 (roadCache 新增道路即 +1) */
+    roadVersion: function () { return MG.roadVersion(); },
     /* 统计/自检钩子 */
     _countVeins: function () { return JSON.stringify({ n: MG.countVeins() }); }
   };

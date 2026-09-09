@@ -14,12 +14,16 @@ namespace Zongmen.Services;
  *   → 内存/ SQLite 两级缓存 → 下发
  *   Chunk / Region / Community 持久化; Tile / 字段网格 即时计算。
  *
- * R8: tile / fieldGrid 结果内存 LRU 缓存 — 小地图轮询+连点命中免重算;
- *     tile 缓存按「该 seed 的区域包生成 epoch」失效: regionJson 每次经 JS
- *     生成(可能新增 roadCache 道路)都会推进 epoch, 使旧 tile 的 onRoad
- *     结果不会与地图已绘制道路不一致 (与 P4 语义一致)。
  * R9: chunk/region/comm 的 per-key in-flight 去重 — 并发同 key miss 只
- *     build 一次, 其余等待者 double-check 命中 _mem 后直接返回。
+ *     build 一次, 其余等待者 double-check 命中后直接返回。
+ * T2: 区域包不再落 SQLite (历史上只写不读, 纯写放大); 会话内由
+ *     _regionHot (专用大容量 LRU) + _mem 兜底, 冷回访免 A* 全量重算。
+ * T4: tile 缓存新鲜度改用 VM roadVersion (roadCache 每新增道路 +1) —
+ *     取代旧的「seed 全局 epoch」: 只有真有新路落成才失效旧 tile 缓存,
+ *     连点小地图/流式加载不再反复整片重算。
+ * T3: SQLite 整理 (Flush + PruneExcept) 移入后台定时任务, 不再依赖
+ *     /stats 第 N 次请求偶发触发。
+ * T11: tile/grid/region 热缓存统一 LruCache (命中即提序, 单条淘汰)。
  * ============================================================ */
 
 public sealed class MapWorldService : IDisposable
@@ -31,16 +35,24 @@ public sealed class MapWorldService : IDisposable
     private string? _metaCache;
     private readonly object _metaLock = new();
 
-    /* R8: tile/fieldGrid 热缓存 (不落 SQLite, 仅进程内) */
+    /* tile/fieldGrid/region 热缓存 (不落 SQLite, 仅进程内) */
     private const int TileCacheCap = 1024;
     private const int GridCacheCap = 64;
-    private readonly ConcurrentDictionary<string, (long Epoch, byte[] Gz)> _tileCache = new();
-    private readonly ConcurrentDictionary<string, string> _gridCache = new();       // key → JSON 文本
-    private readonly ConcurrentDictionary<string, long> _regionEpoch = new();        // seed → 区域包生成计数
+    private const int RegionHotCap = 512;
+    private readonly LruCache<TileEntry> _tileCache = new(TileCacheCap);
+    private readonly LruCache<string> _gridCache = new(GridCacheCap);
+    private readonly LruCache<byte[]> _regionHot = new(RegionHotCap);
+
+    /// <summary>tile 缓存条目: 值 + 生成时的 VM 道路版本号 (T4)。</summary>
+    private sealed record TileEntry(byte[] Gz, long RoadVer);
 
     /* R9: per-key in-flight 去重门闩 (key → lock 对象); 构建完成即移除,
         移除后新 miss 会再查缓存命中, 不会重复 build */
     private readonly ConcurrentDictionary<string, object> _buildGates = new();
+
+    /* T3: 后台维护任务 (周期 Flush + 按 seed 前缀整理 SQLite) */
+    private readonly CancellationTokenSource _maintCts = new();
+    private readonly Task _maintTask;
 
     public MapWorldService(ZongmenOptions opt, string contentRoot)
     {
@@ -50,38 +62,26 @@ public sealed class MapWorldService : IDisposable
         _mem = new MemoryVirtualContext();
         if (opt.PersistEnabled)
             _sql = new SqliteVirtualContext(ZongmenPaths.ResolveDbPath(opt, contentRoot));
+        _maintTask = Task.Run(MaintenanceLoopAsync);
     }
 
     private JsWorldVm World(string seed) => _host.GetOrCreate(seed);
-
-    private long RegionEpoch(string seed)
-        => _regionEpoch.TryGetValue(seed, out var e) ? e : 0;
 
     /* ---------------- 区块 ---------------- */
     public byte[] GetChunkBytes(string seed, int ca, int cb)
     {
         var key = WorldKeys.Chunk(seed, ca, cb);
-        var hit = _mem.GetDataBytes(key) ?? _sql?.GetDataBytes(key);
+        var hit = _mem.GetDataBytes(key) ?? ReadSqlBackfill(key);      // T8: 库命中回填 _mem
         if (hit != null) return hit;
 
         /* R9: 同 key 并发 miss 合并 — 只 build 一次 */
-        var gate = _buildGates.GetOrAdd(key, _ => new object());
-        lock (gate)
+        return BuildOnce(key, seed, () =>
         {
-            try
-            {
-                hit = _mem.GetDataBytes(key) ?? _sql?.GetDataBytes(key);
-                if (hit != null) return hit;
-                var vm = World(seed);
-                var gz = BuildChunk(vm, ca, cb);
-                Store(key, gz);
-                return gz;
-            }
-            finally
-            {
-                _buildGates.TryRemove(key, out _);
-            }
-        }
+            var vm = World(seed);
+            var gz = BuildChunk(vm, ca, cb);
+            Store(key, gz);
+            return gz;
+        });
     }
 
     private byte[] BuildChunk(JsWorldVm vm, int ca, int cb)
@@ -127,30 +127,20 @@ public sealed class MapWorldService : IDisposable
         var key = WorldKeys.Region(seed, i, j);
         /* 区域包含 A* 道路且 tileJson 的 onRoad 依赖 VM roadCache 热状态:
            若直接命中 SQLite 旧行, VM 不执行生成 → 道路缓存与画面/详情不一致。
-           故区域包总是经 JS 生成(确定性, 与历史字节一致), 同会话由 _mem 缓存兜底。 */
-        var hit = _mem.GetDataBytes(key);
+           故区域包总是经 JS 生成(确定性, 与历史字节一致)。
+           T2: 会话内由 _regionHot (大容量专用 LRU) + _mem 兜底; 不再落 SQLite —
+           区域行历史上只写不读, 落库纯写放大 (冷回访本来就须重跑 A* 保证语义)。 */
+        var hit = _regionHot.Get(key) ?? _mem.GetDataBytes(key);
         if (hit != null) return hit;
 
-        var gate = _buildGates.GetOrAdd(key, _ => new object());   // R9
-        lock (gate)
+        return BuildOnce(key, seed, () =>
         {
-            try
-            {
-                hit = _mem.GetDataBytes(key);
-                if (hit != null) return hit;
-                var vm = World(seed);
-                var gz = BuildRegion(vm, i, j);
-                Store(key, gz);
-                /* R8: 区域包生成可能向 VM roadCache 新增道路 → 该 seed 的
-                   tile 缓存中 onRoad 结果可能已过期, 推进 epoch 使其失效 */
-                _regionEpoch[seed] = RegionEpoch(seed) + 1;
-                return gz;
-            }
-            finally
-            {
-                _buildGates.TryRemove(key, out _);
-            }
-        }
+            var vm = World(seed);
+            var gz = BuildRegion(vm, i, j);
+            _regionHot.Set(key, gz);
+            _mem.SetData(key, gz);
+            return gz;
+        });
     }
 
     private byte[] BuildRegion(JsWorldVm vm, int i, int j)
@@ -212,26 +202,16 @@ public sealed class MapWorldService : IDisposable
     public byte[] GetCommBytes(string seed, int ci, int cj)
     {
         var key = WorldKeys.Comm(seed, ci, cj);
-        var hit = _mem.GetDataBytes(key) ?? _sql?.GetDataBytes(key);
+        var hit = _mem.GetDataBytes(key) ?? ReadSqlBackfill(key);      // T8: 库命中回填 _mem
         if (hit != null) return hit;
 
-        var gate = _buildGates.GetOrAdd(key, _ => new object());   // R9
-        lock (gate)
+        return BuildOnce(key, seed, () =>
         {
-            try
-            {
-                hit = _mem.GetDataBytes(key) ?? _sql?.GetDataBytes(key);
-                if (hit != null) return hit;
-                var vm = World(seed);
-                var gz = BuildComm(vm, ci, cj);
-                Store(key, gz);
-                return gz;
-            }
-            finally
-            {
-                _buildGates.TryRemove(key, out _);
-            }
-        }
+            var vm = World(seed);
+            var gz = BuildComm(vm, ci, cj);
+            Store(key, gz);
+            return gz;
+        });
     }
 
     private byte[] BuildComm(JsWorldVm vm, int ci, int cj)
@@ -272,19 +252,49 @@ public sealed class MapWorldService : IDisposable
         return GZipCodec.Compress(proto);
     }
 
+    /* R9: per-key 构建门闩 (chunk/region/comm 共用) */
+    private byte[] BuildOnce(string key, string seed, Func<byte[]> build)
+    {
+        var gate = _buildGates.GetOrAdd(key, _ => new object());
+        lock (gate)
+        {
+            try
+            {
+                /* double-check: 等待期间可能已被并发请求 build 完成 */
+                if (_mem.GetDataBytes(key) is byte[] memHit) return memHit;
+                return build();
+            }
+            finally
+            {
+                _buildGates.TryRemove(key, out _);
+            }
+        }
+    }
+
+    /* T8: SQLite 命中后回填 _mem, 同一 key 后续读取不再走库 */
+    private byte[]? ReadSqlBackfill(string key)
+    {
+        if (_sql == null) return null;
+        var v = _sql.GetDataBytes(key);
+        if (v != null) _mem.SetData(key, v);
+        return v;
+    }
+
     /* ---------------- 单格详情 (不落库) ---------------- */
-    /* R8: 进程内热缓存 — key = "t:<seedprefix>:<q>:<r>", 值带 region epoch。
-       tileJson 的 onRoad 语义与 VM roadCache 相关(点击零 A*, 只读已生成道路),
-       每次该 seed 有新的区域包经 JS 生成(epoch+1)后旧条目自然失效重算。 */
+    /* T4: 进程内热缓存 — key = "t:<seedprefix>:<q>:<r>", 值带 VM roadVersion。
+       tileJson 的 onRoad 语义与 VM roadCache 相关 (点击零 A*, 只读已生成道路)。
+       仅当 roadCache 真有新路落成 (roadVersion 前进) 时旧条目失效重算;
+       区域包缓存命中/流式补齐不再整片作废 tile 缓存。 */
     public byte[] GetTileBytes(string seed, int q, int r)
     {
         var cacheKey = "t:" + WorldKeys.SeedPrefix(seed) + ":" + q + ":" + r;
-        var epoch = RegionEpoch(seed);
-        if (_tileCache.TryGetValue(cacheKey, out var e) && e.Epoch == epoch)
-            return e.Gz;
-
         var vm = World(seed);
+        var cached = _tileCache.Get(cacheKey);
+        if (cached != null && cached.RoadVer == vm.RoadVersion())
+            return cached.Gz;
+
         var json = vm.Call("tileJson", q, r);
+        var ver = vm.RoadVersion();     // 取生成后版本: 若生成途中恰好新路落成, 下次请求会按新版本重算
         using var d = JsonDocument.Parse(json);
         var rt = d.RootElement;
         var f = rt.GetProperty("f");
@@ -323,12 +333,7 @@ public sealed class MapWorldService : IDisposable
         var proto = ProtoCodec.SerToByte(tq);
         var gz = GZipCodec.Compress(proto);
 
-        if (_tileCache.Count >= TileCacheCap)
-        {
-            foreach (var k in _tileCache.Keys.Take(TileCacheCap / 4).ToList())
-                _tileCache.TryRemove(k, out _);   // 粗淘汰: 超限删 1/4
-        }
-        _tileCache[cacheKey] = (epoch, gz);
+        _tileCache.Set(cacheKey, new TileEntry(gz, ver));
         return gz;
     }
 
@@ -337,16 +342,12 @@ public sealed class MapWorldService : IDisposable
     public string GetFieldGridJson(string seed, int q0, int q1, int r0, int r1)
     {
         var cacheKey = "g:" + WorldKeys.SeedPrefix(seed) + ":" + q0 + ":" + q1 + ":" + r0 + ":" + r1;
-        if (_gridCache.TryGetValue(cacheKey, out var hit)) return hit;
+        var hit = _gridCache.Get(cacheKey);
+        if (hit != null) return hit;
 
         var vm = World(seed);
         var json = vm.Call("fieldGridJson", q0, q1, r0, r1);
-        if (_gridCache.Count >= GridCacheCap)
-        {
-            foreach (var k in _gridCache.Keys.Take(GridCacheCap / 4).ToList())
-                _gridCache.TryRemove(k, out _);
-        }
-        _gridCache[cacheKey] = json;
+        _gridCache.Set(cacheKey, json);
         return json;
     }
 
@@ -365,26 +366,46 @@ public sealed class MapWorldService : IDisposable
         return json;
     }
 
-    private int _statsCalls;
-
     public string StatsJson()
     {
-        /* P6: 先排空批量落库队列, 计数才反映真实落库进度 */
+        /* P6: 先排空批量落库队列, 计数才反映真实落库进度。
+           T3: 历史行清理已移入后台维护任务, 不再依赖 /stats 偶发触发。 */
         _sql?.Flush();
-        /* P8: 节流触发清理「非活跃 seed」的旧缓存行 (世界可按 seed 确定性重建) */
-        if (_sql != null && _host.LiveSeeds > 0 && (++_statsCalls % 20) == 0)
-        {
-            var prefixes = new List<string>();
-            foreach (var seed in _host.Seeds)
-                prefixes.Add("w:" + WorldKeys.SeedPrefix(seed) + ":");
-            _sql.PruneExcept(prefixes);
-        }
         return System.Text.Json.JsonSerializer.Serialize(new
         {
             liveSeeds = _host.LiveSeeds,
             dbRows = _sql?.Count() ?? 0,
             memRows = _mem.Count(),
         });
+    }
+
+    /* T3: 后台维护 — 周期排空写队列 + 清理「非活跃 seed」的历史缓存行
+       (世界可按 seed 确定性重建, 属安全缓存清理)。不依赖 /stats 请求节奏。 */
+    private async Task MaintenanceLoopAsync()
+    {
+        try
+        {
+            while (!_maintCts.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromMinutes(2), _maintCts.Token).ConfigureAwait(false);
+                try
+                {
+                    _sql?.Flush();
+                    if (_sql != null && _host.LiveSeeds > 0)
+                    {
+                        var prefixes = new List<string>();
+                        foreach (var seed in _host.Seeds)
+                            prefixes.Add("w:" + WorldKeys.SeedPrefix(seed) + ":");
+                        _sql.PruneExcept(prefixes);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("[MapWorldService] 维护任务异常(下轮重试): " + ex.Message);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     private void Store(string key, byte[] gz)
@@ -409,9 +430,12 @@ public sealed class MapWorldService : IDisposable
 
     public void Dispose()
     {
+        _maintCts.Cancel();
+        try { _maintTask.Wait(1000); } catch { /* 忽略 */ }
         _host.Dispose();
         _sql?.Flush();              // P6: 退出前排空批量写入, 尽量落库
         _sql?.Dispose();
         _mem.Dispose();
+        _maintCts.Dispose();
     }
 }

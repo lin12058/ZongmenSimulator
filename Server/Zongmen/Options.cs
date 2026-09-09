@@ -8,8 +8,10 @@ public sealed class ZongmenOptions
     public string? WebDir { get; set; }
     /// <summary>SQLite 路径; 留空默认 &lt;工程根&gt;/db/zongmen.sqlite。</summary>
     public string? DbPath { get; set; }
-    /// <summary>常驻种子世界数 (LRU)。</summary>
-    public int MaxSeeds { get; set; } = 3;
+    /// <summary>常驻种子世界数 (LRU)。
+    /// T13: 默认由 3 提到 4 — 多端/多 seed 并发观看时减少互相挤出重建 V8 的来回抖动;
+    ///      仍可在 appsettings.json "Zongmen:MaxSeeds" 按内存预算调整。</summary>
+    public int MaxSeeds { get; set; } = 4;
     public bool PersistEnabled { get; set; } = true;
 
     /// <summary>js 沙箱脚本目录 (noise.js/mapgen.js/mapgen-server.js)。</summary>

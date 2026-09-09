@@ -57,6 +57,10 @@
      最后一次标记后 200ms 统一重绘一次。 */
   var staticSchedTimer = null;
   var lastStaticDraw = 0;          // performance.now() 上次静态层重绘时刻
+  /* T7: 道路几何缓存 — 路网顶点只依赖 regionCells 数据 (世界坐标, 与相机无关),
+     平移/缩放触发的静态层重绘不再重复重建顶点 + 重传 GPU;
+     仅在新区域数据到达 / 世界重铸时置脏重建一次。 */
+  var roadsDirty = true;
 
   /* 数据到达类脏标记(浪线/地名/道路补齐): 距上次重绘 <200ms 时延迟合并,
      已 ≥200ms 或 staticDirty 已挂起则立即置位由下一帧消费 */
@@ -89,8 +93,11 @@
     d.style.display = 'flex';
     $('fatalMsg').textContent = String(msg);
   }
+  /* T10: 全局 error 只落 console, 不再弹致命面板 — 第三方脚本/上下文丢失等
+     次要异常不应中断渲染主循环; 渲染循环自身已有 try/catch 兜底 (loop 内)。 */
   window.addEventListener('error', function (e) {
-    showFatal(e.message + (e.filename ? ' @' + e.filename.split('/').pop() + ':' + e.lineno : ''));
+    console.error('[zongmen] 全局异常:', e.message,
+      e.filename ? '@' + e.filename.split('/').pop() + ':' + e.lineno : '');
   });
 
   function s2w(sx, sy) {
@@ -309,6 +316,7 @@
       if (kind === 'region') {
         if (!keepR.has(job.key)) return;
         regionCells.set(job.key, pack);
+        roadsDirty = true;                    // T7: 路网数据变化 → 下次重绘重建道路几何
       } else {
         if (!keepC.has(job.key)) return;
         commCells.set(job.key, pack);
@@ -504,7 +512,8 @@
         var wfr = Math.round(centers[i * 2 + 1] / (1.5 * geo.hexR));
         if (wfq < qmin || wfq > qmax || wfr < rmin || wfr > rmax) continue;
         var hh = hashes[i];
-        var fr1 = (hh * 913.7) % 1, fr2 = (hh * 517.3) % 1, fr3 = (hh * 271.1) % 1;
+        /* T7: 先做近岸判定与出线概率筛 — 深海 ~70% 的格在此被跳过,
+           免去 3 个浮点哈希与后续全部绘制计算 (输出与原顺序完全一致) */
         var nearLand = false;
         if (biome === 1) {
           var nv = neigh[i];
@@ -513,6 +522,8 @@
             if (nb > 1) { nearLand = true; break; }
           }
         }
+        if (!nearLand && hh >= (biome === 0 ? 0.30 : 0.46)) continue;
+        var fr1 = (hh * 913.7) % 1, fr2 = (hh * 517.3) % 1, fr3 = (hh * 271.1) % 1;
         var hx = centers[i * 2], hy = centers[i * 2 + 1];
         if (nearLand) {
           var mcx = hx + (fr1 - 0.5) * geo.hexW * 0.8;
@@ -527,7 +538,6 @@
           ctx.beginPath(); ctx.arc(mcx + mr * 1.25, mcy + 1.8, 0.8, 0, Math.PI * 2); ctx.fill();
           continue;
         }
-        if (hh >= (biome === 0 ? 0.30 : 0.46)) continue;
         var wx0 = hx + (fr1 - 0.5) * geo.hexW * 1.2;
         var wy0 = hy + (fr2 - 0.5) * geo.hexR * 1.2;
         var wl = geo.hexW * (1.1 + fr3 * 1.5);
@@ -570,37 +580,40 @@
     /* 浪线 (基于区块数据, 无动画) */
     drawChunkWaves(ctx, b);
 
-    /* 道路 (后端 A* 路径点) */
-    var haloV = [], coreV = [];
-    function pushSeg(arr, ax, ay, bx, by, w) {
-      var dx = bx - ax, dy = by - ay;
-      var len = Math.sqrt(dx * dx + dy * dy) || 1;
-      var nx = -dy / len * w * 0.5, ny = dx / len * w * 0.5;
-      arr.push(ax - nx, ay - ny, bx + nx, by + ny, ax + nx, ay + ny,
-               ax - nx, ay - ny, bx - nx, by - ny, bx + nx, by + ny);
-    }
-    var drawn = {};
-    regionCells.forEach(function (pack) {
-      for (var rr = 0; rr < pack.roads.length; rr++) {
-        var road = pack.roads[rr];
-        if (drawn[road.key]) continue;
-        drawn[road.key] = true;
-        if (road.x1 < b.x0 - 200 || road.x0 > b.x1 + 200 ||
-            road.y1 < b.y0 - 200 || road.y0 > b.y1 + 200) continue;
-        var pts = road.pts;
-        var rh = 0;
-        for (var kc = 0; kc < road.key.length; kc++) rh = (rh * 31 + road.key.charCodeAt(kc)) % 997;
-        var wBase = 1.4 + (rh / 997) * 1.5;
-        for (var p2 = 0; p2 < pts.length / 2 - 1; p2++) {
-          var segH = Math.sin(p2 * 12.9898 + rh * 0.7853) * 43758.5453;
-          var wob = segH - Math.floor(segH);
-          var wm = wBase * (0.60 + 0.8 * wob);
-          pushSeg(haloV, pts[p2 * 2], pts[p2 * 2 + 1], pts[p2 * 2 + 2], pts[p2 * 2 + 3], wm * 2.4);
-          pushSeg(coreV, pts[p2 * 2], pts[p2 * 2 + 1], pts[p2 * 2 + 2], pts[p2 * 2 + 3], Math.max(1.0, wm));
-        }
+    /* 道路 (后端 A* 路径点) — T7: 仅路网数据变化时重建几何并重传 GPU */
+    if (roadsDirty) {
+      roadsDirty = false;
+      var haloV = [], coreV = [];
+      function pushSeg(arr, ax, ay, bx, by, w) {
+        var dx = bx - ax, dy = by - ay;
+        var len = Math.sqrt(dx * dx + dy * dy) || 1;
+        var nx = -dy / len * w * 0.5, ny = dx / len * w * 0.5;
+        arr.push(ax - nx, ay - ny, bx + nx, by + ny, ax + nx, ay + ny,
+                 ax - nx, ay - ny, bx - nx, by - ny, bx + nx, by + ny);
       }
-    });
-    renderer.setRoads(new Float32Array(haloV), new Float32Array(coreV));
+      var drawn = {};
+      regionCells.forEach(function (pack) {
+        for (var rr = 0; rr < pack.roads.length; rr++) {
+          var road = pack.roads[rr];
+          if (drawn[road.key]) continue;
+          drawn[road.key] = true;
+          /* 不做逐路视野裁剪: regionCells 本身随视野窗口卸载, 集合有界;
+             若按重建时刻的视野裁剪, 平移离开后 roadsDirty=false 会导致远路缺失 */
+          var pts = road.pts;
+          var rh = 0;
+          for (var kc = 0; kc < road.key.length; kc++) rh = (rh * 31 + road.key.charCodeAt(kc)) % 997;
+          var wBase = 1.4 + (rh / 997) * 1.5;
+          for (var p2 = 0; p2 < pts.length / 2 - 1; p2++) {
+            var segH = Math.sin(p2 * 12.9898 + rh * 0.7853) * 43758.5453;
+            var wob = segH - Math.floor(segH);
+            var wm = wBase * (0.60 + 0.8 * wob);
+            pushSeg(haloV, pts[p2 * 2], pts[p2 * 2 + 1], pts[p2 * 2 + 2], pts[p2 * 2 + 3], wm * 2.4);
+            pushSeg(coreV, pts[p2 * 2], pts[p2 * 2 + 1], pts[p2 * 2 + 2], pts[p2 * 2 + 3], Math.max(1.0, wm));
+          }
+        }
+      });
+      renderer.setRoads(new Float32Array(haloV), new Float32Array(coreV));
+    }
 
     /* 灵脉: 七星花 + 群落灵气晕圈 (后端群落数据) */
     var veinLabels = [];
@@ -826,6 +839,7 @@
     chunkFail.clear();
     chunkRetry.clear();
     chunkBusy.clear();                // 旧世界在途回调带 gen 守卫, 不会误删新世界标记
+    roadsDirty = true;                // T7: 世界重铸 → 路网几何强制重建
     lastStream.x = NaN;               // P1: 重置流式增量状态 → 首帧强制全量重建
     regionBusy.clear();
     commBusy.clear();

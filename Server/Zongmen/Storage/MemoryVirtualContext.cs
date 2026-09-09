@@ -1,14 +1,15 @@
-using System.Collections.Concurrent;
-
 namespace Zongmen.Storage;
 
 /// <summary>纯内存 KV (进程内缓存层)。
-/// P8: 固定容量 + 插入序近似 FIFO 淘汰 —— 超限时淘汰最旧入队项, 长期漫游不无限增长;
-///     淘汰仅损失命中率(数据可确定性重建), 不影响正确性。</summary>
+/// P8: 固定容量淘汰 —— 长期漫游不无限增长; 淘汰仅损失命中率(数据可确定性重建), 不影响正确性。
+/// T8: 淘汰序由「插入序 FIFO」改为「访问序 LRU」—— 相机具有空间局部性,
+///     命中即把 key 移到队尾, 视野内热区 chunk 不再被远处新访问条目挤掉。
+///     实现为 lock + Dictionary + 双向链表 (容量 8192, 单次操作微秒级, 无争用风险)。</summary>
 public sealed class MemoryVirtualContext : VirtualContext
 {
-    private readonly ConcurrentDictionary<string, byte[]> _map = new();
-    private readonly ConcurrentQueue<string> _order = new();
+    private readonly object _lock = new();
+    private readonly Dictionary<string, (byte[] Value, LinkedListNode<string> Node)> _map = new();
+    private readonly LinkedList<string> _lru = new();   // First = 最旧
     private readonly int _cap;
 
     public MemoryVirtualContext(int capacity = 8192)
@@ -17,33 +18,61 @@ public sealed class MemoryVirtualContext : VirtualContext
     }
 
     public override byte[]? GetDataBytes(string key)
-        => _map.TryGetValue(key, out var v) ? v : null;
+    {
+        lock (_lock)
+        {
+            if (!_map.TryGetValue(key, out var e)) return null;
+            _lru.Remove(e.Node);
+            _lru.AddLast(e.Node);            // 命中 → 最近使用
+            return e.Value;
+        }
+    }
 
     public override void SetData(string key, byte[]? value)
     {
-        if (value == null) { _map.TryRemove(key, out _); return; }
-        if (_map.TryAdd(key, value))
+        lock (_lock)
         {
-            _order.Enqueue(key);
-            EvictIfOver();
-        }
-        else
-        {
-            _map[key] = value;          // 已存在: 仅更新值, 不改变淘汰序
+            if (value == null)
+            {
+                if (_map.TryGetValue(key, out var e))
+                {
+                    _lru.Remove(e.Node);
+                    _map.Remove(key);
+                }
+                return;
+            }
+            if (_map.TryGetValue(key, out var ex))
+            {
+                _map[key] = (value, ex.Node);
+                _lru.Remove(ex.Node);
+                _lru.AddLast(ex.Node);
+                return;
+            }
+            var node = new LinkedListNode<string>(key);
+            _map[key] = (value, node);
+            _lru.AddLast(node);
+            while (_map.Count > _cap)
+            {
+                var oldest = _lru.First!;
+                _map.Remove(oldest.Value);
+                _lru.RemoveFirst();
+            }
         }
     }
 
-    private void EvictIfOver()
+    public override void DeleteByKey(string key)
     {
-        while (_map.Count > _cap && _order.TryDequeue(out var k))
+        lock (_lock)
         {
-            _map.TryRemove(k, out _);   // 队列里可能残留已被删的 key, TryRemove 失败无害
+            if (_map.TryGetValue(key, out var e))
+            {
+                _lru.Remove(e.Node);
+                _map.Remove(key);
+            }
         }
     }
 
-    public override void DeleteByKey(string key) => _map.TryRemove(key, out _);
-
-    public override long Count() => _map.Count;
+    public override long Count() { lock (_lock) return _map.Count; }
 
     public override void Dispose() { }
 }

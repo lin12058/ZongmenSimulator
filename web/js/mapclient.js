@@ -15,6 +15,8 @@
 
   function fetchMeta(force) {
     if (metaPromise && !force) return metaPromise;
+    /* T15: seed=1 仅为后端 metaJson 的占位参数 — meta 是世界无关的
+       几何/图例常量 (hexR/chunkS/biomeMeta 等), 不随 seed 变化。 */
     metaPromise = fetch(base + '/api/map/meta?seed=1')
       .then(function (r) { return r.json(); })
       .then(function (m) {
@@ -23,12 +25,20 @@
       });
     return metaPromise;
   }
+  /* T15: geo() 结果复用 — meta 就绪后几何常量不可变, 缓存单例对象。
+     此前每次调用新建对象, 而小地图刷新对 132×88 每像素各调一次
+     pxToTile/tileToWorld (内含 geo()) ≈ 1.1 万次对象分配/次刷新。 */
+  var geoCache = null;
   function geo() {
-    return {
-      hexR: meta.hexR, hexW: meta.hexW, chunkS: meta.chunkS,
-      chunkScan: meta.chunkScan, regionM: meta.regionM,
-      commCl: meta.commCl, commR: meta.commR, seaLevel: meta.seaLevel
-    };
+    if (!geoCache) {
+      geoCache = {
+        hexR: meta.hexR, hexW: meta.hexW, chunkS: meta.chunkS,
+        chunkScan: meta.chunkScan, regionM: meta.regionM,
+        commCl: meta.commCl, commR: meta.commR, seaLevel: meta.seaLevel,
+        biomeMeta: meta.biomeMeta
+      };
+    }
+    return geoCache;
   }
 
   /* ---------- 几何工具 (纯公式, 与原 mapgen.js 常量一致) ---------- */

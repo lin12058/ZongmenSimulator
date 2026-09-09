@@ -8,6 +8,11 @@
 (function (global) {
   'use strict';
 
+  /* T9: 图集行数唯一常量 — HEX_FS/PROP_FS 的硬编码 8.0 与 atlasRows 全部引用此处;
+     调整图集行数只改这一个值 (textures.js 的 ATLAS_ROWS 须保持一致,
+     setTextures 里有构建期校验兜底, 不一致会直接抛错而非静默丢精灵)。 */
+  var ATLAS_ROWS = 8;
+
   var HEX_VS = [
     '#version 300 es',
     'layout(location=0) in vec2 aPos;',
@@ -64,9 +69,10 @@
     '  float pad = 0.045;',
     '  vec2 uvL = vUv*(1.0-2.0*pad)+pad;',
     /* 图集寻址: 群系 0..7 = (列=群系, 行=变体); 灵脉格 8..12 = 第 4 行
-       图集共 8 行 (第 5/6/7 行为立体精灵), 必须除以 8.0, 否则灵脉行采样越界 → 黑格 */
+       图集共 ATLAS_ROWS 行 (第 5/6/7 行为立体精灵), 必须按 ATLAS_ROWS 除,
+       否则灵脉行采样越界 → 黑格 */
     '  vec2 cell = biome < 7.5 ? vec2(biome, variant) : vec2(biome - 8.0, 4.0);',
-    '  vec2 uv = (cell + uvL)/vec2(8.0, 8.0);',
+    '  vec2 uv = (cell + uvL)/vec2(' + ATLAS_ROWS + '.0, ' + ATLAS_ROWS + '.0);',
     '  vec3 base = texture(uAtlas, uv).rgb;',
     // —— 邻居晕染 (灵脉格跳过, 保持灵气贴图完整; 山/雪不参与 —— 其边界由山峰精灵承担, 晕染会出黑边) ——
     '  if (biome < 7.5) {',
@@ -158,10 +164,10 @@
     'uniform vec3 uPaperTint;',
     'out vec4 fragColor;',
     'void main(){',
-    '  float col = mod(vSprite, 8.0);',
-    '  float row = floor(vSprite/8.0 + 0.001);',   // 精确取整: +0.5 会把 44~47 错算到第 6 行
+    '  float col = mod(vSprite, ' + ATLAS_ROWS + '.0);',
+    '  float row = floor(vSprite/' + ATLAS_ROWS + '.0 + 0.001);',   // 精确取整: +0.5 会把 44~47 错算到第 6 行
     '  vec2 uvL = vUv*(1.0-0.05)+0.025;',
-    '  vec2 uv = (vec2(col, row)+uvL)/vec2(8.0, uRows);',
+    '  vec2 uv = (vec2(col, row)+uvL)/vec2(' + ATLAS_ROWS + '.0, uRows);',
     '  vec4 tex = texture(uAtlas, uv);',
     '  if (tex.a < 0.10) discard;',
     '  vec3 rgb = tex.rgb * (0.90 + 0.20*fract(vHash*3.17));',
@@ -336,7 +342,7 @@
 
     this.fbo = null; this.fboTex = null; this.fboW = 0; this.fboH = 0;
     this.propFbo = null; this.propTex = null;   // 立体精灵层 (单独 FBO, 不污染底图 biome alpha)
-    this.atlasRows = 8;
+    this.atlasRows = ATLAS_ROWS;   // T9: 与着色器同源常量
     this.dpr = 1;               // 设备像素比: 世界坐标换算一律用 CSS 像素 (与 main.js 相机一致)
 
     gl.disable(gl.DEPTH_TEST);
@@ -378,6 +384,13 @@
 
   InkRenderer.prototype.setTextures = function (atlas, paper, noise) {
     var gl = this.gl;
+    /* T9: 构建期断言 — 图集宽高比必须推出 ATLAS_ROWS 行 (8 列固定),
+       不一致直接抛错, 杜绝「调行数 → 精灵静默丢失」 */
+    var cols = 8;
+    var rows = Math.round(atlas.height / (atlas.width / cols));
+    if (rows !== ATLAS_ROWS) {
+      throw new Error('图集行数不符: 实际 ' + rows + ' 行, 着色器常量 ' + ATLAS_ROWS + ' 行');
+    }
     if (this.texAtlas) gl.deleteTexture(this.texAtlas);
     if (this.texAtlasLin) gl.deleteTexture(this.texAtlasLin);
     if (this.texPaper) gl.deleteTexture(this.texPaper);

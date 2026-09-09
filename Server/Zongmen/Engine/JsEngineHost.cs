@@ -32,6 +32,22 @@ public sealed class JsWorldVm : IDisposable
 
     public void Touch() => LastUsed = DateTime.UtcNow.Ticks;
 
+    /// <summary>T4: 当前 VM 的道路版本号 (roadCache 每新增道路 +1)。
+    /// 供 tile 缓存做新鲜度校验 — 只有真有新路落成才需要失效旧 onRoad 结果。</summary>
+    public long RoadVersion()
+    {
+        Touch();
+        _gate.Wait();
+        try
+        {
+            return Convert.ToInt64((double)_svc.roadVersion());
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     /// <summary>线程安全: 串行执行 JS 函数并返回其 JSON 字符串结果。</summary>
     public string Call(string fn, params object[] args)
     {
@@ -103,9 +119,20 @@ public sealed class JsEngineHost : IDisposable
     {
         while (_vms.Count > _maxSeeds)
         {
-            var oldest = _vms.OrderBy(kv => kv.Value.LastUsed).First();
-            oldest.Value.Dispose();
-            _vms.Remove(oldest.Key);
+            /* T12: MaxSeeds 很小, 直接线性扫最旧 (O(n)) — 原OrderBy整体排序 (O(n·logn)) 无必要 */
+            string? oldestKey = null;
+            long oldest = long.MaxValue;
+            foreach (var kv in _vms)
+            {
+                if (kv.Value.LastUsed < oldest)
+                {
+                    oldest = kv.Value.LastUsed;
+                    oldestKey = kv.Key;
+                }
+            }
+            if (oldestKey == null) break;
+            _vms[oldestKey].Dispose();
+            _vms.Remove(oldestKey);
         }
     }
 

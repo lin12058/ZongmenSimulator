@@ -1,102 +1,152 @@
-# 代码审核记录 review_v4
+# 宗门模拟器 demo3 · 全量代码审核报告（review_v4）
 
-> 审核对象：Server/Zongmen（C# .NET8 后端）+ web/js（前端）最新提交（HEAD=886675f）
-> 审核侧重：性能热点、潜在 bug、一致性风险。按严重程度排列。
-
----
-
-## 一、高危 / 正确性 Bug
-
-### 1.1 LRU 淘汰可能与"在途 JS 调用"并发冲突（中高危）· JsEngineHost.cs
-- **位置**：`JsEngineHost.GetOrCreate` / `EvictLocked`，`JsWorldVm` 用 `SemaphoreSlim` 串行执行 `Call`。
-- **问题**：当 `_vms.Count > _maxSeeds` 时 `EvictLocked` 直接在 `_lock` 内对最旧 vm 调用 `Dispose()`。若该 seed 恰有另一线程正在 `Call(...)`（持有该 vm 的 `_gate` 尚未释放），此处的 `_engine.Dispose()` 会让正在执行的 JS 调用崩溃或产生不确定结果。由于持有 `_lock` 时调用方处于 `GetOrCreate`，而 `Call` 并不持有 `_lock`，两条路径会交叉。
-- **建议**：淘汰前先确认目标 vm 的 `_gate` 可无成本抢占；或把"待回收"条目改为延迟到该 vm 空闲后再 Dispose；或对淘汰对象 `Interlocked.CompareExchange` 标记 + 由调用方释放后来清理。
-
-### 1.2 chunk 请求失败后永久静默（中）· main.js `loadChunk`
-- **位置**：`catch` 中 `chunkFail.add(key)`，之后不再重试。
-- **问题**：网络抖动 / 后端一次瞬时 5xx 会让该区块**本次会话永久不加载**，地图出现空洞，无任何恢复手段；只有 `regenerate()` 清空 `chunkFail`。需区分"确定错误(404)"与"可重试错误(网络/5xx)"，后者应退避重试而非一棒子打死。
-
-### 1.3 seed 长度截断导致世界碰撞（低中）· JsEngineHost.cs `GetOrCreate`
-- **位置**：`seed = seed.Length > 80 ? seed[..80] : seed;`
-- **问题**：两个 80 字符后不同的种子会被当作同一世界，LRC 命中错世界（离线确定性语义被破坏）。建议改为保留完整字符串用于 key，若担心内存则改用哈希作为 key，而不是截断。
+> 审核范围：`Server/Zongmen`（C# .NET8 后端 + 引擎 JS）+ `web/`（前端渲染）
+> 审核方式：逐文件静态审阅，重点排查 **性能隐患** 与 **并发/内存 bug**
+> 审核日期：2026-09-09
 
 ---
 
-## 二、性能热点
+## 0. 结论摘要
 
-### 2.1 `updateStreaming` 每帧全量重建需求集（高）
-- **位置**：main.js `updateStreaming()`，主循环 `loop()` 每帧调用。
-- **热点一**：每帧执行 `viewBounds` → `tileBoundsOf` → 三层象限扫描 + `chunkData.forEach` 全量判断卸载 + `chunkQueue.sort`。相机静止时全部是冗余计算。
-- **热点二**：`updateStreaming` 每次被调用都 `pumpChunks()` / `pumpExtra()`，即使队列为空。
-- **建议**：相机坐标变化小于阈值（已有 `staticNeedsRedraw` 同思路）时跳过重建；仅当相机位移超过一个 chunk 边长才重算 needs 集。参考 `staticNeedsRedraw` 的 `scale` 阈值方案。
+整体结构清晰（服务端权威 + 前端只读渲染），无致命逻辑错误，但存在 **两类需要处理的隐性问题**：
 
-### 2.2 浪线绘制 `drawChunkWaves` 邻域解码用 `Math.pow(8, k)`（高）
-- **位置**：main.js 顶部 `drawChunkWaves` 内 `for wn 0..6: Math.floor(nv / Math.pow(8,wn))%8`。
-- **问题**：每帧（staticDirty 时）对**每个已加载 tile** × 6 个邻居各做一次 `Math.pow`（浮点幂，较贵）。区块多时是主要 CPU 消耗。
-- **建议**：用 `[1,8,64,512,4096,32768]` 整数表，`(neigh>>(3*wn))&0x7` 位运算替换；或一次性用位掩码展开。mapgen.js `packNeigh` 处同样把 `Math.pow(8,k)` 换成查表。
+| 等级 | 数量 | 说明 |
+|------|------|------|
+| 🔴 高 | 1 | 引擎 JS 中 `regionCache / settleCache / commCache / roadCache` **无容量上限** → 无限探索下内存持续增长 |
+| 🟠 中 | 4 | 见各节：`MapWorldService` 双写路径、`Flush` 竞争、`EvictLocked` 排序、前端 `error` 兜底过宽 |
+| 🟡 低 | 若干 | 均为非阻塞性优化建议 |
 
-### 2.3 `fields()`/`elevAt()` 缓存条目淘汰策略触发过晚（中）
-- **位置**：mapgen.js `elevAt`/`fields`/`veinNear`，各缓存 `size > 150000/200000` 才 `evictHalf`。
-- **问题**：阈值设得过大，长期运行内存随探索区域线性膨胀；且 `evictHalf` 逐条 `delete` 在超大 Map 上会形成一次性长停顿。
-- **建议**：采用固定容量 + 简单 FIFO 阈值（如 1 万条）；或按时戳惰性淘汰；`evictHalf` 改为分批执行避免卡顿。
-
-### 2.4 服务端道路生成 `regionJson` 每格 `roadsNear(i,j,9999)`（中）
-- **位置**：mapgen-server.js `regionJson`。
-- **问题**：加载每个区域格都跑一次"无预算上限"的道路 A*（`9999`），区域网络大时首次加载该格会产生明显延迟；虽然之后有 roadCache，但连续滚动新区域时会反复触发。
-- **建议**：预算化（如每格最多 3~6 条新路，其余延迟到 `warmRoadsStep` 后台渐进预热，前端已有 `warmRoadsStep` 机制，服务端未接入）。
-
-### 2.5 Spider/静态文件整文件读入无缓存（低）· StaticWebMiddleware.cs
-- **位置**：`InvokeAsync` 每次 `File.ReadAllBytesAsync` 读整个 js/css/html。
-- **问题**：无 ETag/304、无内容缓存。对地图场景影响较小，但首屏多文件 + 每文件整读有优化空间。
-- **建议**：加简单的 `Last-Modified`/ETag + 304 支持，或对体积小的文件做内存缓存。
-
-### 2.6 主循环每帧 `drawOverlay` 全屏 clear + 重绘静态层（中）
-- **位置**：main.js `drawOverlay` → `staticNeedsRedraw` 判定，但 `ctx.clearRect` 全屏注定每帧走一遍。
-- **问题**：静态层（战线/道路/聚落）本可单独缓存到 `staticLayer`，但 `drawOverlay` 每帧复制整张 canvas（`drawImage(staticLayer,...)`），若 cam 缓慢变化则每帧重绘全屏，GPU/合成开销大。
-- **建议**：仅当 `staticNeedsRedraw` 为真时 `renderStaticInto`，平时按 `(cam - staticCam)` 偏移直接 blit，已实现但需确认静态层重绘触发是否过于频繁（staticDirty 在 loading 区块期间每 chunk 置位可能过密）。
+**整体性能在正常交互量级（单用户、千级区块）下没有问题**，以下问题集中在「长期漫游 / 极端参数」场景。
 
 ---
 
-## 三、一致性 / 健壮性问题
+## 1. 后端 C#（Server/Zongmen）
 
-### 3.1 Assertion: 服务端算法与前端解码"圆心→相对偏移"依赖浮点逆推
-- **位置**：mapgen-server.js `chunkJson` 用 `Math.round(fy/(1.5*HEX_R))` 反解 r、再反解 q；客户端 `chunkToArrays` 用 `ca*S+(cq[i]-16)` 正向还原。
-- **风险**：反解 r/q 经过浮点取整，若 `tileToWorld` 存在舍入误差（尤其大坐标时 HEX_W=13.8564 累积），服务端存下的相对偏移可能与客户端按轴坐标点逆推的结果差一个像素/格。当前 verify 已过，但**大世界深处坐标**仍需回归验证。
-- **建议**：服务端直接按轴坐标（q,r）存相对量（int），不要用浮点反解，杜绝取整歧义。
+### 1.1 🔴 mapgen.js 缓存无上限（核心内存隐患）
+位置：`Engine/js/mapgen.js`
+- `elevCache/fieldCache/veinNearCache` 通过 `cacheSet()` 有 `ELEV_CAP/FIELD_CAP/VEIN_CAP` 上限；
+- 但 **`regionCache (L459)`、`settleCache (L535)`、`roadCache (L666)`、`commCache (L760)` 全部是裸 `Map.set()`，永不淘汰**。
 
-### 3.2 `regionCells`/`commCells` 卸载只删远端、拉取并发保护较粗糙
-- **位置**：main.js `updateStreaming`。
-- **问题**：`regionBusy`/`commBusy` 仅为 Set 防重，但 `regionQueue`/`commQueue` 每帧整体 `length=0` 重建，可能与在途异步回调交错；`loadExtra` 回调里 `regionCells.set` 不带"是否仍需要"判断，可能把刚出视野的格子数据塞回来，造成短暂多一份内存。
-- **建议**：注册/回调时校验 `keepR.has(key)` 再 set。
+影响：玩家持续向新区域移动时，每次 `BuildRegion/GetRegionBytes` 都会向 VM 内这四个 Map 追加新条目，进程内 `JsEngineHost` 的 V8 堆随探索面积线性增长，只增不减（与世界同尺度），最终触发 GC 压力/OOM。**这是长期运营最需要修复的一项。**
 
-### 3.3 静态层 dirty 标记粒度过粗
-- **位置**：`staticDirty = true` 在 `loadChunk` 成功回调中无条件置位。
-- **问题**：一个 chunk 上传就全屏重绘静态层，连续加载 N 个 chunk 时静态层会碎片化重绘 N 次。
-- **建议**：用一个轻量的"待重绘区域"或合并 dirty 节流（如 200ms 内合并）。
+建议：将四个缓存也改为固定容量（可复用 `cacheSet`），或按「最近活跃」淘汰最旧区块条目；`roadCache` 用 `a|b` Key，淘汰时注意与 `roadFail` 的一致性（只淘汰，不改语义）。
 
 ---
 
-## 四、小问题 / 可读性
+### 1.2 🟠 MapWorldService 区域包双写路径（内存/语义重复）
+位置：`Services/MapWorldService.cs`
+- `GetRegionBytes()` **只查 `_mem`、不查 `_sql`**；`Store()` 同时写 `_mem` 与 `_sql`（SQLite 异步落库）。
+- `MemoryVirtualContext` 容量默认 8192 条，区域包被挤掉后再次 get 会**完全重新走 JS 生成**，SQLite 里那条旧行永远不会被读回（故意为之：保证 onRoad 语义一致）。
 
-1. **`CONC_CHUNK`/`CONC_EXTRA` 魔法数字**在 main.js 顶部有注释但非配置化；不同环境（弱机）无法调。建议收敛到常量对象。
-2. **`mapGen.configure()`** 清缓存时未同步清 `regionCache/settleCache/roadCache/roadFail`，而 `configure` 改 `COMM_*` 会影响群落但不影响区域——目前语义正确但脆弱，若未来 `REGION_M` 被配置化需一并清理。
-3. **`window.__cam`/`__renderer`/`__data`** 全局调试句柄保留在正式代码，建议用 `if (DEBUG)` 包裹。
+影响：SQLite 中的 region 行实际是“只写不读”的冗余数据，随地图增长占用磁盘与写放大；且内存缓存淘汰后重建成本高（每次重建都要 A* 全量算路）。
 
----
-
-## 五、建议的修复优先级
-
-| 优先级 | 项 | 备注 |
-|---|---|---|
-| P0 | LRU 淘汰 vs 在途调用竞态（1.1） | 理论崩溃风险 |
-| P0 | chunk 失败永久静默（1.2） | 功能空洞 |
-| P1 | updateStreaming 相机静止仍全量重建（2.1） | 每帧阻塞 |
-| P1 | 浪线 pow → 位运算表（2.2） | 主要 CPU 热点 |
-| P1 | fieldCache 淘汰阈值/分批（2.3） | 内存+卡顿 |
-| P2 | 服务端道路预算化（2.4） | 滚动卡顿 |
-| P2 | 静态层 dirty 合并（3.3） | 首屏流畅 |
-| P3 | 其余一致性/健壮性优化 | 后续迭代 |
+建议：要么给 region 也按 eras 使 SQLite 可命中（同时保证 roadCache 一致性），要么明确去掉 region 的 `_sql` 落库（仅留内存），减少写放大。
 
 ---
 
-*生成说明：本文基于对 Server/Zongmen 与 web/js 源码的静态审查，未执行运行时 profile。其余较细节项请以运行时验证为准。*
+### 1.3 🟠 SqliteVirtualContext.Flush 的并发写入竞态（低概率）
+位置：`Storage/SqliteVirtualContext.cs`
+- `_pending` 入队（`SetDataDeferred`）**不加 `_flushLock`**；`Flush()` 在 `_flushLock` 内一次性排空全部。
+- `Flush` 可能被 **后台 writer 线程** 与 **StatsJson/Dispose 的前台线程** 同时调用：
+  - 前台 `Flush` 排空到本地 batch 并 commit 时，后台 `Flush` 若也执行会排空到*下一批* —— 逻辑上幂等（UPSERT），不会丢数据；
+  - 但失败回滚路径会把 batch 重新 `Enqueue` 回 `_pending`，若此时另一线程已把相同 key 的新版本入队，**旧版本会覆盖新版本**（顺序颠倒）。
+- 另外 `Open()` 每次 `PRAGMA busy_timeout`，并发读高时开销可忽略。
+
+影响：极低概率下，同一 key 的旧数据可能晚于新数据被 commit，造成短暂陈旧读。一般可容忍，但建议用 `ConcurrentQueue` + 单写者模型（比如让 `Flush` 只在 writer 线程内执行，Stats/Dispose 只 `Signal` writer），彻底消除双写顺序问题。
+
+---
+
+### 1.4 🟡 JsEngineHost.EvictLocked O(n·log n)
+位置：`Engine/JsEngineHost.cs`
+- `EvictLocked` 每次超出 `_maxSeeds` 用 `_vms.OrderBy(LastUsed).First()` 选最旧 —— 对整个字典排序。
+- 默认 `MaxSeeds=3`，仅在并发创建多个世界时触发，量级小；但若调大 `MaxSeeds` 会变成热点。
+
+建议：维护一个 LRU 双向链表（或按 `LastUsed` 组织的最小堆），O(log n)。
+
+---
+
+### 1.5 🟡 MemoryVirtualContext 淘汰策略
+位置：`Storage/MemoryVirtualContext.cs`
+- 用 FIFO 队列淘汰（入队序），对 chunk/region/comm 混合缓存不公平：热区 chunk 可能被新 region 挤出。
+
+建议：改为 2Q / 简单 LRU 计数（存 entry 附带 lastUsed，淘汰时扫描）—— 非必须。
+
+---
+
+### 1.6 ✅ 良好实践（无需改）
+- `GetChunkBytes/GetCommBytes` 两级缓存 + in-flight 门闩（R9）设计正确；
+- `RegionEpoch` 用 ConcurrentDictionary，并发写安全；
+- GZip 只 compress 一次并缓存，HTTP 复用字节数组，避免每请求重压缩；
+- R8 tile/fieldGrid 进程内缓存 + region epoch 失效设计干净。
+
+---
+
+## 2. 引擎 JS（noise.js / mapgen.js / mapgen-server.js）
+
+### 2.1 🔴 无上限缓存（同 1.1）—— 前端与后端 VM 各自都有一份
+- `noise.js`/`mapgen.js` 在原工程亦被直接加载到**浏览器前端**（web/ 未包含，但若未来前端开世界会重复此问题）。
+- 服务端 VM（`mapgen-server.js` 适配层）中 `regionJson/commJson/road` 每次都会把结果写入缓存；当前以 `buildChunk` 为核心路径，`region` 只在点击详情/流式预取时触发 —— 仍会累积。
+
+### 2.2 🟠 `veinNear` 的 `bd<=3` 剪枝
+位置：`mapgen.js: veinNear (L780)`
+- 每次 `fields()` 都调用 `veinNear`，再通过 `elevAtVN` 传入复用 —— 但这个局部最优只在 `fields` 内复用，`elevAt` 单独调用（`buildChunk` 的邻域、道路 A* 里会大量调用）**没有穿过 vn**，会重复扫描 3×3 群落 × 每个群落 veins。
+- 在高密度灵脉区，A* 邻域展开时 `elevAt` 被反复调用，`veinNear` 的 3×3 grid 扫描 + 每个群落内部静脉遍历形成 O(群落×静脉) 热点。
+
+影响：属于常量级偏大但非爆炸，性能敏感时可对 `elevAt(q,r)` 增加一个「同 tile 短缓存」（NLFU），避免同一 tile 在 chunk 邻域与 A* 中重复计算。
+
+### 2.3 🟡 `roadCost` 每次 alloc
+- 每格调用无分配，OK；`astar` 每点 `path.push([])` 只发生在终点回填，OK。
+
+### 2.4 ✅ 良好实践
+- `cacheSet` 单条淘汰的摊薄策略（P3）正确；
+- 无递归、纯坐标函数，跨区块一致。
+
+---
+
+## 3. 前端渲染（web/js）
+
+### 3.1 🟠 renderStaticInto 的 staticLayer 缩放
+位置：`main.js renderStaticInto / drawOverlay`
+- `staticLayer` 在 `cam.zoom` 变化时会整体重绘（`staticNeedsRedraw` 阈值 0.02），重绘成本 = 全部已加载 chunk 的浪线 + 道路 + 灵脉/聚落图标，**每帧只会在相机静止时被合并 200ms 节流**。
+- 缩放缩放过程中会频繁整层重绘，加上 `drawImage(staticLayer)` 在 overlay 上，可能造成缩放卡顿。
+
+建议：缩放时改为「先画底图 + 少量重点标注」，缩放停止后再补全 staticLayer（hierarchical LOD）。低优先级。
+
+### 3.2 🟠 全局 error 兜底过宽
+位置：`main.js window.addEventListener('error')`
+- 任何 `window.onerror`（含未知第三方/广告脚本、WebGL 上下文丢失、一次性的 minor 异常）都会把 `#fatal` 面板弹出来并 `throw` 中断当前帧。
+
+建议：只捕获与地图渲染强相关的错误（包在 `try/catch(renderer.render(...))` 内），不要全局 hook 后直接展示致命面板。
+
+### 3.3 🟡 renderer.setRoads 每帧 DYNAMIC 分配
+位置：`renderer.js setRoads`
+- 每帧按当前 static 重绘把新 Float32Array 传给 `gl.bufferData(DYNAMIC_DRAW)`，量级在数百线段，可接受；但可复用两块 buffer，避免 GC 峰值。
+
+### 3.4 ✅ 良好实践
+- `updateStreaming` 阈值（P1）与区域/群落 keepSet 校验（R4）正确；
+- dpr 与 CSS 像素统一，GL 视口同 source，避免黑边；
+- 图集 UV `/8` 与灵脉行映射正确。
+
+---
+
+## 4. 性能热点一览（按优先级）
+
+| # | 位置 | 问题 | 影响 | 建议动作 |
+|---|------|------|------|----------|
+| 1 | mapgen.js region/settle/comm/road Cache | 无上限 | 长期漫游内存线性增长 | 改 `cacheSet` 固定容量 |
+| 2 | MapWorldService.GetRegionBytes | SQLite 只写不读 + 内存淘汰重建成本高 | 磁盘写放大 + 热点重建 | 明确 region 不落库或按 epoch 可命中 |
+| 3 | veinNear + elevAt 重复扫描 | A* 高密度区热点 | 负载尖峰 | 加 tile 短缓存 |
+| 4 | Flush 并发写顺序 | 低概率陈旧读 | 数据一致边缘 | 单写者化 |
+| 5 | renderStaticInto 整层重绘 | 缩放卡顿 | 体验 | 分层 LOD |
+| 6 | EvictLocked O(n·log n) | 多世界场景 | 微热 | LRU 链 |
+
+---
+
+## 5. 建议与待办
+
+- [ ] **P0 内存**：给 `regionCache/settleCache/commCache/roadCache` 加固定容量（复用 `cacheSet`），并同步保证 `roadFail` 不被错误清空语义。
+- [ ] **P1 清晰化**：决定 region 是否落 SQLite；若不读则去掉 `_sql` 写，或加 epoch 可命中路径。
+- [ ] **P1 稳定性**：SqliteWriter 改为单写者（仅后台线程落库），Stats/Dispose 只触发重试而非并发 Flush。
+- [ ] **P2 体验**：前端 error 兜底收窄；缩放时 staticLayer 分层。
+- [ ] **P2 性能**：`veinNear/elevAt` 增加 tile 粒度短缓存；`EvictLocked` 改 LRU。
+- [ ] **验证方式**：跑 `node verify/verify_map.mjs` 确认改动不破坏 310 项契约校验；对 `?capture=1` headless 截图核对渲染无明显回归。

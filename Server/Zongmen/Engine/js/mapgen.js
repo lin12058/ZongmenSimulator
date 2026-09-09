@@ -117,13 +117,29 @@
   /* P3: 地块级缓存固定容量 (Map 保持插入序)。超限时每次淘汰最旧 1 条,
      单条 delete 的开销摊薄到每次插入 → 不再有「超大 Map 一次性删半」的长停顿;
      内存有界; 淘汰仅影响命中率, 不改变确定性结果。 */
+  /* T1: region/settle/road/comm/roadFail 同样加固定容量 — 长期漫游不再线性增长。
+     淘汰只损失命中率 (全部可按坐标确定性重算), 不改变任何输出。 */
   var ELEV_CAP = 40000;    // 海拔缓存: 视野区 + 探路邻域 ≈ 数十区块
   var FIELD_CAP = 30000;   // 完整地块场缓存 (每项含对象, 容量略小)
   var VEIN_CAP = 40000;    // 灵脉近邻缓存
+  var REGION_CAP = 512;    // 区域信息
+  var SETTLE_CAP = 1024;   // 区域聚落数组
+  var ROAD_CAP = 4096;     // A* 道路 (含 pts/tiles, 单条较大)
+  var COMM_CAP = 1024;     // 群落
+  var ROADFAIL_CAP = 1024; // 不可达聚落对 (只影响重试频率)
   function cacheSet(m, key, val, cap) {
     m.set(key, val);
     if (m.size > cap) m.delete(m.keys().next().value);   // 淘汰最旧插入项
   }
+  function setAdd(s, key, cap) {
+    s.add(key);
+    if (s.size > cap) s.delete(s.values().next().value);
+  }
+
+  /* 道路版本号: roadCache 每新增一条 A* 道路即 +1。
+     服务端据此为 tile 缓存做新鲜度校验 — onRoad 语义依赖 roadCache 热状态,
+     只有「真有新路落成」才需要失效旧 tile 缓存 (比按区域包生成计数更精准)。 */
+  var roadVer = 0;
 
   /* ---------- 基础工具 ---------- */
   function hash01(a, b, salt) {
@@ -168,6 +184,7 @@
     regionCache.clear(); settleCache.clear();
     roadCache.clear(); commCache.clear(); veinNearCache.clear();
     roadFail.clear();
+    roadVer = 0;
   }
 
   /* ---------- 海拔场 (纯函数, 带缓存) ---------- */
@@ -333,14 +350,14 @@
   var CLUSTER_S = 0.0016;    // 势场频率 (世界像素): 波长 ≈ 600px ≈ 38 格, 决定山群尺度
   var CLUSTER_MAX = 36;      // 最大位移 (px) ≈ 2.2 格 (聚拢幅度加大 50% 后)
   var CLUSTER_JIT = 5;       // 附加随机抖动 (px), 防止聚成一点
+  var CLUSTER_EPS = 26;      // 梯度采样步长 (px) (T14: 内联魔数提为具名常量)
   function clusterOffset(f) {
     var P = function (wx, wy) {
       return NL.fbm(nWarp, wx * CLUSTER_S + 51.3, wy * CLUSTER_S - 27.8, 2) * 0.5 + 0.5;
     };
     var p0 = P(f.x, f.y);
-    var eps = 26;                                   // 梯度采样步长 (px)
-    var gx = P(f.x + eps, f.y) - P(f.x - eps, f.y);
-    var gy = P(f.x, f.y + eps) - P(f.x, f.y - eps);
+    var gx = P(f.x + CLUSTER_EPS, f.y) - P(f.x - CLUSTER_EPS, f.y);
+    var gy = P(f.x, f.y + CLUSTER_EPS) - P(f.x, f.y - CLUSTER_EPS);
     var g = Math.sqrt(gx * gx + gy * gy);
     var pull = g / (g + 0.10);                      // 坡度 → 拉力 (饱和曲线)
     var wsum = NL.smoothstep(0.36, 0.58, p0);       // 只在势能高的山区聚拢
@@ -357,6 +374,20 @@
   function buildChunk(ca, cb) {
     var cc = chunkCenter(ca, cb);
     var R = CHUNK_SCAN;
+    /* T6: 两遍扫描 — 第一遍把扫描盘 R+1 内的全部地块 fields() 一次算齐
+       (先归属后取场 → 取场与归属判定解耦, 且冷地块只算一次),
+       第二遍逐格用数组下标取自身/邻居场, 消除逐格 6 邻居
+       「拼字符串 key + Map.get」×7 的重复查找开销。
+       纯重排不改变任何计算结果 (fields 是纯函数 + 缓存)。 */
+    var R1 = R + 1, W2 = 2 * R1 + 1;
+    var grid = new Array(W2 * W2);
+    var dq0, dr0;
+    for (dq0 = -R1; dq0 <= R1; dq0++) {
+      for (dr0 = -R1; dr0 <= R1; dr0++) {
+        if (hexDist(0, 0, dq0, dr0) > R1) continue;
+        grid[(dq0 + R1) * W2 + (dr0 + R1)] = fields(cc.q + dq0, cc.r + dr0);
+      }
+    }
     var centers = [], tiles = [], elevs = [], hashes = [], neigh = [];
     var qrel = [], rrel = [];       // R3: tile 相对区块中心的整数轴向偏移 (dq,dr),
                                     //     供服务端直存整数偏移, 不做浮点反解
@@ -365,11 +396,10 @@
     var bbox = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
     for (var dq = -R; dq <= R; dq++) {
       for (var dr = -R; dr <= R; dr++) {
-        var q = cc.q + dq, r = cc.r + dr;
-        if (hexDist(q, r, cc.q, cc.r) > CHUNK_SCAN) continue;
-        var own = chunkOfTile(q, r);
+        if (hexDist(dq, dr, 0, 0) > CHUNK_SCAN) continue;
+        var own = chunkOfTile(cc.q + dq, cc.r + dr);
         if (own.q !== cc.q || own.r !== cc.r) continue;
-        var f = fields(q, r);
+        var f = grid[(dq + R1) * W2 + (dr + R1)];
         centers.push(f.x, f.y);
         qrel.push(dq); rrel.push(dr);
         tiles.push(f.biome * 4 + f.variant);   // 格底回归自然地形, 灵脉不再覆写深色底 (精灵仍按 disp 出灵脉峰)
@@ -377,7 +407,7 @@
         hashes.push(f.hash);
         var packed = 0;
         for (var k = 0; k < 6; k++) {
-          var nf = fields(q + NEIGH_SLOTS[k][0], r + NEIGH_SLOTS[k][1]);
+          var nf = grid[(dq + NEIGH_SLOTS[k][0] + R1) * W2 + (dr + NEIGH_SLOTS[k][1] + R1)];
           packed |= Math.min(nf.biome, 7) << (k * 3);   // P2: 3bit/邻居, 移位打包 (等价 *8^k)
         }
         neigh.push(packed);
@@ -456,7 +486,7 @@
              pool.suf[(hash01(i, j, 15) * pool.suf.length) | 0];
     }
     c = { i: i, j: j, q: sq, r: sr, x: tileToWorld(sq, sr).x, y: tileToWorld(sq, sr).y, biome: f.biome, name: name };
-    regionCache.set(key, c);
+    cacheSet(regionCache, key, c, REGION_CAP);
     return c;
   }
 
@@ -532,7 +562,7 @@
         }
       }
     }
-    settleCache.set(key, arr);
+    cacheSet(settleCache, key, arr, SETTLE_CAP);
     return arr;
   }
 
@@ -652,7 +682,7 @@
           if (budget <= 0) continue;               // 预算用尽: 本帧不算
           budget--;
           var path = astar(a.q, a.r, b.q, b.r);
-          if (!path) { roadFail.add(rkey); continue; }
+          if (!path) { setAdd(roadFail, rkey, ROADFAIL_CAP); continue; }
           var pts = [], tset = new Set();
           for (var pj = 0; pj < path.length; pj++) {
             var w = tileToWorld(path[pj][0], path[pj][1]);
@@ -663,7 +693,8 @@
           road = { key: rkey, pts: pts, tiles: tset,
                    x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x),
                    y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
-          roadCache.set(rkey, road);
+          cacheSet(roadCache, rkey, road, ROAD_CAP);
+          roadVer++;                               // 新道路落成 → tile onRoad 缓存整体失效
         }
         out.push(road);
         linked++;
@@ -757,7 +788,7 @@
       comm = { i: i, j: j, q: q, r: r, element: el, spirit: sp,
                x: tileToWorld(q, r).x, y: tileToWorld(q, r).y, veins: veins };
     }
-    commCache.set(key, comm);
+    cacheSet(commCache, key, comm, COMM_CAP);
     return comm;
   }
 
@@ -817,7 +848,11 @@
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
     roadCache.clear(); roadFail.clear();
+    roadVer = 0;
   }
+
+  /* 当前道路版本号 (供宿主做 tile 缓存新鲜度校验) */
+  function roadVersion() { return roadVer; }
 
   /* ---------- 导出 ---------- */
   global.MapGen = {
@@ -836,6 +871,7 @@
     communityNear: communityNear,
     veinNear: veinNear,
     countVeins: countVeins,
+    roadVersion: roadVersion,
     pxToTile: pxToTile,
     tileToWorld: tileToWorld,
     hexDist: hexDist,

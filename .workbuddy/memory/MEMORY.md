@@ -4,7 +4,7 @@
 - **C# Server/Zongmen**：.NET 8 + ClearScript.V8 + protobuf-net 3.2.30 + Microsoft.Data.Sqlite 8.0.8。Kestrel 默认 0.0.0.0:8140（appsettings "Zongmen.Port"）。单进程托管 web/ 静态 + /api/map/* + /api/debug/snap。
 - **前端 web/**：index.html + js/{pb, mapclient, textures, renderer, main}.js + 极小 noiselib.js。noise.js / mapgen.js 已迁至 Server/Zongmen/Engine/js/；前端无任何地图生成/噪声/寻路逻辑。
 - **数据流**：JS 沙箱执行 noise.js+mapgen.js+mapgen-server.js → JSON → C# 装配 protobuf → gzip → SQLite (Data KV) + 内存 LRU；HTTP `Content-Encoding:gzip` 下发；前端 fetch 透明解压 → Float32Array 还原绝对坐标。
-- **按区块加载**：区块 (seed,ca,cb)、区域 (seed,i,j)、群落 (seed,ci,cj) 全部持久化；tile/fields 即时计算 + 进程内 LRU 缓存（fields 纯确定性；tile 按 region epoch 失效防 onRoad 过期）。
+- **按区块加载**：区块 (seed,ca,cb)、群落 (seed,ci,cj) 持久化 SQLite；**区域包不再落库**（T2：只写不读纯写放大，会话内 `_regionHot` LRU 512 + `_mem` 兜底，重启后区域首访重走 JS 生成）；tile/fields 即时计算 + 进程内缓存（fields 纯确定性；tile 按 **roadVer 道路版本号**失效防 onRoad 过期）。
 
 ## 关键 protobuf 经验
 - 带符号整型字段必须显式 `[ProtoMember(N, DataFormat = ProtoBuf.DataFormat.ZigZag)]`，否则按 int32 (10 字节 varint) 写，前端按 sint32 (zz) 读会全部错号。命中字段：ChunkPayload.Ca/Cb、RegionPack.I/J、RegionInfoDto.Q/R、SettlementDto.Q/R、CommunityPack.Ci/Cj/Q/R、VeinDto.Q/R、TileQuery.Q/R/RegionI/RegionJ。
@@ -20,7 +20,7 @@
 ## 验证管线
 - `verify/verify_map.mjs`：Node 加载同份 Engine/js 作为参考基准 + HTTP 走真实 protobuf 链路 + 浏览器同款 pb.js 解码，310 项检查全绿。运行：`node verify/verify_map.mjs`。
 - 静态对照点：tiles/neigh/roads/灵脉名精确一致；centers/elev/hash/精灵容差。`相对坐标还原 ≤1e-3px` 用 `ca*S+(cq-16)` 反推。
-- `verify/probe_r8r9.mjs` / `probe_r2r6r3.mjs`：专项 R8/R9 缓存与 R2/R6/R3 探测。
+- 专项验证（2026-09-09）：region/tile 二次请求字节一致；12 路并发同 key 全 200 无死锁；新 seed region 落库 0 条/chunk 落 1 条（T2 证实）；headless `?capture=1` 渲染正常。Chrome 在 `~/AppData/Local/Google/Chrome/Application/chrome.exe`。
 - `?capture=1` 触发页面内 4s 后合成 glcanvas+overlay → POST /api/debug/snap → verify/capture.png，作为 headless 真实渲染稳定路径。
 
 ## 山河图（index.html + js/）架构
@@ -37,8 +37,17 @@
 - 静态层节流（R1）：markStaticDirty 200ms 合并；forceStaticDirty 强制（卸载/重铸）。
 - 调试句柄（R10）：`if (DEBUG)` 包裹 `window.__cam/__renderer/__data`；DEBUG 由 URL `debug=1` 或 `capture=1` 开启。
 
+## review.md T0~T15 修复架构（2026-09-09 下午，全部已落地+验证）
+- **roadVer 机制（T4 核心）**：mapgen.js `roadsNear` 每新增一条 A* 道路 `roadVer++`（init/configure 归零）；`JsWorldVm.RoadVersion()` 透出；MapWorldService tile 缓存条目 = (Gz, RoadVer)，`entry.RoadVer == vm.RoadVersion()` 才算新鲜。**只有真有新路落成才失效 tile 缓存**——区域包缓存命中不再整片作废 tile（旧 `_regionEpoch` 按 seed 全局失效已删除）。
+- **缓存容量（T1）**：mapgen.js REGION_CAP=512 / SETTLE_CAP=1024 / COMM_CAP=1024 / ROAD_CAP=4096 / ROADFAIL_CAP=1024，走 `cacheSet` + 新增 `setAdd`（Set 版）。淘汰只损失命中率不改确定性输出。
+- **Storage/LruCache.cs（T11）**：lock + Dictionary + LinkedList 线程安全 LRU（命中提序、超限删单条）；tile/grid/_regionHot 三缓存全用它。MemoryVirtualContext 同款 LRU 化（T8），SQLite 命中经 `ReadSqlBackfill` 回填 `_mem`。
+- **SQLite（T3/T5）**：Flush 出队+写库+回退全程持 `_flushLock`；PruneExcept 同锁；Flush+Prune 移入 MapWorldService `MaintenanceLoopAsync`（每 2 分钟），StatsJson 只 Flush。实测 prune 把 dbRows 4278→307。
+- **buildChunk 两遍扫描（T6）**：先 R+1 扫描盘 fields() 灌二维数组 grid，第二遍 `grid[(dq+R1)*W2+(dr+R1)]` 数组取自身/6 邻居场——消除逐格 7 次字符串拼 key+Map.get；纯重排，输出与单遍一致（verify 全绿佐证）。
+- **前端（T7/T9/T10）**：main.js `roadsDirty` 路网几何缓存（region 到达/regenerate 置脏；**重建不做逐路视野裁剪**——regionCells 随视野卸载，按重建时刻裁剪会致平移后远路缺失）；drawChunkWaves 概率筛前置（近岸判定+出线概率先算，~70% 深水格免 3 浮点哈希）。renderer.js 顶部 `ATLAS_ROWS=8` 唯一常量字符串拼接注入 HEX_FS/PROP_FS + setTextures 构建期断言（图集宽高比推行数不符即抛错）。window.onerror 只 console.error。
+- **其他**：MaxSeeds 默认 3→4（T13）；EvictLocked 线性扫（T12）；b64FromBytes 注释修正、textures.js 头注释 7行→8行（T14）；`propPad=hexR*12` 经核算保留（聚类偏移 36px + 精灵最高 ~8uR，12uR 合理）。
+
 ## 工具经验
-- 静态服务/截图：节点服务被 run_in_background 起的进程会被外部终止（用户 Stop / 会话清理），特征=日志无异常戛然而止。停旧后端：`Get-NetTCPConnection -LocalPort 8140 -State Listen | Select -First 1 -ExpandProperty OwningProcess | Stop-Process -Force`。
+- 静态服务/截图：节点服务被 run_in_background 起的进程会被外部终止（用户 Stop / 会话清理），特征=日志无异常戛然而止。停旧后端：`Get-Process -Name Zongmen | Stop-Process -Force`（按进程名比按端口稳）。**注意（2026-09-09 实测）：本机 Get-NetTCPConnection 输出不稳定——监听存在时也可能返回空，勿以它的空输出判定"端口已释放"；端口/进程判定一律用 `netstat -ano | grep :8140 | grep LISTEN` + `tasklist | grep -i zongmen` 双确认。**
 - 清理临时文件用 PowerShell `Get-ChildItem | ForEach-Object { $_.Delete() }`（bash rm / cmd del 都会被 SIGTERM）。
 - agent-browser screenshot 在本机 SIGTERM 失效。WebGL 截图走 headless Chrome `--headless=new --user-data-dir=临时 --virtual-time-budget=25000 --screenshot=xxx.png`（带 nofade=1）→ Read 查看。最可靠还是 `?capture=1` 页面内自截图或 `present_files` 内置浏览器。
 - `dotnet build Server/Zongmen/Zongmen.csproj`（必须 .csproj；拿目录报 MSB1009）。`dotnet run --project` 接受目录。启动后端 = 仓库根直接跑 `./Server/Zongmen/bin/Debug/net8.0/Zongmen.exe`。
@@ -49,11 +58,11 @@
 ## 性能/一致性关键点（2026-09-09 收尾时已应用）
 - `GetRegionBytes` 总是经 JS 生成（不直读 SQLite 旧行）— 保持 VM roadCache 热，与 tileJson.onRoad 语义一致；同会话 `_mem` 命中免重复生成。
 - verify_map 的 verifyTile 在 init 后先模拟客户端流式 3×3 区域包，与 P4「只读缓存」对齐。
-- SqliteVirtualContext WAL + 每操作短连接 + 批量异步落库（WriterLoopAsync 250ms）；MemoryVirtualContext cap 8192 + 插入序 FIFO。
+- SqliteVirtualContext WAL + 每操作短连接 + 批量异步落库（WriterLoopAsync 250ms）；MemoryVirtualContext cap 8192 + 访问序 LRU（T8 改造）。
 - JsEngineHost：构造时一次缓存 `dynamic _svc`；Call 7 分支走 `_svc.xxx`（免 DLR 解析）。
 - mapgen.js 缓存：`cacheSet(m,key,val,cap)` 插入即超 cap 删最旧单条；ELEV_CAP=40000/FIELD_CAP=30000/VEIN_CAP=40000。`elevAtVN(q,r,vn)` 复用 fields 的 `veinNear`。
 - chunkJson 单段定宽缓冲（11nB 地块 + 13pnB 精灵，全小端）；BuildChunk 用 `Slice(raw,o,len)` 切回。
-- R8/R9：tile/fieldGrid 内存 LRU；tile 缓存带 region epoch 失效；chunk/region/comm per-key in-flight 去重（`_buildGates` lock + double-check + TryRemove）。
+- R8/R9：tile/fieldGrid 内存 LRU；tile 缓存带 **roadVer** 失效（原 region epoch 已废弃，见 review 修复架构节）；chunk/region/comm per-key in-flight 去重（`_buildGates` lock + double-check + TryRemove）。
 - R2：StaticWebMiddleware ETag/Last-Modified + 文件内存缓存（mtime 变即刷新）；R6 ApiRateLimitMiddleware 仅对 tile/fields 5s/120/IP。
 - R3：buildChunk 携带 qrel/rrel 整数偏移；chunkJson 直接 `dv.setUint8(oCq+i, qrel[i]+16)` 不做浮点反解。
 - R11：configure() 清全部 region/settle/road/roadFail 缓存。

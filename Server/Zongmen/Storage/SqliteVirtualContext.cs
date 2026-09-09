@@ -78,41 +78,44 @@ public sealed class SqliteVirtualContext : VirtualContext
         _pending.Enqueue((key, value ?? Array.Empty<byte>()));
     }
 
-    /// <summary>把积压写入一次性事务提交 (统计前 / Dispose 前调用)。</summary>
+    /// <summary>把积压写入一次性事务提交 (后台 writer 周期 / 统计前 / Dispose 前)。
+    /// T5: 整个「出队 + 写库 + 失败回退重入队」全程持 _flushLock —— 前台 (Stats/Dispose)
+    ///     与后台 writer 并发调用时完全串行, 不再出现两批交错写;
+    ///     失败回退的批次也不会插到同 key 新版本之后 (旧覆盖新)。</summary>
     public void Flush()
     {
         if (_disposed || _pending.IsEmpty) return;
-        var batch = new List<(string Key, byte[] Value)>();
         lock (_flushLock)
         {
+            if (_disposed) return;
+            var batch = new List<(string Key, byte[] Value)>();
             while (_pending.TryDequeue(out var item)) batch.Add(item);
-        }
-        if (batch.Count == 0) return;
-        try
-        {
-            using var c = Open();
-            using var tx = c.BeginTransaction();
-            foreach (var (key, val) in batch)
+            if (batch.Count == 0) return;
+            try
             {
-                using var cmd = c.CreateCommand();
-                cmd.Transaction = tx;
-                cmd.CommandText =
-                    "INSERT INTO Data(Key, Value) VALUES($k, $v) " +
-                    "ON CONFLICT(Key) DO UPDATE SET Value=$v;";
-                cmd.Parameters.AddWithValue("$k", key);
-                cmd.Parameters.AddWithValue("$v", val);
-                cmd.ExecuteNonQuery();
+                using var c = Open();
+                using var tx = c.BeginTransaction();
+                foreach (var (key, val) in batch)
+                {
+                    using var cmd = c.CreateCommand();
+                    cmd.Transaction = tx;
+                    cmd.CommandText =
+                        "INSERT INTO Data(Key, Value) VALUES($k, $v) " +
+                        "ON CONFLICT(Key) DO UPDATE SET Value=$v;";
+                    cmd.Parameters.AddWithValue("$k", key);
+                    cmd.Parameters.AddWithValue("$v", val);
+                    cmd.ExecuteNonQuery();
+                }
+                tx.Commit();
             }
-            tx.Commit();
-        }
-        catch (Exception ex)
-        {
-            /* 写失败(如瞬时 DB 忙) → 退回队列由下轮 writer 重试, 不阻塞请求路径 */
-            lock (_flushLock)
+            catch (Exception ex)
             {
+                /* 写失败(如瞬时 DB 忙) → 退回队列由下轮 writer 重试, 不阻塞请求路径。
+                   注: 本工程同 key 内容是确定性产物, 旧值回退即使与新值短暂乱序,
+                   落库字节也一致, 不会产生脏数据。 */
                 foreach (var it in batch) _pending.Enqueue(it);
+                Console.Error.WriteLine("[SqliteVirtualContext] Flush 失败, 稍后重试: " + ex.Message);
             }
-            Console.Error.WriteLine("[SqliteVirtualContext] Flush 失败, 稍后重试: " + ex.Message);
         }
     }
 
@@ -125,7 +128,8 @@ public sealed class SqliteVirtualContext : VirtualContext
         cmd.ExecuteNonQuery();
     }
 
-    /// <summary>清理活跃 seed 前缀之外的全部历史行 (seed 前缀形如 "w:0123456789abcdef:")。</summary>
+    /// <summary>清理活跃 seed 前缀之外的全部历史行 (seed 前缀形如 "w:0123456789abcdef:")。
+    /// T5: 与 Flush 共享 _flushLock —— 避免 DELETE 与批量 INSERT 交错触发 database is locked。</summary>
     public long PruneExcept(IReadOnlyCollection<string> seedPrefixes)
     {
         if (seedPrefixes == null || seedPrefixes.Count == 0) return 0;
@@ -138,13 +142,16 @@ public sealed class SqliteVirtualContext : VirtualContext
             idx++;
         }
         sb.Append(')');
-        using var c = Open();
-        using var cmd = c.CreateCommand();
-        cmd.CommandText = sb.ToString();
-        idx = 0;
-        foreach (var p in seedPrefixes)
-            cmd.Parameters.AddWithValue("$p" + idx++, p + "%");
-        return cmd.ExecuteNonQuery();
+        lock (_flushLock)
+        {
+            using var c = Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = sb.ToString();
+            idx = 0;
+            foreach (var p in seedPrefixes)
+                cmd.Parameters.AddWithValue("$p" + idx++, p + "%");
+            return cmd.ExecuteNonQuery();
+        }
     }
 
     public override long Count()
