@@ -223,7 +223,10 @@
     var meta = {
       hexR: MG.HEX_R, hexW: MG.HEX_W, chunkS: MG.CHUNK_S, chunkScan: MG.CHUNK_SCAN,
       regionM: MG.REGION_M, commCl: MG.CFG.COMM_CL, commR: MG.CFG.COMM_R,
-      seaLevel: MG.SEA_LEVEL, biomeMeta: MG.BIOME_META
+      seaLevel: MG.SEA_LEVEL, biomeMeta: MG.BIOME_META,
+      /* 五行/异灵根配色: 与 biomeMeta 同理交给客户端 (前端曾各自复制一份字面量,
+         必须人工同步 —— 改色板时极易漂移。现由 meta 单点下发) */
+      elementRGB: MG.ELEMENT_RGB, variantRGB: MG.VARIANT_RGB
     };
     return JSON.stringify(meta);
   }

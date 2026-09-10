@@ -38,7 +38,9 @@
         hexR: meta.hexR, hexW: meta.hexW, chunkS: meta.chunkS,
         chunkScan: meta.chunkScan, regionM: meta.regionM,
         commCl: meta.commCl, commR: meta.commR, seaLevel: meta.seaLevel,
-        biomeMeta: meta.biomeMeta
+        biomeMeta: meta.biomeMeta,
+        /* 色板由 meta 单点下发 (缺失时由调用方字面兜底, 见 main.js) */
+        elementRGB: meta.elementRGB, variantRGB: meta.variantRGB
       };
     }
     return geoCache;

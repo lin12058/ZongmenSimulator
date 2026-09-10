@@ -177,6 +177,42 @@ async function checkMinimap() {
     !/mmData\.q1|mmData\.r1/.test(code), '仍在使用 mmData.q1/mmData.r1');
 }
 
+/* 色板契约: 五行/异灵根配色由 meta 单点下发 (elementRGB/variantRGB), 客户端优先读取
+   (main.js 的 geoElementColor/geoVariantColor; 那里的字面量仅作 meta 缺失兜底)。
+   —— 此前前后端各存一份副本、靠人工同步, 改色板必漂移。
+   本检查: ① 断言 meta 的色板与 Engine/js/mapgen.js 导出的 ELEMENT_RGB/VARIANT_RGB
+   逐值相同 (即「服务端 → meta」这一跳没丢值/没改名);
+   ② 源码守卫: main.js 必须优先取 geo.elementRGB / geo.variantRGB (防被改回硬编码副本)。 */
+async function checkPalettes() {
+  const m = await MC.fetchMeta();
+  global.window = globalThis;
+  if (!global.MapGen) {                       // 与 verify_map 同款: 在 Node 里加载同份引擎作参照
+    for (const f of ['noise.js', 'mapgen.js']) {
+      (0, eval)(fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js', f), 'utf8'));
+    }
+  }
+  const MG = global.MapGen;
+  const eq = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+
+  const eRef = MG.ELEMENT_RGB;
+  check('meta.elementRGB 为 5 项 (金木水火土)', Array.isArray(m.elementRGB) && m.elementRGB.length === 5,
+    JSON.stringify(m.elementRGB));
+  check('meta.elementRGB 与 mapgen.ELEMENT_RGB 逐值相同',
+    Array.isArray(m.elementRGB) && m.elementRGB.length === eRef.length && m.elementRGB.every((c, i) => eq(c, eRef[i])),
+    JSON.stringify(m.elementRGB));
+
+  const vRef = MG.VARIANT_RGB, vKeys = Object.keys(vRef);
+  check(`meta.variantRGB 与 mapgen.VARIANT_RGB 逐键逐值相同 (${vKeys.join('/')})`,
+    !!m.variantRGB && Object.keys(m.variantRGB).length === vKeys.length &&
+    vKeys.every((k) => eq(m.variantRGB[k], vRef[k])), JSON.stringify(m.variantRGB));
+
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'js', 'main.js'), 'utf8');
+  check('main.js geoElementColor 优先取 geo.elementRGB (源码守卫)',
+    /function geoElementColor[\s\S]{0,220}?geo\.elementRGB/.test(src), '疑似改回硬编码副本');
+  check('main.js geoVariantColor 优先取 geo.variantRGB (源码守卫)',
+    /function geoVariantColor[\s\S]{0,220}?geo\.variantRGB/.test(src), '疑似改回硬编码副本');
+}
+
 console.log('== 元信息 ==');
 await fetchMeta();
 
@@ -205,6 +241,9 @@ checkStaticDirtyContract();
 
 console.log('\n== 小地图契约 ==');
 await checkMinimap();
+
+console.log('\n== 色板契约 ==');
+await checkPalettes();
 
 console.log(`\n========== 前端模拟: ${failures === 0 ? '全部通过 ✔' : failures + ' 项失败 ✘'} ==========`);
 process.exit(failures === 0 ? 0 : 1);

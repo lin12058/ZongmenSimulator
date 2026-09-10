@@ -2,7 +2,7 @@
 # 所需文件已解压至 assets/textures/paper.png, 此包无需入库
 assets/papertextures.zip
 
-# 调试用的页面截图导出 (页内 window.__snap() 可重新生成)
+# 调试用的页面截图导出 (现行机制: URL 带 ?capture=1 → 页面合成后 POST /api/debug/snap)
 assets/snap_*.png
 
 # 系统杂物

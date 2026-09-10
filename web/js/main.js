@@ -726,12 +726,17 @@
     if (staticSchedTimer) { clearTimeout(staticSchedTimer); staticSchedTimer = null; }  // 本轮已含最新数据, 取消挂起节流
   }
 
+  /* 五行/异灵根配色 —— 优先用 meta 下发的色板 (与 biomeMeta 同理, 单点真源);
+     下面的字面量只作 meta 缺失时的兜底, 必须与
+     Server/Zongmen/Engine/js/mapgen.js 的 ELEMENT_RGB / VARIANT_RGB 一致
+     (frontend_smoke 的「色板契约」段会断言两者逐值相同)。 */
+  var ELEMENT_RGB_FB = [[196, 176, 120], [104, 140, 86], [86, 116, 142], [176, 72, 50], [152, 120, 82]];
+  var VARIANT_RGB_FB = { 雷: [142, 96, 190], 风: [118, 150, 148], 冰: [136, 168, 192], 暗: [96, 84, 110] };
   function geoElementColor(el) {
-    return [[196, 176, 120], [104, 140, 86], [86, 116, 142], [176, 72, 50], [152, 120, 82]][el] || [150, 130, 100];
+    return (geo && geo.elementRGB && geo.elementRGB[el]) || ELEMENT_RGB_FB[el] || [150, 130, 100];
   }
   function geoVariantColor(name) {
-    var V = { 雷: [142, 96, 190], 风: [118, 150, 148], 冰: [136, 168, 192], 暗: [96, 84, 110] };
-    return V[name] || [150, 130, 100];
+    return (geo && geo.variantRGB && geo.variantRGB[name]) || VARIANT_RGB_FB[name] || [150, 130, 100];
   }
 
   function drawOverlay() {
