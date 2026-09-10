@@ -329,7 +329,11 @@
     if (b === 7) return (f.hash * 721.3) % 1 < 0.5 ? 42 + v2 : 58 + v2;
     if (b === 4) {
       var h2 = (f.hash * 913.7) % 1;
-      return h2 < 0.75 ? 44 + (h2 * 5.34 | 0) : -1;
+      /* 森林 4 个变体 (图集第 5 行 44..47 / 着色器同一注释): 乘子 5.34 在
+         h2 ∈ [0.749064, 0.75) 时会算出 4 → 44+4=48 溢出到第 6 行的沙漠精灵
+         (实测 8/7620 森林格 = 0.105% 的森林画出沙漠)。此处钳到 3 变体,
+         权重与阈值不变, 只把那点溢出并入 47。 */
+      return h2 < 0.75 ? 44 + Math.min(3, (h2 * 5.34) | 0) : -1;
     }
     if (b === 5) return (f.hash * 721.3) % 1 < 0.30 ? 48 : -1;
     if (b === 3) {
@@ -900,6 +904,9 @@
     tileToWorld: tileToWorld,
     hexDist: hexDist,
     mountainNear: mountainNear,
+    /* 精灵索引分配 (供 verify/w5_sprite_range.mjs 直接断言输出契约:
+       各群系索引区间必须落在图集已绘制范围内, 不得溢出到别行素材) */
+    propSpriteFor: propSpriteFor,
     roadCache: roadCache,
     settleCache: settleCache,
     commCache: commCache,
