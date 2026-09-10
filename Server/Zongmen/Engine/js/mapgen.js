@@ -625,16 +625,24 @@
     var sk = sq + ',' + sr;
     g.set(sk, 0);
     open.push([sq, sr], hexDist(sq, sr, tq, tr));
-    /* 迭代上限 ASTAR_GUARD: 必须只排除「本来就不可达/代价过高」的聚落对, 不能
-       伤及真实可通行的路。原值 60000 的问题: 海岸破碎区里隔水不可达的聚落对,
-       搜索会探完整片大陆才放弃 —— 单次 regionJson 实测最长 5.1s (最坏 10.7s),
-       而该生成同步持有 V8 门闩 → 该 seed 所有请求排队超时 → 黑区 + 卡死 + CPU 满。
-       基准 (verify/bench_guard.mjs + bench_roads_lost.mjs, 4000 region 采样):
-         guard=60000 → 最慢 region 5053ms, 道路 371 条, 总耗时 53.1s
-         guard=12000 → 最慢 region  540ms, 道路 371 条, 总耗时 16.3s
-         guard=  6000 → 最慢 region   32ms, 道路 371 条, 总耗时 10.9s
-       三档道路条数完全一致 (= 零道路损失)。取 12000: 相对实测所需 (无一对超过
-       6000 步) 留 2x 余量, 同时把最坏卡顿压到亚秒级。回归见 verify/w3_astar_budget.mjs。 */
+    /* 迭代上限 ASTAR_GUARD: 作用是把「隔水不可达 / 代价过高」的聚落对尽快放弃,
+       不能无界搜索 —— 原值 60000 时海岸破碎区的失败搜索会探完整片大陆
+       (单次 regionJson 实测最长 5.1s, 最坏 10.7s), 且该生成同步持有本 VM 的
+       V8 门闩 (JsWorldVm._gate) → 同 seed 一切请求排队超时 → 黑区 + 卡死。
+
+       ⚠️ 取舍是**真实存在**的, 并非「零代价」——早期 verify/bench_roads_lost.mjs
+          只比 roadCache.size, 会把「丢一条 + 少算一条」恰好相等误判为无损失 (已弃用)。
+       逐对隔离实测 (verify/bench_guard_frontier.mjs, 3 seed × 3000 区域 = 1070 对,
+       用纯函数 astar 逐对比对, 不受 roadFail/缓存淘汰状态混淆):
+         ≤1500 步 89.81%   ≤3000 5.14%   ≤6000 1.12%
+         6001~12000 0.19%  12001~24000 0.19%  24001~60000 0.37%   >60000/真不可达 3.18%
+       → 相对 60000: 取 12000 丢 6 对 (0.56%), 取 6000 丢 8 对 (0.75%),
+         取 3000 丢 14 对 (1.3%), 取 1500 丢 69 对 (6.4%)。
+       被丢的都是「需上万步的长绕行」海岸断续连接; 实测把这 6 对找回来最坏会让
+       单个 region 构建达 3682ms (另有 543ms/94ms/41ms/24ms/21ms) —— 正是要根治
+       的卡死病灶。故取 12000: 以约 0.56% 的长绕行路, 换取最坏 region 由秒级降为亚秒级。
+       回归: verify/w3_astar_budget.mjs 断言「相对 60000 的丢路率 ≤1%」+ 耗时上界
+       (原先的「零道路损失」断言基于已废弃的 roadCache.size 比法, 不成立)。 */
     var guard = 0;
     while (guard++ < 12000) {
       var cur = open.pop();
@@ -907,6 +915,10 @@
     /* 精灵索引分配 (供 verify/w5_sprite_range.mjs 直接断言输出契约:
        各群系索引区间必须落在图集已绘制范围内, 不得溢出到别行素材) */
     propSpriteFor: propSpriteFor,
+    /* 纯函数 A* (只依赖 seed 地形, 不读 roadCache/roadFail) — 供
+       verify/bench_guard_frontier.mjs 逐对隔离测量 «guard 下界 vs 丢路»,
+       避免经 roadsNear 时被跨区域的 roadFail/缓存淘汰状态混淆 */
+    astar: astar,
     roadCache: roadCache,
     settleCache: settleCache,
     commCache: commCache,
