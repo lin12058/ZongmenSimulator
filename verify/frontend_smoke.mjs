@@ -97,6 +97,86 @@ function checkDomIds() {
   check(`JS 引用的 ${used} 处 DOM id 全部已定义`, bad.length === 0, bad.join(' '));
 }
 
+/* 静态层置脏契约: renderStaticInto() 由 staticDirty 门控, 其内部消费的数据
+   (showVeins/showLabels/regionCells/commCells/settleCells/poiCells/chunkData)
+   在别处被改写时必须同时置静态脏 —— 否则相机静止时 staticNeedsRedraw() 返回
+   false, 改动不会生效 (要等下一次平移/缩放)。
+   这是实测过的真实 bug: 灵脉/标注两个开关只翻变量不置脏 → 点了没反应。
+   静态核对是唯一便宜手段 (该路径依赖 GL 与相机状态, Node 里跑不起来)。 */
+function checkStaticDirtyContract() {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'js', 'main.js'), 'utf8');
+  const bad = [];
+  /* 1) 运行时改写 showVeins/showLabels (排除 `var showX = <初值>` 声明) 必须邻近置脏 */
+  for (const m of src.matchAll(/\b(showVeins|showLabels)\s*=/g)) {
+    const lineStart = src.lastIndexOf('\n', m.index) + 1;
+    if (/\bvar\b/.test(src.slice(lineStart, m.index))) continue;      // 声明, 跳过
+    const near = src.slice(Math.max(0, m.index - 200), m.index + 500);
+    if (!/StaticDirty\s*\(/.test(near))
+      bad.push(`${m[1]}@L${src.slice(0, m.index).split('\n').length}`);
+  }
+  check('showVeins/showLabels 的运行时改写都伴随静态置脏', bad.length === 0, bad.join(' '));
+
+  /* 2) 所有 'off' 按钮开关 (classList.toggle('off', …)) 都必须触发静态层重绘 */
+  const bad2 = [];
+  for (const m of src.matchAll(/classList\.toggle\('off'/g)) {
+    const seg = src.slice(m.index, m.index + 400);
+    if (!/StaticDirty\s*\(/.test(seg))
+      bad2.push(`off@L${src.slice(0, m.index).split('\n').length}`);
+  }
+  check('标注开关键均触发静态层重绘', bad2.length === 0, bad2.join(' '));
+}
+
+/* 小地图契约: /api/map/fields 的响应键必须是 { q0, r0, nq, nr, d } ——
+   客户端由 q0+nq-1 / r0+nr-1 推上界。**历史上这里出过真实 bug**: 客户端曾直接读
+   mmData.q1/mmData.r1 (服务端从未下发这两个键 → 恒 undefined) → 越界判断恒假
+   → 小地图自上线起一直是均匀兜底色 (#b9ad92) 的空框, 从未显示过地形。
+   本检查做两件事: ① 数据契约 —— 用真实 fields 响应复算一遍像素上色, 必须真的
+   画出多种地形色 (证明「服务端数据足以绘制 + 索引公式正确」);
+   ② 源码守卫 —— main.js 不得再引用不存在的 mmData.q1/r1。 */
+async function checkMinimap() {
+  const G = MC.geo();
+  const cam = { x: G.hexW * (-51 + 133 / 2), y: 1.5 * G.hexR * 133 };   // 与 shot.mjs 默认视野同参数
+  const W = 132, H = 88, SCALE = 6;
+  const x0 = cam.x - W / 2 * SCALE, y0 = cam.y - H / 2 * SCALE;
+  const x1 = cam.x + W / 2 * SCALE, y1 = cam.y + H / 2 * SCALE;
+  const a = MC.pxToTile(x0, y0), b = MC.pxToTile(x1, y1);
+  const c = MC.pxToTile(x0, y1), d = MC.pxToTile(x1, y0);
+  const q0 = Math.min(a.q, b.q, c.q, d.q), q1 = Math.max(a.q, b.q, c.q, d.q);
+  const r0 = Math.min(a.r, b.r, c.r, d.r), r1 = Math.max(a.r, b.r, c.r, d.r);
+  const g = await MC.fieldGrid('42', q0, q1, r0, r1);
+  check('fields 响应含 q0/r0/nq/nr/d (客户端上色所需)',
+    g.q0 === q0 && g.r0 === r0 && g.nq === q1 - q0 + 1 && g.nr === r1 - r0 + 1,
+    JSON.stringify({ q0: g.q0, r0: g.r0, nq: g.nq, nr: g.nr }));
+  check('fields 不含 q1/r1 (客户端须自行推上界)',
+    g.q1 === undefined && g.r1 === undefined, `q1=${g.q1} r1=${g.r1}`);
+
+  const hiQ = g.q0 + g.nq - 1, hiR = g.r0 + g.nr - 1;
+  const hist = new Map();
+  let outside = 0;
+  for (let py = 0; py < H; py++) {
+    for (let px = 0; px < W; px++) {
+      const t = MC.pxToTile(cam.x + (px - W / 2) * SCALE, cam.y + (py - H / 2) * SCALE);
+      let disp = -1;
+      if (t.q >= g.q0 && t.q <= hiQ && t.r >= g.r0 && t.r <= hiR) {
+        disp = g.data[(t.r - g.r0) * g.nq + (t.q - g.q0)];
+      }
+      if (disp < 0) outside++;
+      const col = disp < 0 ? '#b9ad92' : (G.biomeMeta[disp] || { color: '#b9ad92' }).color;
+      hist.set(col, (hist.get(col) || 0) + 1);
+    }
+  }
+  check(`小地图采样 0 落空 (实测 ${outside}/${W * H})`, outside === 0, `${outside} 像素落在窗口外`);
+  check(`小地图画出多种地形色 (实测 ${hist.size} 种)`, hist.size >= 3, `仅 ${hist.size} 种 → 疑似又退回空框`);
+
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'js', 'main.js'), 'utf8');
+  /* 先剥注释再判断 — 否则「解释这个 bug」的注释本身会被误判为仍在引用 (不是 `"//"` 在 URL 里的场景: 前一字符为冒号则跳过) */
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:\w])\/\/[^\n]*/g, '$1');
+  check('main.js 不再引用不存在的 mmData.q1/r1 (源码守卫)',
+    !/mmData\.q1|mmData\.r1/.test(code), '仍在使用 mmData.q1/mmData.r1');
+}
+
 console.log('== 元信息 ==');
 await fetchMeta();
 
@@ -119,6 +199,12 @@ checkGeometry();
 
 console.log('\n== DOM id 契约 ==');
 checkDomIds();
+
+console.log('\n== 静态层置脏契约 ==');
+checkStaticDirtyContract();
+
+console.log('\n== 小地图契约 ==');
+await checkMinimap();
 
 console.log(`\n========== 前端模拟: ${failures === 0 ? '全部通过 ✔' : failures + ' 项失败 ✘'} ==========`);
 process.exit(failures === 0 ? 0 : 1);

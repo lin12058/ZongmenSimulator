@@ -70,6 +70,9 @@ function decodePng(buf) {
 /* ---------- 判据: 是否真的渲染出内容 ----------
  * 空白(只有纸色底/UI) : mean ≈ (237,227,205), 颜色种类少
  * 真实地形           : mean ≈ (128,148,139), 颜色种类上千
+ * 中途帧(流式未完成) : 背景大片未加载 → 偏黑, mean 很低 (实测 34)
+ *   —— 必须与「空白」区分对待: 它不是环境抖动, 而是虚拟时钟在 WS 数据
+ *      到齐前就截了帧; 应当加大预算重试而不是直接采信。
  */
 function analyze(file) {
   const { w, h, ch, px } = decodePng(fs.readFileSync(file));
@@ -84,10 +87,12 @@ function analyze(file) {
     }
   }
   const mean = (sr + sg + sb) / n / 3;
-  return { w, h, mean: +mean.toFixed(1), colors: seen.size, blank: mean > 210 || seen.size < 300 };
+  const blank = mean > 210 || seen.size < 300;       // 纯纸色底 = 没画出来
+  const partial = !blank && mean < 70;               // 偏黑 = 流式未加载完
+  return { w, h, mean: +mean.toFixed(1), colors: seen.size, blank, partial };
 }
 
-console.log(`== headless 截图 (最多 ${ATTEMPTS} 次, 空白自动重试+递增预算) ==`);
+console.log(`== headless 截图 (最多 ${ATTEMPTS} 次, 空白/中途帧自动重试+递增预算) ==`);
 console.log(`  url = ${URL_}`);
 for (let k = 1; k <= ATTEMPTS; k++) {
   const prof = path.join(os.tmpdir(), 'zm-shot-' + process.pid + '-' + k);
@@ -101,11 +106,12 @@ for (let k = 1; k <= ATTEMPTS; k++) {
   let info = null;
   try { info = analyze(OUT); } catch (e) { /* 未生成 */ }
   if (!info) { console.log(`  尝试 ${k} (budget=${budget}): 未生成截图 (exit=${r.status}) — 重试`); continue; }
-  console.log(`  尝试 ${k} (budget=${budget}): ${info.w}x${info.h} mean=${info.mean} colors=${info.colors} → ${info.blank ? '空白(虚拟时钟/GPU 抖动)' : '渲染正常'}`);
-  if (!info.blank) {
+  const verdict = info.blank ? '空白(虚拟时钟/GPU 抖动)' : info.partial ? '中途帧(流式未加载完)' : '渲染正常';
+  console.log(`  尝试 ${k} (budget=${budget}): ${info.w}x${info.h} mean=${info.mean} colors=${info.colors} → ${verdict}`);
+  if (!info.blank && !info.partial) {
     console.log(`\n========== OK: 真实渲染图已保存 ${OUT} ==========`);
     process.exit(0);
   }
 }
-console.log(`\n========== 失败: ${ATTEMPTS} 次均为空白 — 判定为环境问题(headless 虚拟时钟/GPU), 非页面 bug ==========`);
+console.log(`\n========== 失败: ${ATTEMPTS} 次均为空白/中途帧 — 判定为环境问题(headless 虚拟时钟/GPU), 非页面 bug ==========`);
 process.exit(1);

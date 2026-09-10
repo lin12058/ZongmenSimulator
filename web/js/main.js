@@ -288,13 +288,21 @@
     }
 
     /* 图层1 区域 (区域名 + 道路; 实体已拆分到图层2/3) */
+    var regionsApplied = false;
     for (var rg2 = 0; rg2 < resp.regions.length; rg2++) {
       var rg = resp.regions[rg2];
       var rk = rg.i + ',' + rg.j;
       if (!keepR.has(rk)) continue;                // 窗口外: 交给覆盖该区域的邻块
       regionCells.set(rk, { region: rg.region, roads: rg.roads });
       roadsDirty = true;                           // T7: 路网数据变化 → 重绘重建道路几何
+      regionsApplied = true;
     }
+    /* ★ 必须与 chunk/settle/poi/comm 分支一样置静态脏: roadsDirty 与区域名绘制
+       (renderStaticInto 内 584/648 行) 都在 staticDirty 门控的重绘函数里消费。
+       若只置 roadsDirty 而不置 staticDirty, 当「相机静止 + 本块 chunk 未变化」
+       (如重试时该块 chunkData 已存在 → 上面的 chunk 分支整个跳过) 时,
+       renderStaticInto 不会被调用 → 道路几何与区域名一直不刷新。 */
+    if (regionsApplied) markStaticDirty();
 
     /* 图层2/3 实体 (按区域格键覆盖, 天然去重邻块重复携带) */
     if (resp.settle) {
@@ -445,13 +453,19 @@
     var ctx = mmBase.getContext('2d');
     var img = ctx.createImageData(W, H);
     var colCache = {};
+    /* ★ 服务端 /api/map/fields 的响应键是 { q0, r0, nq, nr, d } —— 没有 q1/r1。
+       此前这里直接读 mmData.q1/r1 (恒为 undefined), 于是 `t.q <= undefined` 恒假
+       → 每个像素都被判为「窗口外」→ 整幅小地图恒为兜底色 #b9ad92 的空框
+       (小地图自上线起就从未显示过地形)。上界必须由 q0+nq-1 / r0+nr-1 推出。 */
+    var mq1 = mmData ? mmData.q0 + mmData.nq - 1 : -1;
+    var mr1 = mmData ? mmData.r0 + mmData.nr - 1 : -1;
     for (var py = 0; py < H; py++) {
       for (var px = 0; px < W; px++) {
         var wx = cam.x + (px - W / 2) * SCALE;
         var wy = cam.y + (py - H / 2) * SCALE;
         var t = MC.pxToTile(wx, wy);
         var disp = -1;
-        if (mmData && t.q >= mmData.q0 && t.q <= mmData.q1 && t.r >= mmData.r0 && t.r <= mmData.r1) {
+        if (mmData && t.q >= mmData.q0 && t.q <= mq1 && t.r >= mmData.r0 && t.r <= mr1) {
           disp = mmData.data[(t.r - mmData.r0) * mmData.nq + (t.q - mmData.q0)];
         }
         var col = colCache[disp] || (colCache[disp] = disp < 0 ? '#b9ad92'
@@ -982,10 +996,15 @@
     $('btnVeins').addEventListener('click', function () {
       showVeins = !showVeins;
       this.classList.toggle('off', !showVeins);
+      /* ★ 开关只改数据不改相机, 而 staticNeedsRedraw 在相机静止时返回 false →
+         不置脏则静态层 (灵脉晕圈/七星花/名牌) 不会重绘, 要等下一次平移/缩放
+         才生效。这里必须立即置脏 (用户点击应即时反馈)。 */
+      forceStaticDirty();
     });
     $('btnLabels').addEventListener('click', function () {
       showLabels = !showLabels;
       this.classList.toggle('off', !showLabels);
+      forceStaticDirty();          // 同上: 区域名/聚落名/灵脉名牌都在静态层
     });
     $('infoClose').addEventListener('click', hideInfo);
     window.addEventListener('resize', onResize);
