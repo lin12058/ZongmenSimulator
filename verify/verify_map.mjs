@@ -289,9 +289,11 @@ async function wsTileOnce(seed, ca, cb) {
 }
 
 /* ---------- 主流程 ---------- */
-const seeds = ['42', '20260909'];
-const blocks = [[0, 0], [1, 0], [0, 1], [-1, 1], [-2, 3], [5, 7]];
-const tiles = [[0, 0], [3, -2], [-8, 5], [12, 9], [-3, -4]];
+/* 采样可外部覆盖 (大范围回归用): node verify_map.mjs <base> '<seedsJSON>' '<blocksJSON>' '<tilesJSON>' */
+const seeds = process.argv[3] ? JSON.parse(process.argv[3]) : ['42', '20260909'];
+const blocks = process.argv[4] ? JSON.parse(process.argv[4]) : [[0, 0], [1, 0], [0, 1], [-1, 1], [-2, 3], [5, 7]];
+const tiles = process.argv[5] ? JSON.parse(process.argv[5]) : [[0, 0], [3, -2], [-8, 5], [12, 9], [-3, -4]];
+if (blocks.length > 6) console.log(`(大范围模式: ${seeds.length} seed × ${blocks.length} 块)`);
 
 console.log('== 元信息 (HTTP) ==');
 const meta = await getJson('/api/map/meta?seed=x');
