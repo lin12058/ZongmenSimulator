@@ -78,6 +78,25 @@ function checkGeometry() {
   check('geo() 结果被缓存复用', MC.geo() === G);
 }
 
+/* DOM id 契约: main/renderer/textures 里 $('x') / getElementById('x') 引用的 id
+   必须在 index.html 中真实存在 —— 这类不匹配只在浏览器运行时炸, 静态核对是唯一便宜手段。 */
+function checkDomIds() {
+  const html = fs.readFileSync(path.join(ROOT, 'web', 'index.html'), 'utf8');
+  const ids = new Set([...html.matchAll(/\bid=["']([^"']+)["']/g)].map((m) => m[1]));
+  check('index.html 定义了 id', ids.size > 10, String(ids.size));
+  const bad = [];
+  let used = 0;
+  for (const f of ['main.js', 'renderer.js', 'textures.js', 'mapclient.js']) {
+    const src = fs.readFileSync(path.join(ROOT, 'web', 'js', f), 'utf8');
+    for (const m of src.matchAll(/\$\('([^']+)'\)|getElementById\('([^']+)'\)/g)) {
+      const id = m[1] || m[2];
+      used++;
+      if (!ids.has(id)) bad.push(`${f}:${id}`);
+    }
+  }
+  check(`JS 引用的 ${used} 处 DOM id 全部已定义`, bad.length === 0, bad.join(' '));
+}
+
 console.log('== 元信息 ==');
 await fetchMeta();
 
@@ -97,6 +116,9 @@ await fetchFields(seed, -10, 10, -10, 10);
 
 console.log('\n== 几何公式往返 ==');
 checkGeometry();
+
+console.log('\n== DOM id 契约 ==');
+checkDomIds();
 
 console.log(`\n========== 前端模拟: ${failures === 0 ? '全部通过 ✔' : failures + ' 项失败 ✘'} ==========`);
 process.exit(failures === 0 ? 0 : 1);

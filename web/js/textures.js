@@ -13,6 +13,11 @@
   'use strict';
   var NL = global.NoiseLib;
 
+  /* COLS × ROWS = 「群系区块」尺寸: 8 个群系列 × 每群系 4 个变体行
+     (对应格底编码 tile = biome*4 + variant, variant 由 mapgen 用 %4 保证 0..3)。
+     ⚠ 注意 ROWS 不是「图集总行数」—— 图集为 COLS 列 × ATLAS_ROWS(8) 行:
+       第 0~3 行群系变体 / 第 4 行灵脉格底(VEIN_ROW) / 第 5~7 行立体精灵。
+       与着色器对齐的总行数一律用 ATLAS_ROWS。 */
   var TILE = 128, COLS = 8, ROWS = 4;  // TILE: 笔触绘制的逻辑坐标系
   var PX = TILE * 2;                   // 实际纹素(256px/格), 提升放大后的清晰度
 
