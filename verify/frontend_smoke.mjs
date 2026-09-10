@@ -213,6 +213,52 @@ async function checkPalettes() {
     /function geoVariantColor[\s\S]{0,220}?geo\.variantRGB/.test(src), '疑似改回硬编码副本');
 }
 
+/* 解码字段契约: 前端对解码结构的属性读取必须落在解码器产出的字段集内。
+   —— 这正是 N11 当时的 bug 类别 (小地图读 `mmData.q1/r1`, 而 `/api/map/fields` 从未下发
+   q1/r1 → 恒 undefined → 越界判断恒假 → 小地图自上线起一直是空框)。
+   只扫「变量名无歧义」的 4 类 (resp/cm/st/lr), 歧义名 (m/g/rg/v 会被当作 meta/字段网格/
+   内层对象等复用) 跳过以免误报; cm.elementRGB 是客户端本地 memo 字段, 白名单放行。 */
+function checkDecodedFieldAccess() {
+  const pb = fs.readFileSync(path.join(ROOT, 'web', 'js', 'pb.js'), 'utf8');
+  /* 抽出一个 decode/parse 函数的产出字段集: 既含对象字面量初值, 也含 m.xxx = 赋值 */
+  const fieldsOf = (fn) => {
+    const m = pb.match(new RegExp('function ' + fn + '\\s*\\([^)]*\\)\\s*\\{([\\s\\S]*?)\\n  \\}'));
+    if (!m) return null;
+    const body = m[1], s = new Set();
+    for (const o of body.matchAll(/\{\s*([a-zA-Z_$][\w$]*\s*:[^{}]*?)\}/g))
+      for (const kv of o[1].split(',')) {
+        const k = kv.split(':')[0].trim();
+        if (/^[a-zA-Z_$][\w$]*$/.test(k)) s.add(k);
+      }
+    for (const a of body.matchAll(/\bm\.([a-zA-Z_$][\w$]*)\s*(?:=|\.push)/g)) s.add(a[1]);
+    return s;
+  };
+  const shapes = {
+    resp: fieldsOf('decodeTileResponse'),
+    cm: fieldsOf('decodeCommMsg'),
+    st: fieldsOf('parsePlaceEntity'),
+    lr: fieldsOf('decodeLoginResponse'),
+  };
+  check('解码字段集解析成功 (resp/cm/st/lr)',
+    Object.values(shapes).every((s) => s && s.size >= 3),
+    Object.entries(shapes).map(([k, v]) => `${k}=${v ? v.size : 'null'}`).join(' '));
+
+  const whitelist = { cm: new Set(['elementRGB']), resp: new Set(), st: new Set(), lr: new Set() };
+  const bad = [];
+  let used = 0;
+  for (const f of ['main.js', 'mapclient.js']) {
+    const src = fs.readFileSync(path.join(ROOT, 'web', 'js', f), 'utf8');
+    for (const mm of src.matchAll(/\b(resp|cm|st|lr)\.([a-zA-Z_$][\w$]*)/g)) {
+      const [, obj, prop] = mm;
+      used++;
+      if (!shapes[obj] || shapes[obj].has(prop) || whitelist[obj].has(prop)) continue;
+      bad.push(`${f}:${obj}.${prop}`);
+    }
+  }
+  check(`前端对解码结构的 ${used} 处属性读取全部有对应字段`,
+    bad.length === 0, [...new Set(bad)].sort().join(' '));
+}
+
 console.log('== 元信息 ==');
 await fetchMeta();
 
@@ -244,6 +290,9 @@ await checkMinimap();
 
 console.log('\n== 色板契约 ==');
 await checkPalettes();
+
+console.log('\n== 解码字段契约 ==');
+checkDecodedFieldAccess();
 
 console.log(`\n========== 前端模拟: ${failures === 0 ? '全部通过 ✔' : failures + ' 项失败 ✘'} ==========`);
 process.exit(failures === 0 ? 0 : 1);
