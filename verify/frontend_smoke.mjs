@@ -1,7 +1,11 @@
 /* ============================================================
  * frontend_smoke.mjs — 在 Node 中「完整模拟前端」数据流
  *   直接复用 web/js/pb.js + web/js/mapclient.js (与浏览器同份) 拉取
- *   /api/map/* 后解码, 验证几何公式 + 协议还原正确, 不依赖浏览器/GL。
+ *   /api/map/* 后解码, 验证元信息常量 + 几何往返 + HTTP 侧数据还原, 不依赖浏览器/GL。
+ *
+ *   注: chunk/region/comm 在 WebSocket 单块重构后已下线 HTTP 接口,
+ *       其数据正确性由 verify_map.mjs (WS 链路) / w1_client_revs.mjs 覆盖;
+ *       本脚本只负责「HTTP 辅助接口 (meta/tile/fields) + 几何公式」这一层。
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,6 +17,8 @@ const BASE = process.argv[2] || 'http://127.0.0.1:8140';
 
 /* 全局注入 window = globalThis 以原样执行浏览器脚本 */
 global.window = globalThis;
+/* mapclient.js 模块级会读 location.protocol/host 拼 WS_URL — Node 里必须提供 */
+global.location = { protocol: 'http:', host: BASE.replace(/^https?:\/\//, '') };
 /* Node 中 fetch 必须是绝对 URL, 给 mapclient.js 的相对路径补上 base */
 const _realFetch = global.fetch;
 global.fetch = (url, opts) =>
@@ -38,83 +44,56 @@ async function fetchMeta() {
   return m;
 }
 
-async function fetchChunk(seed, ca, cb) {
-  const arr = await MC.chunk(seed, ca, cb);
-  check(`chunk(${ca},${cb}) count>0 & 长度`, arr.count > 0 && arr.tiles.length === arr.count,
-    `count=${arr.count} tiles=${arr.tiles.length}`);
-  /* 抽查: 第 0 个地块的 lat 通过 (cq[i]-16) + ca*S + (cr[i]-16)+cb*S 反解出的
-   * 绝对坐标应与 arr.centers 完全一致 (因为前端 chunkToArrays 直接用其反解公式) */
-  return arr;
-}
-
-async function fetchRegion(seed, i, j) {
-  const r = await MC.region(seed, i, j);
-  check(`region(${i},${j}) i/j 精确`, r.i === i && r.j === j, `${r.i}/${r.j}`);
-  check(`region name 非空`, typeof r.region?.name === 'string' && r.region.name.length > 0);
-  check(`region 列表是数组`, Array.isArray(r.settlements) && Array.isArray(r.roads));
-  return r;
-}
-
-async function fetchComm(seed, ci, cj) {
-  const c = await MC.comm(seed, ci, cj);
-  if (c.exists) {
-    check(`comm(${ci},${cj}) 主格坐标`, typeof c.q === 'number' && typeof c.r === 'number');
-    check(`comm 灵脉是数组`, Array.isArray(c.veins));
-  } else {
-    check(`comm(${ci},${cj}) 不存在标记`, c.exists === false && Array.isArray(c.veins));
-  }
-  return c;
-}
-
 async function fetchTile(seed, q, r) {
   const t = await MC.tile(seed, q, r);
   check(`tile(${q},${r}) e in [0,1]`, t.e >= 0 && t.e <= 1, String(t.e));
-  check(`tile biome 0..7`, t.biome >= 0 && t.biome <= 7, String(t.biome));
+  check(`tile(${q},${r}) biome 0..7`, t.biome >= 0 && t.biome <= 7, String(t.biome));
+  check(`tile(${q},${r}) 区域名非空`, typeof t.regionName === 'string' && t.regionName.length > 0,
+    String(t.regionName));
   return t;
 }
 
 async function fetchFields(seed, q0, q1, r0, r1) {
   const g = await MC.fieldGrid(seed, q0, q1, r0, r1);
-  check(`fields 网格大小`, g.nq === q1 - q0 + 1 && g.nr === r1 - r0 + 1,
-    `${g.nq}x${g.nr}`);
-  check(`fields data 字节数`, g.data.length === g.nq * g.nr);
+  check(`fields 网格大小`, g.nq === q1 - q0 + 1 && g.nr === r1 - r0 + 1, `${g.nq}x${g.nr}`);
+  check(`fields data 字节数`, g.data.length === g.nq * g.nr, String(g.data.length));
   return g;
 }
 
 function checkGeometry() {
   const G = MC.geo();
-  for (let i = 0; i < 50; i++) {
-    const q = (Math.random() * 200 | 0) - 100;
-    const r = (Math.random() * 200 | 0) - 100;
+  let bad = 0, samples = 0;
+  for (let i = 0; i < 200; i++) {
+    const q = (Math.random() * 2000 | 0) - 1000;
+    const r = (Math.random() * 2000 | 0) - 1000;
     const w = MC.tileToWorld(q, r);
     const back = MC.pxToTile(w.x, w.y);
+    samples++;
     if (back.q !== q || back.r !== r) {
-      failures++;
-      console.log(`  FAIL 几何往返 (${q},${r}) -> (${back.q},${back.r})`);
+      bad++;
+      if (bad <= 3) console.log(`  FAIL 几何往返 (${q},${r}) -> (${back.q},${back.r})`);
     }
   }
-  console.log('  PASS 几何往返 50 次');
+  check(`几何往返 ${samples} 次 (大坐标 ±1000)`, bad === 0, `不一致 ${bad} 次`);
+  check('geo() 结果被缓存复用', MC.geo() === G);
 }
 
 console.log('== 元信息 ==');
 await fetchMeta();
 
 const seed = '42';
-console.log(`\n== 区块/区域/群落/单格/字段 模拟前端 (seed=${seed}) ==`);
-await fetchChunk(seed, 0, 0);
-await fetchChunk(seed, 1, 0);
-await fetchChunk(seed, 0, 1);
-await fetchChunk(seed, -2, 3);
-await fetchRegion(seed, 0, 0);
-await fetchRegion(seed, 1, 0);
-await fetchRegion(seed, -1, 0);
-await fetchComm(seed, 0, 0);
-await fetchComm(seed, 1, 0);
-await fetchComm(seed, -1, 1);
+console.log(`\n== HTTP 辅助接口模拟前端 (seed=${seed}) ==`);
 await fetchTile(seed, 0, 0);
 await fetchTile(seed, 5, -3);
 await fetchTile(seed, -8, 7);
 await fetchFields(seed, -10, 10, -10, 10);
+
+/* HTTP tile 缓存头已改 no-cache (内容随 roadVer 变), 顺带断言不再给长缓存 */
+{
+  const r = await fetch(BASE + '/api/map/tile?seed=42&q=0&r=0');
+  const cc = r.headers.get('cache-control') || '';
+  check('tile 响应头不再含 max-age 长缓存', !/max-age=(?!0)/.test(cc), cc);
+}
 
 console.log('\n== 几何公式往返 ==');
 checkGeometry();
