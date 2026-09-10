@@ -46,6 +46,7 @@
   var keepChunk = new Set(), keepR = new Set(), keepC = new Set();
 
   var timeSec = 0, lastT = 0;
+  var frameCount = 0;              // 渲染帧计数 (capture=1 截图须等「数据到达后至少渲染过一帧」)
   var minimapDirty = true, minimapTimer = 0;
   var mmReq = null, mmData = null;      // 小地图网格请求/数据
   var mmInFlight = false;               // 同窗口去重, 避免狂发同窗口请求
@@ -1016,6 +1017,7 @@
       if (metaReady) updateStreaming();
       renderer.render(cam, timeSec);
       drawOverlay();
+      frameCount++;
       minimapTimer += dt;
       if ((minimapDirty && minimapTimer > 0.4) || minimapTimer > 1.5) {
         minimapTimer = 0;
@@ -1096,12 +1098,21 @@
 
       /* 调试钩子: capture=1 时等待块数据真实到达 (≥3 块或 25s 兜底) 再把
          canvas 合成图回传后端, 用于 headless 截图验证。
-         不用固定 4s 定时: WS 单块首次构建含 V8 冷启动+A* 道路, 耗时波动大。 */
+         不用固定 4s 定时: WS 单块首次构建含 V8 冷启动+A* 道路, 耗时波动大。
+         ★ 还必须等「就绪之后至少渲染过一帧」(frameCount 前进): headless 虚拟
+           时钟下 timer 会跑到 WS 数据之前, 若立刻合成, drawImage 读到的是从未
+           渲染过的 framebuffer (alpha:false → 不透明白黑), 截出全黑图
+           (这正是此前 capture.png 全黑的根因)。
+           注: 合成**不放进 rAF 回调** —— 虚拟时钟可能饿死 rAF, 那样会永不截图;
+           改为「帧计数门槛 + 超时兜底」, 两种时钟下都必然会产出文件。 */
       if (new URLSearchParams(location.search).get('capture') === '1') {
         var snapStart = Date.now();
+        var readyFrame = -1;
         var trySnap = function () {
           var ready = chunkData.size >= 3 && regionCells.size >= 1;
-          if (!ready && Date.now() - snapStart < 25000) { setTimeout(trySnap, 500); return; }
+          if (ready && readyFrame < 0) readyFrame = frameCount;
+          var timedOut = Date.now() - snapStart >= 25000;
+          if (!timedOut && (!ready || frameCount <= readyFrame)) { setTimeout(trySnap, 200); return; }
           try {
             var canvas = document.createElement('canvas');
             canvas.width = els.app.clientWidth;
