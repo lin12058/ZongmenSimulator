@@ -7,7 +7,17 @@ using Zongmen.Web;
  *   单进程: C# 默认代理前端 (web/) + /api/map/* 权威地图服务
  * ============================================================ */
 
-var builder = WebApplication.CreateBuilder(args);
+/* 配置根 = exe 所在目录。CreateBuilder(args) 默认以「当前工作目录」为 ContentRoot,
+   且 appsettings.json 是在 CreateBuilder 期间加载的 —— 从仓库根执行
+   ./Server/Zongmen/bin/Debug/net8.0/Zongmen.exe 时根目录并无 appsettings.json,
+   于是整份配置被静默忽略 (Port/MaxSeeds/PersistEnabled 全部回落代码默认值)。
+   用 WebApplicationOptions 在「配置加载之前」指定 ContentRoot, 配置即按预期生效;
+   资源定位 (web/引擎脚本/db) 仍由 ZongmenPaths.FindRoot 自 exe 目录向上查找。 */
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory,
+});
 
 var options = builder.Configuration.GetSection("Zongmen").Get<ZongmenOptions>() ?? new ZongmenOptions();
 var contentRoot = builder.Environment.ContentRootPath;
@@ -36,6 +46,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine($"  前端目录: {webDir}");
     Console.WriteLine($"  世界脚本: {ZongmenPaths.ResolveEngineJsDir(options, contentRoot)}");
     Console.WriteLine($"  数据库:   {(options.PersistEnabled ? ZongmenPaths.ResolveDbPath(options, contentRoot) : "(仅内存, 持久化关闭)")}");
+    Console.WriteLine($"  配置根:   {contentRoot}  (MaxSeeds={options.MaxSeeds})");
     Console.WriteLine($"  访问地址: http://127.0.0.1:{options.Port}");
     Console.WriteLine("======================================================");
 });

@@ -119,21 +119,25 @@ public static class MapWsHandler
 
         try
         {
-            var resp = svc.GetTileBlock(req.Seed, req.I, req.J, req.Mask, req.LastRevs.Count > 0 ? req.LastRevs : null);
+            /* mask 归一 + 鉴权裁剪都提前到构建之前 (设计 §5):
+               - 0 语义等同 All (协议约定);
+               - 未登录: 从请求 mask 中剔除实体层, 使 GetTileBlock 根本不构建
+                 settle/poi/comm (旧实现是「先全量构建再清空」, 白烧 V8 预算);
+               - 被剔除的位记入 DeniedMask 回显, 且只针对本次真正请求的位
+                 (避免「仅 rev 未变」被误报为 denied)。 */
+            uint reqMask = req.Mask == 0 ? (uint)TileMask.All : req.Mask & (uint)TileMask.All;
+            const uint entityMask = (uint)(TileMask.Settle | TileMask.Poi | TileMask.Comm);
+            uint allowedMask = session.Authed ? reqMask : reqMask & ~entityMask;
+
+            var resp = svc.GetTileBlock(req.Seed, req.I, req.J, allowedMask,
+                                        req.LastRevs.Count > 0 ? req.LastRevs : null);
             resp.Seq = req.Seq;
-            /* 未登录: 拒绝实体层 (设计 §5), 回显 DeniedMask 供客户端提示 */
             if (!session.Authed)
             {
-                uint denied = 0;
-                if (resp.Settle != null || (resp.Mask & (uint)TileMask.Settle) != 0) denied |= (uint)TileMask.Settle;
-                if (resp.Poi != null || (resp.Mask & (uint)TileMask.Poi) != 0) denied |= (uint)TileMask.Poi;
-                if (resp.Comms.Count > 0 || (resp.Mask & (uint)TileMask.Comm) != 0) denied |= (uint)TileMask.Comm;
+                uint denied = reqMask & entityMask;
                 if (denied != 0)
                 {
                     resp.DeniedMask = denied;
-                    resp.Settle = null;
-                    resp.Poi = null;
-                    resp.Comms.Clear();
                     resp.Err = "未登录: 聚落/景点/灵脉图层需要登录后获取";
                 }
             }

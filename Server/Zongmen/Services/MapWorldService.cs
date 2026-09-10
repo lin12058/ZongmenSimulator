@@ -24,6 +24,11 @@ namespace Zongmen.Services;
  * T3: SQLite 整理 (Flush + PruneExcept) 移入后台定时任务, 不再依赖
  *     /stats 第 N 次请求偶发触发。
  * T11: tile/grid/region 热缓存统一 LruCache (命中即提序, 单条淘汰)。
+ * W1 (rev/mask 一致性): GetTileBlock 的 mask 由调用方解析(0→All)+鉴权裁剪后传入;
+ *     resp.Mask 即「客户端可视为持有」的图层位 — 客户端只更新 mask 命中位的 rev,
+ *     杜绝「非全量 mask 请求后把未收到图层的 rev 记为已持有」的永久缺层。
+ * W2: blockLayersJson 结果与 chunk/comm 解压产物按 key 加 LRU; tile 命中比对
+ *     service 层 roadVer 免抢 V8 门闩; PruneExcept 仅在确有世界被淘汰时执行。
  * ============================================================ */
 
 public sealed class MapWorldService : IDisposable
@@ -39,12 +44,25 @@ public sealed class MapWorldService : IDisposable
     private const int TileCacheCap = 1024;
     private const int GridCacheCap = 64;
     private const int RegionHotCap = 512;
+    private const int RawCacheCap = 2048;      // chunk/comm 解压后 protobuf (免每块重复 GzUnwrap)
+    private const int BlockLayersCap = 1024;   // blockLayersJson 结果 (块归属映射, 内容确定)
     private readonly LruCache<TileEntry> _tileCache = new(TileCacheCap);
     private readonly LruCache<string> _gridCache = new(GridCacheCap);
     private readonly LruCache<byte[]> _regionHot = new(RegionHotCap);
+    private readonly LruCache<byte[]> _rawCache = new(RawCacheCap);
+    private readonly LruCache<(int, int)[][]> _blockLayersCache = new(BlockLayersCap);
 
     /// <summary>tile 缓存条目: 值 + 生成时的 VM 道路版本号 (T4)。</summary>
     private sealed record TileEntry(byte[] Gz, long RoadVer);
+
+    /// <summary>service 层最近观测到的 roadVer (按 seed 前缀)。
+    /// roadVer 只在区域包生成(内含 A*)时前进, 故 tile 缓存命中时比对这里即可免抢 V8 门闩。</summary>
+    private readonly ConcurrentDictionary<string, long> _roadVerCache = new();
+
+    /// <summary>本会话出现过的 seed 前缀 (World() 时登记) — 维护任务据此判定
+    /// 「是否有已淘汰世界留下无主行」。必须在「取用/建立」时登记, 否则某个世界
+    /// 若在同一维护周期内建立又被淘汰, 其前缀将不被记住 → 残留行永不清理。</summary>
+    private readonly ConcurrentDictionary<string, byte> _seenSeedPrefixes = new();
 
     /* R9: per-key in-flight 去重门闩 (key → lock 对象); 构建完成即移除,
         移除后新 miss 会再查缓存命中, 不会重复 build */
@@ -65,7 +83,11 @@ public sealed class MapWorldService : IDisposable
         _maintTask = Task.Run(MaintenanceLoopAsync);
     }
 
-    private JsWorldVm World(string seed) => _host.GetOrCreate(seed);
+    private JsWorldVm World(string seed)
+    {
+        _seenSeedPrefixes.TryAdd(WorldKeys.SeedPrefix(seed), 0);   // P3: 登记已用过的世界
+        return _host.GetOrCreate(seed);
+    }
 
     /* ---------------- 区块 ---------------- */
     public byte[] GetChunkBytes(string seed, int ca, int cb)
@@ -75,7 +97,7 @@ public sealed class MapWorldService : IDisposable
         if (hit != null) return hit;
 
         /* R9: 同 key 并发 miss 合并 — 只 build 一次 */
-        return BuildOnce(key, seed, () =>
+        return BuildOnce(key, () =>
         {
             var vm = World(seed);
             var gz = BuildChunk(vm, ca, cb);
@@ -101,7 +123,7 @@ public sealed class MapWorldService : IDisposable
         /* P5: 单段定宽缓冲解包。JS 布局 (全小端):
              地块段 n×11B = [cq u8][cr u8][tiles u8][elev u16][hash u16][neigh u32]
              精灵段 pn×13B = [pdx f32][pdy f32][psp u8][ph u16][pe u16] */
-        const int tileBytes = 11, propBytes = 13;
+        const int tileBytes = 11;   // 地块段每格字节数 (精灵段长度由 pn 与 raw 总长校验)
         var raw = B64(root, "d");
         int o = 0;
         p.Cq = Slice(raw, o, count); o += count;
@@ -133,14 +155,18 @@ public sealed class MapWorldService : IDisposable
         var hit = _regionHot.Get(key) ?? _mem.GetDataBytes(key);
         if (hit != null) return hit;
 
-        return BuildOnce(key, seed, () =>
+        var gz = BuildOnce(key, () =>
         {
             var vm = World(seed);
-            var gz = BuildRegion(vm, i, j);
-            _regionHot.Set(key, gz);
-            _mem.SetData(key, gz);
-            return gz;
+            var g = BuildRegion(vm, i, j);
+            _regionHot.Set(key, g);
+            _mem.SetData(key, g);
+            return g;
         });
+        /* 区域包含 A*(roadsNear) → 可能使 roadCache 前进; 刷新 service 层 roadVer,
+           使后续 tile 缓存命中无需再进 V8 门闩 (T4 语义不变: 版本变则旧 tile 失效)。 */
+        _roadVerCache[WorldKeys.SeedPrefix(seed)] = World(seed).RoadVersion();
+        return gz;
     }
 
     private byte[] BuildRegion(JsWorldVm vm, int i, int j)
@@ -211,7 +237,7 @@ public sealed class MapWorldService : IDisposable
         var hit = _mem.GetDataBytes(key) ?? ReadSqlBackfill(key);      // T8: 库命中回填 _mem
         if (hit != null) return hit;
 
-        return BuildOnce(key, seed, () =>
+        return BuildOnce(key, () =>
         {
             var vm = World(seed);
             var gz = BuildComm(vm, ci, cj);
@@ -259,7 +285,7 @@ public sealed class MapWorldService : IDisposable
     }
 
     /* R9: per-key 构建门闩 (chunk/region/comm 共用) */
-    private byte[] BuildOnce(string key, string seed, Func<byte[]> build)
+    private byte[] BuildOnce(string key, Func<byte[]> build)
     {
         var gate = _buildGates.GetOrAdd(key, _ => new object());
         lock (gate)
@@ -312,9 +338,18 @@ public sealed class MapWorldService : IDisposable
         revs.Bump((uint)layers);
     }
 
-    public TileResponse GetTileBlock(string seed, int i, int j, uint maskReq, List<int>? lastRevs)
+    /// <summary>
+    /// 构造单块响应。mask 为「已解析、已鉴权」的图层位 (由调用方完成 0→All 归一与
+    /// 未登录裁剪); 本方法按字面语义处理, 不再自行把 0 当 All。
+    /// 语义约定: resp.Mask = 本次「客户端可视为持有」的图层位
+    ///   = mask 中「已下发数据」或「rev 命中(客户端本就持有)」的位。
+    ///   恒等于入参 mask —— 因为 Need(bit)=true 时会下发, Need=false 时客户端已持有。
+    /// 客户端据此只更新 mask 命中位的 rev (未命中位保持 0 = 未持有), 从根上避免
+    /// 「非全量 mask 请求后把未收到图层的 rev 记为已持有」导致的永久缺层。
+    /// </summary>
+    public TileResponse GetTileBlock(string seed, int i, int j, uint mask, List<int>? lastRevs)
     {
-        var mask = maskReq == 0 ? (uint)TileMask.All : maskReq & (uint)TileMask.All;
+        mask &= (uint)TileMask.All;
         var revs = _blockRev.GetOrAdd("blk:" + WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j,
                                       _ => new BlockRevs());
         int[] revArr = [revs.Chunk, revs.Region, revs.Settle, revs.Poi, revs.Comm];
@@ -334,11 +369,11 @@ public sealed class MapWorldService : IDisposable
 
         var vm = World(seed);
         if (needChunk)
-            resp.Chunk = GzUnwrap(GetChunkBytes(seed, i, j));
+            resp.Chunk = UnwrapCached(WorldKeys.Chunk(seed, i, j), GetChunkBytes(seed, i, j));
 
-        /* 块归属映射: 仅在需要 region/settle/poi/comm 层时向 JS 取一次 */
+        /* 块归属映射: 仅在需要 region/settle/poi/comm 层时向 JS 取一次 (结果走 LRU) */
         ((int, int)[] regions, (int, int)[] comms)? layers =
-            (needRegion || needSettle || needPoi || needComm) ? GetBlockLayers(vm, i, j) : null;
+            (needRegion || needSettle || needPoi || needComm) ? GetBlockLayers(vm, seed, i, j) : null;
 
         /* 图层1/2/3 共用区域包: 聚落实体从 RegionPack.settlements 拆出 */
         if (needRegion || needSettle || needPoi)
@@ -384,7 +419,7 @@ public sealed class MapWorldService : IDisposable
         if (needComm)
         {
             foreach (var (ci, cj) in layers!.Value.comms)
-                resp.Comms.Add(GzUnwrap(GetCommBytes(seed, ci, cj)));
+                resp.Comms.Add(UnwrapCached(WorldKeys.Comm(seed, ci, cj), GetCommBytes(seed, ci, cj)));
         }
         return resp;
     }
@@ -396,13 +431,20 @@ public sealed class MapWorldService : IDisposable
         Tier = s.Tier, State = s.State, ExpireTs = s.ExpireTs,
     };
 
-    /* 块归属映射: (regions[], comms[]) — JS 权威 (blockLayersJson) */
-    private ((int, int)[] regions, (int, int)[] comms) GetBlockLayers(JsWorldVm vm, int i, int j)
+    /* 块归属映射: (regions[], comms[]) — JS 权威 (blockLayersJson)
+       结果仅依赖 (seed,i,j) 且内容确定 (region/comm 归属映射与事件无关),
+       故按 seedprefix:i:j 加 LRU, 免每次块请求重跑 V8 + JSON 解析。 */
+    private ((int, int)[] regions, (int, int)[] comms) GetBlockLayers(JsWorldVm vm, string seed, int i, int j)
     {
+        var key = WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j;
+        var cached = _blockLayersCache.Get(key);
+        if (cached != null) return (cached[0], cached[1]);
+
         using var d = JsonDocument.Parse(vm.Call("blockLayersJson", i, j));
         var r = d.RootElement;
         var regions = ReadPairs(r.GetProperty("regions"));
         var comms = ReadPairs(r.GetProperty("comms"));
+        _blockLayersCache.Set(key, [regions, comms]);
         return (regions, comms);
     }
 
@@ -422,6 +464,18 @@ public sealed class MapWorldService : IDisposable
 
     private static byte[] GzUnwrap(byte[] gz) => GZipCodec.Decompress(gz);
 
+    /* chunk/comm 子消息嵌入 TileResponse 前必须解压成原始 protobuf, 而同一 key
+       在多块/多次请求中重复出现 (邻块共享、视野反复) → 解压结果按 key 缓存,
+       免每块重复 GzUnwrap。内容按 (seed,坐标) 确定, 缓存只损失命中率不影响正确性。 */
+    private byte[] UnwrapCached(string key, byte[] gz)
+    {
+        var raw = _rawCache.Get(key);
+        if (raw != null) return raw;
+        raw = GzUnwrap(gz);
+        _rawCache.Set(key, raw);
+        return raw;
+    }
+
     private static T DesFromGz<T>(byte[] gz) => ProtoCodec.DesFromByte<T>(GzUnwrap(gz));
 
     /* T8: SQLite 命中后回填 _mem, 同一 key 后续读取不再走库 */
@@ -437,17 +491,35 @@ public sealed class MapWorldService : IDisposable
     /* T4: 进程内热缓存 — key = "t:<seedprefix>:<q>:<r>", 值带 VM roadVersion。
        tileJson 的 onRoad 语义与 VM roadCache 相关 (点击零 A*, 只读已生成道路)。
        仅当 roadCache 真有新路落成 (roadVersion 前进) 时旧条目失效重算;
-       区域包缓存命中/流式补齐不再整片作废 tile 缓存。 */
+       区域包缓存命中/流式补齐不再整片作废 tile 缓存。
+       P1: 命中路径比对 service 层 _roadVerCache (区域包生成时刷新) → 免抢 V8 门闩。 */
     public byte[] GetTileBytes(string seed, int q, int r)
     {
         var cacheKey = "t:" + WorldKeys.SeedPrefix(seed) + ":" + q + ":" + r;
-        var vm = World(seed);
         var cached = _tileCache.Get(cacheKey);
-        if (cached != null && cached.RoadVer == vm.RoadVersion())
-            return cached.Gz;
+        if (cached != null)
+        {
+            /* P1: 命中路径优先比对 service 层 roadVer (区域包生成时刷新), 免每次
+               抢 V8 门闩取 RoadVersion — tile 是高频路径(小地图轮询+点击连发)。
+               首次无记录时才进 V8 取一次; roadVer 只在区域包生成时前进, 故此后
+               命中即无锁直返。 */
+            var prefix = WorldKeys.SeedPrefix(seed);
+            if (_roadVerCache.TryGetValue(prefix, out var known))
+            {
+                if (cached.RoadVer == known) return cached.Gz;
+            }
+            else
+            {
+                var v0 = World(seed).RoadVersion();
+                _roadVerCache[prefix] = v0;
+                if (cached.RoadVer == v0) return cached.Gz;
+            }
+        }
 
+        var vm = World(seed);
         var json = vm.Call("tileJson", q, r);
         var ver = vm.RoadVersion();     // 取生成后版本: 若生成途中恰好新路落成, 下次请求会按新版本重算
+        _roadVerCache[WorldKeys.SeedPrefix(seed)] = ver;
         using var d = JsonDocument.Parse(json);
         var rt = d.RootElement;
         var f = rt.GetProperty("f");
@@ -527,6 +599,7 @@ public sealed class MapWorldService : IDisposable
         return System.Text.Json.JsonSerializer.Serialize(new
         {
             liveSeeds = _host.LiveSeeds,
+            maxSeeds = _opt.MaxSeeds,      // 便于验证 appsettings.json 是否真的生效
             dbRows = _sql?.Count() ?? 0,
             memRows = _mem.Count(),
         });
@@ -549,7 +622,19 @@ public sealed class MapWorldService : IDisposable
                         var prefixes = new List<string>();
                         foreach (var seed in _host.Seeds)
                             prefixes.Add("w:" + WorldKeys.SeedPrefix(seed) + ":");
-                        _sql.PruneExcept(prefixes);
+                        /* P3: 仅当「确有某个曾出现过的世界已被淘汰」时才清理 —
+                           否则 DELETE ... NOT(...LIKE OR...) 每 2 分钟白扫全表。
+                           _seenSeedPrefixes 在 World() 处登记; 一旦某前缀不再活跃
+                           (= 该世界被 LRU 淘汰), 才有无主行需要删除。 */
+                        bool stale = false;
+                        foreach (var p in _seenSeedPrefixes.Keys)
+                            if (!prefixes.Contains(p)) { stale = true; break; }
+                        if (stale)
+                        {
+                            _sql.PruneExcept(prefixes);
+                            _seenSeedPrefixes.Clear();      // 已淘汰者的行已删, 记忆重置为当前活跃集
+                        }
+                        foreach (var p in prefixes) _seenSeedPrefixes.TryAdd(p, 0);
                     }
                 }
                 catch (Exception ex)

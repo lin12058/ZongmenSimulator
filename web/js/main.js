@@ -260,10 +260,16 @@
     /* 兜底防御: chunk 缺省 (=服务端按 rev 未变不重发) 但本地从未持有该块 —
        说明 revs 缓存与 chunkData 不一致 (旧版竞态已造成的坏状态, 或不可达
        的遗漏路径)。清 rev 后重新入队, 下一次请求不带 lastRevs → 服务端全量
-       下发, 消除永久空白。 */
+       下发, 消除永久空白。
+       ★ 但服务端**明确报错**时 (resp.err) 不能直接重排: 错误响应几乎立即返回,
+         pumpChunks 会马上再发 → 无退避自旋, 单连接被打满。改走指数退避。 */
     if (!arrays && !chunkData.has(job.key)) {
       MC.blockForget(job.key);
-      chunkQueue.push(job);          // 本回调 finally 的 pumpChunks 会立即消费
+      if (resp.err) {
+        scheduleChunkRetry(job);       // 0.8s→30s 退避, 由 updateStreaming 到期检查重新入队
+      } else {
+        chunkQueue.push(job);          // 纯 rev 不一致: 一次往返即自愈, 无需退避
+      }
       return;
     }
     if (arrays && !chunkData.has(job.key)) {

@@ -79,7 +79,8 @@
   var seq = 0;                     // 请求序号 (回显关联)
   var pending = new Map();         // seq -> {resolve, reject, timer}
   var revs = new Map();            // 'i,j' -> [chunk,region,settle,poi,comm]
-  var reconnectAt = 0;             // 下次允许重连时刻 (退避)
+  var reconnectAt = 0;             // 下次允许重连时刻 (指数退避)
+  var reconnectDelay = 500;        // 当前退避时长 0.5s → ×2 → 15s 封顶
   var WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') +
                location.host + '/ws/map';
   var REQ_TIMEOUT = 20000;         // 单请求超时 (视为可重试网络错误)
@@ -96,6 +97,9 @@
 
   function connect() {
     if (sock && (sock.readyState === 0 || sock.readyState === 1)) return sockReady;
+    /* 退避冷却: 服务端刚宕机/刚断开时, 在此直接拒绝 (可重试错误),
+       由上层 chunkRetry 决定何时再试 —— 避免每次 block() 都立刻发起新握手。 */
+    if (Date.now() < reconnectAt) return Promise.reject(new Error('WS 重连冷却中'));
     sock = null;
     sockReady = new Promise(function (resolve, reject) {
       sockReadyRes = resolve;
@@ -126,9 +130,8 @@
   }
 
   function scheduleReconnect() {
-    var now = Date.now();
-    if (reconnectAt > now) return;
-    reconnectAt = now + 800;       // 主循环每帧都会 pump, 0.8s 冷却即自然的指数退避源
+    reconnectAt = Date.now() + reconnectDelay;              // 0.5s → 1s → 2s … → 15s 封顶
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
   }
   /* 暴露给 main.js: 距下次可重连的毫秒数 (<0 = 立即可连) */
   function reconnectDue() { return Date.now() >= reconnectAt; }
@@ -138,7 +141,10 @@
     var type = u8[0], payload = u8.subarray(1);
     if (type === PB.FRAME.LOGIN) {
       var lr = PB.decodeLoginResponse(payload);
-      if (lr.ok) { if (sockReadyRes) { sockReadyRes(lr); sockReadyRes = null; sockReadyRej = null; } }
+      if (lr.ok) {
+        reconnectDelay = 500;                  // 连接恢复 → 退避重置
+        if (sockReadyRes) { sockReadyRes(lr); sockReadyRes = null; sockReadyRej = null; }
+      }
       else {
         if (sockReadyRej) { sockReadyRej(new Error('登录失败: ' + lr.err)); sockReadyRej = null; sockReadyRes = null; }
         try { sock.close(); } catch (e) { /* 忽略 */ }
@@ -153,13 +159,26 @@
         if (!p) return;                         // 重连前的迟到响应: 丢弃
         pending.delete(resp.seq);
         clearTimeout(p.timer);
-        /* 记录 rev 供下次增量请求 (无论响应是否含全部图层) */
+        /* 记录 rev 供下次增量请求 (设计 §四)。
+           只更新 resp.mask 命中位 —— 未命中位保持原值(无记录则 0=未持有),
+           否则「用非全量 mask 请求」或「未登录被拒」时会把根本没收到数据的
+           图层 rev 记为已持有 → 下次请求服务端判 rev 未变而缺省下发 →
+           该图层(聚落/景点/灵脉)永久缺失。 */
         if (resp.revs && resp.revs.length) {
-          revs.set(resp.i + ',' + resp.j, resp.revs.slice(0, 5));
+          var k2 = resp.i + ',' + resp.j;
+          var next = (revs.get(k2) || [0, 0, 0, 0, 0]).slice(0, 5);
+          var bits = [PB.MASK.CHUNK, PB.MASK.REGION, PB.MASK.SETTLE, PB.MASK.POI, PB.MASK.COMM];
+          for (var b = 0; b < 5; b++) {
+            if ((resp.mask & bits[b]) !== 0 && b < resp.revs.length) next[b] = resp.revs[b];
+          }
+          revs.set(k2, next);
         }
         p.resolve(resp);
       }, function (err) {
+        /* 解压/解码失败: 该帧不可恢复, 直接拒绝全部在途请求 (20s 超时兜底之外
+           的快速失败) → 上层 scheduleChunkRetry 指数退避重取, 避免块长时间悬挂。 */
         console.error('TileResponse 解压/解码失败', err);
+        failAllPending(new Error('TileResponse 解压/解码失败'));
       });
     }
   }

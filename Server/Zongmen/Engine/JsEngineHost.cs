@@ -109,7 +109,15 @@ public sealed class JsEngineHost : IDisposable
         lock (_lock)
         {
             if (_vms.TryGetValue(seed, out var vm)) { vm.Touch(); return vm; }
-            var created = new JsWorldVm(seed, _bundle);
+        }
+
+        /* 冷启 (new V8ScriptEngine + Evaluate(bundle) + init) 可能耗时数百 ms —
+           放到锁外构建, 否则会阻塞其它 seed 的取用 (含已存在的 VM)。
+           double-check: 并发同 seed 可能各建一个, 以「先入表者胜」收敛, 多余实例释放。 */
+        var created = new JsWorldVm(seed, _bundle);
+        lock (_lock)
+        {
+            if (_vms.TryGetValue(seed, out var existing)) { existing.Touch(); created.Dispose(); return existing; }
             _vms[seed] = created;
             EvictLocked();
             return created;

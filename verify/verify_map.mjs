@@ -314,6 +314,9 @@ console.log('\n== 未登录门禁 ==');
   const denied = 4 | 8 | 16;
   check('未登录: deniedMask = Settle|Poi|Comm', resp.deniedMask === denied, String(resp.deniedMask));
   check('未登录: 不含实体/群落层', !resp.settle && !resp.poi && resp.comms.length === 0, '');
+  /* W1: mask 回显「客户端可视为持有」的图层位 — 未登录时应已剔除实体层,
+     否则客户端会把从未收到数据的实体层 rev 记为已持有 → 永久缺层 */
+  check('未登录: resp.mask 已剔除实体层 (=Chunk|Region)', resp.mask === 3, String(resp.mask));
   anon.close();
 }
 
@@ -339,6 +342,46 @@ console.log('\n== mask 位选 ==');
   const resp2 = await ws.tile('42', 0, 0, 0x10);  // Comm 单层
   check('mask=0x10 仅 comm', resp2.mask === 16 && !resp2.chunk && resp2.regions.length === 0 &&
     !resp2.settle && !resp2.poi, '');
+}
+
+/* ---- W1 回归: 非全量 mask 首拉后, 带「只含 mask 命中位」的 revs 全量重拉,
+        未请求的图层仍必须下发 (否则客户端该层永久缺失) ---- */
+console.log('\n== W1 mask→全量 回归 ==');
+{
+  const w1 = new WsClient(BASE);
+  await w1.connect();
+  await w1.login('verify-w1', 'demo');
+  const w2 = new WsClient(BASE);
+  await w2.connect();
+  await w2.login('verify-w1b', 'demo');
+
+  const BLK = [3, 3];                                   // 未被其他用例占用的块
+  const part = await w1.tile('42', BLK[0], BLK[1], PB.MASK.CHUNK);
+  check('局部 mask: resp.mask 精确回显 (=Chunk)', part.mask === PB.MASK.CHUNK, String(part.mask));
+  check('局部 mask: 未含 region/settle/poi/comm',
+    part.regions.length === 0 && !part.settle && !part.poi && part.comms.length === 0, '');
+  check('局部 mask: chunk 已下发且 revs 为 5 位',
+    !!part.chunk && part.revs.length === 5, JSON.stringify(part.revs));
+
+  /* 客户端按 mask 只记账 chunk 位 → 其余位保持 0 (未持有) */
+  const carried = [part.revs[0], 0, 0, 0, 0];
+  const full = await w1.tile('42', BLK[0], BLK[1], 31, carried);
+  check('全量重拉: chunk 因 rev 未变而缺省', !full.chunk, String(!!full.chunk));
+  check('全量重拉: region 层仍下发', full.regions.length > 0, String(full.regions.length));
+
+  /* 与「全新连接首次全量」对照: 图层存在性必须一致 */
+  const fresh = await w2.tile('42', BLK[0], BLK[1], 31);
+  check('全量重拉与首次全量图层存在性一致',
+    (full.regions.length > 0) === (fresh.regions.length > 0) &&
+    (!!full.settle) === (!!fresh.settle) &&
+    (!!full.poi) === (!!fresh.poi) &&
+    full.comms.length === fresh.comms.length,
+    JSON.stringify({
+      full: { r: full.regions.length, s: !!full.settle, p: !!full.poi, c: full.comms.length },
+      fresh: { r: fresh.regions.length, s: !!fresh.settle, p: !!fresh.poi, c: fresh.comms.length }
+    }));
+
+  w1.close(); w2.close();
 }
 
 /* ---- rev 最小化响应 (验收 §8.6) ---- */

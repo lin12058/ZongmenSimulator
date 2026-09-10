@@ -44,7 +44,10 @@ public static class MapEndpoints
     private static IResult Binary(HttpContext ctx, byte[] gz)
     {
         ctx.Response.Headers.ContentEncoding = "gzip";
-        ctx.Response.Headers.CacheControl = "public, max-age=86400";
+        /* tile 内容依赖 VM roadVersion (新 A* 道路落成即变), 不能给固定长缓存 —
+           否则浏览器/中间代理会长期复用过期 onRoad/水距。改 no-cache:
+           每次条件请求校验; 服务端无 ETag, 故直接重取 (payload 很小)。 */
+        ctx.Response.Headers.CacheControl = "no-cache, no-store";
         return Results.Bytes(gz, "application/x-protobuf");
     }
 }

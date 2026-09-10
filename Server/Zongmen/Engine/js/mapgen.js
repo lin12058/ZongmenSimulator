@@ -621,8 +621,18 @@
     var sk = sq + ',' + sr;
     g.set(sk, 0);
     open.push([sq, sr], hexDist(sq, sr, tq, tr));
+    /* 迭代上限 ASTAR_GUARD: 必须只排除「本来就不可达/代价过高」的聚落对, 不能
+       伤及真实可通行的路。原值 60000 的问题: 海岸破碎区里隔水不可达的聚落对,
+       搜索会探完整片大陆才放弃 —— 单次 regionJson 实测最长 5.1s (最坏 10.7s),
+       而该生成同步持有 V8 门闩 → 该 seed 所有请求排队超时 → 黑区 + 卡死 + CPU 满。
+       基准 (verify/bench_guard.mjs + bench_roads_lost.mjs, 4000 region 采样):
+         guard=60000 → 最慢 region 5053ms, 道路 371 条, 总耗时 53.1s
+         guard=12000 → 最慢 region  540ms, 道路 371 条, 总耗时 16.3s
+         guard=  6000 → 最慢 region   32ms, 道路 371 条, 总耗时 10.9s
+       三档道路条数完全一致 (= 零道路损失)。取 12000: 相对实测所需 (无一对超过
+       6000 步) 留 2x 余量, 同时把最坏卡顿压到亚秒级。回归见 verify/w3_astar_budget.mjs。 */
     var guard = 0;
-    while (guard++ < 60000) {
+    while (guard++ < 12000) {
       var cur = open.pop();
       if (!cur) return null;
       var cq = cur[0], cr = cur[1], ck = cq + ',' + cr;

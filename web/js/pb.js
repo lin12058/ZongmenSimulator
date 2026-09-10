@@ -83,8 +83,8 @@
   }
   function rdInt(r, t) {
     if (t.wire === 0) return r.vi();
-    if (t.wire === 2) {          // packed varint
-      var end = r.p + r.vi(), last = 0;
+    if (t.wire === 2) {          // packed varint: 先读长度前缀, 再据「已推进的 p」算终点
+      var len = r.vi(), end = r.p + len, last = 0;
       while (r.p < end) last = r.vi();
       return last;
     }
@@ -176,7 +176,7 @@
     while (r.p < r.end) {
       t = r.tag();
       if (t.field === 3 && t.wire === 2) {
-        var e1 = r.p + r.vi();
+        var l1 = r.vi(); var e1 = r.p + l1;     // 长度前缀已消费 → 以推进后的 p 为基准
         var reg = { q: 0, r: 0, x: 0, y: 0, biome: 0, name: '' };
         while (r.p < e1) {
           var tt = r.tag();
@@ -190,7 +190,7 @@
         }
         m.region = reg;
       } else if (t.field === 4 && t.wire === 2) {
-        var e2 = r.p + r.vi();
+        var l2 = r.vi(); var e2 = r.p + l2;
         var st = { id: '', type: '', q: 0, r: 0, x: 0, y: 0, name: '', pop: 0 };
         while (r.p < e2) {
           var t2 = r.tag();
@@ -206,7 +206,7 @@
         }
         m.settlements.push(st);
       } else if (t.field === 5 && t.wire === 2) {
-        var e3 = r.p + r.vi();
+        var l3 = r.vi(); var e3 = r.p + l3;
         var rd = { key: '', x0: 0, y0: 0, x1: 0, y1: 0, pts: null };
         while (r.p < e3) {
           var t3 = r.tag();
@@ -237,7 +237,7 @@
     while (r.p < r.end) {
       var t = r.tag();
       if (t.field === 10 && t.wire === 2) {
-        var e = r.p + r.vi();
+        var lv = r.vi(); var e = r.p + lv;
         var v = { name: '', element: 0, variant: '', level: 0, q: 0, r: 0, x: 0, y: 0 };
         while (r.p < e) {
           var vt = r.tag();
@@ -388,7 +388,7 @@
         case 6: m.seq = rdInt(r, t); break;
         case 7:                                     // repeated int32 (packed / 非packed 兼容)
           if (t.wire === 2) {
-            var e7 = r.p + r.vi();
+            var l7 = r.vi(), e7 = r.p + l7;
             while (r.p < e7) m.revs.push(r.vi());
           } else if (t.wire === 0) m.revs.push(r.vi());
           else r.skip(t.wire);
