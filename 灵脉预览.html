@@ -1,3 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>灵脉分布预览（群落六边形 · 可拖拽）</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{background:#171c24;color:#d6dbe4;font-family:"Microsoft YaHei",system-ui,sans-serif;
+       display:flex;height:100vh;overflow:hidden}
+  #sidebar{width:300px;padding:14px 16px;box-sizing:border-box;border-right:1px solid #2e3744;
+           background:#202732;overflow-y:auto;flex:none}
+  #sidebar h1{font-size:16px;margin:0 0 4px;color:#ffd98a}
+  #sidebar .sub{font-size:12px;color:#8b96a6;margin-bottom:12px}
+  fieldset{border:1px solid #35404f;border-radius:6px;margin-bottom:13px;padding:9px 11px}
+  legend{font-size:12px;color:#9fb3cc;padding:0 6px}
+  label{display:block;font-size:12px;margin:6px 0;color:#c9d2de}
+  input[type=range]{width:100%;box-sizing:border-box}
+  input[type=text]{width:100%;box-sizing:border-box;margin-top:4px;background:#151a22;
+                   border:1px solid #3d4756;color:#e2e8f0;padding:4px 6px;border-radius:4px;font-size:12px}
+  button{margin-top:10px;width:100%;padding:7px;border:none;border-radius:5px;
+         background:#3d78c5;color:#fff;font-size:13px;cursor:pointer}
+  button:hover{background:#4787db}
+  #stats{font-size:12px;color:#aab6c4;margin-top:12px;line-height:1.9}
+  #stats b{color:#ffd98a}
+  .legend-row{display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;color:#c8d2dd}
+  .swatch{width:12px;height:12px;border-radius:50%;display:inline-block;border:1px solid rgba(0,0,0,.35)}
+  #wrap{flex:1;position:relative;background:#181d24;overflow:hidden;cursor:grab;user-select:none}
+  #wrap.grabbing{cursor:grabbing}
+  #tip{position:absolute;max-width:240px;pointer-events:none;background:rgba(15,18,24,.93);
+       padding:6px 10px;border:1px solid #3a4656;border-radius:6px;font-size:12px;
+       color:#cfd9e6;display:none;z-index:5;line-height:1.5}
+  #hintBar{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:6;
+     background:rgba(20,26,34,.72);color:#cdd8e6;font-size:12px;padding:4px 14px;border-radius:999px;
+     pointer-events:none;white-space:nowrap}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<div id="engineHint" style="display:none;position:fixed;bottom:14px;left:50%;transform:translateX(-50%);
+  background:#7a2f2f;color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;z-index:99;
+  box-shadow:0 2px 8px rgba(0,0,0,.4)">
+  ⚠ 引擎脚本未加载。请勿直接双击 file:// 打开；
+  先启动本地 HTTP 服务（python -m http.server 8123），再访问 http://localhost:8123/灵脉预览.html
+</div>
+<div id="sidebar">
+  <h1>灵脉分布预览</h1>
+  <div class="sub">六边形=群落晶格 · 复用 mapgen.js 原算法</div>
+
+  <fieldset>
+    <legend>世界参数</legend>
+    <label>种子（回车或点「重新生成」换随机）
+      <input id="seed" style="margin-top:4px" placeholder="点「重新生成」随机">
+    </label>
+    <div style="font-size:11px;color:#8b96a8;margin-top:8px">
+      视野半径固定 <b style="color:#ffd98a">1000</b> 格（灵气边界）
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>群落 CFG</legend>
+    <label>群落晶格间距 COMM_CL <b id="commClVal">60</b>
+      <input id="commCl" type="range" min="30" max="300" step="5" value="60" style="margin-top:4px">
+    </label>
+    <label>群落半径 COMM_R <b id="commRVal">25</b>
+      <input id="commR" type="range" min="10" max="90" step="5" value="25" style="margin-top:4px">
+    </label>
+    <label>群落密度下限 COMM_P_MIN <b id="commPMinVal">0.60</b>
+      <input id="commPMin" type="range" min="0" max="1" step="0.05" value="0.60" style="margin-top:4px">
+    </label>
+    <label>灵气加成系数 COMM_P_SPIRIT <b id="commPSpiritVal">0.50</b>
+      <input id="commPSpirit" type="range" min="0" max="1.2" step="0.05" value="0.50" style="margin-top:4px">
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>灵脉间距 CFG（格）</legend>
+    <label>中↔大 D_L_M <b id="dLMVal">26</b>
+      <input id="dLM" type="range" min="4" max="40" step="1" value="26" style="margin-top:4px">
+    </label>
+    <label>小↔大 D_L_S <b id="dLSVal">17</b>
+      <input id="dLS" type="range" min="2" max="30" step="1" value="17" style="margin-top:4px">
+    </label>
+    <label>中↔其他 D_M <b id="dMVal">14</b>
+      <input id="dM" type="range" min="2" max="30" step="1" value="14" style="margin-top:4px">
+    </label>
+    <label>小↔其他 D_SMALL <b id="dSmallVal">9</b>
+      <input id="dSmall" type="range" min="1" max="20" step="1" value="9" style="margin-top:4px">
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>灵气场 CFG</legend>
+    <label>灵气边界半径 SPIRIT_R_TILES <b id="spiritRVal">500</b>
+      <input id="spiritR" type="range" min="100" max="2000" step="50" value="500" style="margin-top:4px">
+    </label>
+    <label>灵气衰减曲线 SPIRIT_CURVE <b id="spiritCurveVal">0.60</b>
+      <input id="spiritCurve" type="range" min="0.2" max="2" step="0.05" value="0.60" style="margin-top:4px">
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>显示</legend>
+    <label><input type="checkbox" id="cb_comm"   checked> 群落六边形</label>
+    <label><input type="checkbox" id="cb_vein"   checked> 灵脉点（大/中/小）</label>
+    <label><input type="checkbox" id="cb_name"   checked> 灵脉名称</label>
+    <label><input type="checkbox" id="cb_spirit" checked> 灵气强度底色</label>
+    <label><input type="checkbox" id="cb_grid"   checked> 全部晶格网格</label>
+  </fieldset>
+
+  <button id="rerun">重新生成</button>
+  <div id="stats"></div>
+  <div class="legend-row"><span class="swatch" style="background:gold"></span>大灵脉（主脉）半径 2 格</div>
+  <div class="legend-row"><span class="swatch" style="background:#ff9f43"></span>中灵脉 半径 1.5 格</div>
+  <div class="legend-row"><span class="swatch" style="background:#7fb3ff"></span>小灵脉 半径 1 格</div>
+</div>
+
+<div id="wrap">
+  <div id="hintBar">拖拽平移 · 滚轮缩放 · 每个六边形=一个群落</div>
+  <canvas id="cv"></canvas>
+  <div id="tip"></div>
+</div>
+
+<!-- 引擎脚本已内联(来源 Server/Zongmen/Engine/js/noise.js)。若在引擎文件改动，请替换此段 -->
+<script>
+/*======== 引擎 noise.js 内联副本 ========*/
+/* ============================================================
+ * noise.js — 可播种随机数 / 2D Simplex 噪声 / fbm / 山脊噪声
+ * 宗门模拟器 demo3 · 山河图
+ * ============================================================ */
+(function (global) {
+  'use strict';
+
+  /* mulberry32: 轻量可播种 PRNG, 返回 [0,1) */
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /* 字符串 → 32 位种子 (FNV-1a) */
+  function hashSeed(str) {
+    let h = 2166136261 >>> 0;
+    str = String(str);
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  /* ---------- 2D Simplex 噪声 (Gustavson 公版实现, 可播种) ---------- */
+  var GRAD3 = new Float32Array([
+    1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1, 0,
+    1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, -1,
+    0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1
+  ]);
+  var F2 = 0.5 * (Math.sqrt(3) - 1);
+  var G2 = (3 - Math.sqrt(3)) / 6;
+
+  function SimplexNoise(rand) {
+    rand = rand || Math.random;
+    var p = new Uint8Array(256);
+    for (var i = 0; i < 256; i++) p[i] = i;
+    for (var j = 255; j > 0; j--) {
+      var k = (rand() * (j + 1)) | 0;
+      var t = p[j]; p[j] = p[k]; p[k] = t;
+    }
+    this.perm = new Uint8Array(512);
+    this.permMod12 = new Uint8Array(512);
+    for (var n = 0; n < 512; n++) {
+      this.perm[n] = p[n & 255];
+      this.permMod12[n] = this.perm[n] % 12;
+    }
+  }
+
+  SimplexNoise.prototype.noise2D = function (xin, yin) {
+    var perm = this.perm, permMod12 = this.permMod12;
+    var n0 = 0, n1 = 0, n2 = 0;
+    var s = (xin + yin) * F2;
+    var i = Math.floor(xin + s), j = Math.floor(yin + s);
+    var t = (i + j) * G2;
+    var x0 = xin - (i - t), y0 = yin - (j - t);
+    var i1, j1;
+    if (x0 > y0) { i1 = 1; j1 = 0; } else { i1 = 0; j1 = 1; }
+    var x1 = x0 - i1 + G2, y1 = y0 - j1 + G2;
+    var x2 = x0 - 1 + 2 * G2, y2 = y0 - 1 + 2 * G2;
+    var ii = i & 255, jj = j & 255;
+    var t0 = 0.5 - x0 * x0 - y0 * y0;
+    if (t0 >= 0) {
+      var gi0 = permMod12[ii + perm[jj]] * 3;
+      t0 *= t0;
+      n0 = t0 * t0 * (GRAD3[gi0] * x0 + GRAD3[gi0 + 1] * y0);
+    }
+    var t1 = 0.5 - x1 * x1 - y1 * y1;
+    if (t1 >= 0) {
+      var gi1 = permMod12[ii + i1 + perm[jj + j1]] * 3;
+      t1 *= t1;
+      n1 = t1 * t1 * (GRAD3[gi1] * x1 + GRAD3[gi1 + 1] * y1);
+    }
+    var t2 = 0.5 - x2 * x2 - y2 * y2;
+    if (t2 >= 0) {
+      var gi2 = permMod12[ii + 1 + perm[jj + 1]] * 3;
+      t2 *= t2;
+      n2 = t2 * t2 * (GRAD3[gi2] * x2 + GRAD3[gi2 + 1] * y2);
+    }
+    return 70 * (n0 + n1 + n2); /* ≈ [-1,1] */
+  };
+
+  /* 分形布朗运动: 多倍频叠加, ≈[-1,1] */
+  function fbm(noise, x, y, octaves, lacunarity, gain) {
+    octaves = octaves || 4; lacunarity = lacunarity || 2.0; gain = gain || 0.5;
+    var amp = 1, freq = 1, sum = 0, norm = 0;
+    for (var i = 0; i < octaves; i++) {
+      sum += amp * noise.noise2D(x * freq, y * freq);
+      norm += amp; amp *= gain; freq *= lacunarity;
+    }
+    return sum / norm;
+  }
+
+  /* 山脊噪声: 1-|n| 平方后叠加, [0,1], 用于造山脉走向 */
+  function ridged(noise, x, y, octaves, lacunarity, gain) {
+    octaves = octaves || 4; lacunarity = lacunarity || 2.05; gain = gain || 0.5;
+    var amp = 0.55, freq = 1, sum = 0, norm = 0;
+    for (var i = 0; i < octaves; i++) {
+      var n = 1 - Math.abs(noise.noise2D(x * freq, y * freq));
+      sum += amp * n * n;
+      norm += amp; amp *= gain; freq *= lacunarity;
+    }
+    return sum / norm;
+  }
+
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function smoothstep(a, b, x) {
+    var t = clamp((x - a) / (b - a), 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  global.NoiseLib = {
+    mulberry32: mulberry32,
+    hashSeed: hashSeed,
+    SimplexNoise: SimplexNoise,
+    fbm: fbm,
+    ridged: ridged,
+    clamp: clamp,
+    smoothstep: smoothstep,
+    lerp: lerp
+  };
+})(window);
+
+</script>
+<script>
+/*======== 引擎 mapgen-config.js 内联副本（来源 Server/Zongmen/Engine/js/mapgen-config.js）
+  ⚠ 参数唯一真源在此；改参数请改引擎文件后同步此段，或直接改此段再同步回文件 ========*/
+/* ============================================================
+ * mapgen-config.js — 世界生成参数配置 (唯一真源)
+ * ------------------------------------------------------------
+ * 本文件是 CFG 的唯一定义处, 同时被两处导入:
+ *   1) 服务器端: JsEngineHost 按 [noise.js, mapgen-config.js, mapgen.js,
+ *      mapgen-server.js] 顺序拼 bundle, 故 mapgen.js 可直接读到
+ *      global.MapGenConfig;
+ *   2) 预览页 (灵脉预览.html): 以 <script> 内联本文件, 面板默认值即取自这里。
+ *
+ * 修改参数请只改本文件 —— mapgen.js 不再自带 CFG 默认值,
+ * 运行时仍可用 MapGen.configure(patch) 局部覆写。
+ * ============================================================ */
+(function (global) {
+  'use strict';
+
+  global.MapGenConfig = {
+    /* ---------- 群落 ---------- */
+    COMM_CL: 60,            // 群落晶格间距 ≈ 大灵脉最小中心距 (格)
+    COMM_R: 25,             // 群落半径 (格)
+    COMM_P_MIN: 0.60,       // 群落存在概率下限
+    COMM_P_SPIRIT: 0.50,    // 群落存在概率的灵气加成系数 (p = MIN + SPIRIT × 灵气)
+
+    /* ---------- 灵脉间距 (格) ---------- */
+    D_L_M: 26,              // 中灵脉 ↔ 大灵脉 最小间距
+    D_L_S: 17,              // 小灵脉 ↔ 大灵脉 最小间距
+    D_M: 14,                // 中灵脉 ↔ 其他次级 最小间距
+    D_SMALL: 9,             // 小灵脉 ↔ 其他次级 最小间距
+
+    /* ---------- 灵气场 ---------- */
+    SPIRIT_R_TILES: 500,    // 灵气边界半径 (格): 距原点该距离处灵气归零
+    SPIRIT_CURVE: 0.60,     // 灵气衰减曲线指数
+
+    /* ---------- 次级灵脉落位 ---------- */
+    SUB_ATTEMPTS: 14,       // 次级灵脉落位尝试次数
+
+    /* ---------- 灵脉地形抬升 ---------- */
+    LIFT_CORE: [0.80, 0.75, 0.70],   // 大/中/小灵脉中心抬升目标
+    LIFT_ARM_OFF: 0.05,              // 七星从属格抬升减量
+
+    /* ---------- 灵根生态呼应 (§六) ---------- */
+    ECO_WATER: 0.25,        // 水灵根保湿
+    ECO_WOOD: 0.18,         // 木灵根保湿
+    ECO_FIRE_DRY: 0.22,     // 火灵根致干
+    ECO_FIRE_HEAT: 0.15,    // 火灵根致热
+    ECO_METAL: 0.08         // 金灵根微干
+  };
+})(typeof window !== 'undefined' ? window : this);
+
+</script>
+<script>
+/*======== 引擎 mapgen.js 内联副本（来源 Server/Zongmen/Engine/js/mapgen.js）
+  ⚠ 这是源码副本；改引擎后请同步替换此段 ========*/
 /* ============================================================
  * mapgen.js — 无限流式世界生成 (我的世界式区块)
  *  - 地块: 尖顶六边形, 直径 16px, 轴坐标 (q, r), y 轴向下
@@ -936,3 +1246,423 @@
     BIOME_META: BIOME_META
   };
 })(window);
+
+</script>
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+ * 灵脉预览 · 渲染层
+ * 唯一几何真源：
+ *   群落晶格节点 (i,j) 的地块坐标 = (i*CL, j*CL)
+ *   → tileToWorld 换算到"世界坐标"
+ *   → 世界坐标 * scale + 相机偏移 = 屏幕坐标
+ *   (i,j) 在世界上天然构成尖顶六边形网格：
+ *     六边形世界半径 R = HEX_R*CL
+ *     横向邻距 = √3*R，纵向邻距 = 1.5*R
+ * scale 仅由滚轮控制；COMM_CL 只改几何，不做任何反向补偿。
+ * ============================================================ */
+
+var cv    = document.getElementById('cv');
+var ctx   = cv.getContext('2d');
+var wrap  = document.getElementById('wrap');
+var statsEl = document.getElementById('stats');
+var seedEl  = document.getElementById('seed');
+var commClEl= document.getElementById('commCl'),  commClValEl=document.getElementById('commClVal');
+var btn     = document.getElementById('rerun');
+
+/* CFG 控件映射（均为数值参数） */
+var CFG_CTRLS = [
+  ['commCl',      'commClVal',      'COMM_CL'],
+  ['commR',       'commRVal',       'COMM_R'],
+  ['commPMin',    'commPMinVal',    'COMM_P_MIN'],
+  ['commPSpirit', 'commPSpiritVal', 'COMM_P_SPIRIT'],
+  ['dLM',         'dLMVal',         'D_L_M'],
+  ['dLS',         'dLSVal',         'D_L_S'],
+  ['dM',          'dMVal',          'D_M'],
+  ['dSmall',      'dSmallVal',      'D_SMALL'],
+  ['spiritR',     'spiritRVal',     'SPIRIT_R_TILES'],
+  ['spiritCurve', 'spiritCurveVal', 'SPIRIT_CURVE']
+];
+var cfgEls = {}, cfgValEls = {};
+CFG_CTRLS.forEach(function(t){
+  cfgEls[t[2]]    = document.getElementById(t[0]);
+  cfgValEls[t[2]] = document.getElementById(t[1]);
+});
+/* 固定视野半径（格），不再由滑块控制 */
+var VIEW_RADIUS = 1000;
+var cbs = {
+  comm : document.getElementById('cb_comm'),
+  vein : document.getElementById('cb_vein'),
+  name : document.getElementById('cb_name'),
+  spirit:document.getElementById('cb_spirit'),
+  grid : document.getElementById('cb_grid')
+};
+
+if (typeof MapGen === 'undefined' || typeof NoiseLib === 'undefined') {
+  document.addEventListener('DOMContentLoaded', function(){
+    var e = document.getElementById('engineHint');
+    if (e) e.style.display = 'block';
+  });
+}
+
+/* ---------------- 相机 ---------------- */
+var camX = 0, camY = 0;     // 屏幕像素偏移
+var scale = 1;              // 世界 → 屏幕 缩放
+var MIN_SCALE = 0.005, MAX_SCALE = 4;
+var dragging = false, lastX = 0, lastY = 0;
+
+/* 世界坐标 → 屏幕坐标（全代码唯一换算入口） */
+function toScreen(wx, wy){
+  return {
+    x: wrap.clientWidth  / 2 + wx * scale + camX,
+    y: wrap.clientHeight / 2 + wy * scale + camY
+  };
+}
+/* 屏幕坐标 → 世界坐标 */
+function toWorld(sx, sy){
+  return {
+    x: (sx - wrap.clientWidth  / 2 - camX) / scale,
+    y: (sy - wrap.clientHeight / 2 - camY) / scale
+  };
+}
+
+/* ---------------- 六边形工具 ---------------- */
+/* 尖顶六边形：顶点角度 -90, -30, 30, 90, 150, 210 度 */
+function hexPath(cx, cy, R){
+  ctx.beginPath();
+  for (var k = 0; k < 6; k++){
+    var a = Math.PI / 180 * (60 * k - 90);
+    var x = cx + R * Math.cos(a), y = cy + R * Math.sin(a);
+    if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+/* ---------------- 主绘制 ---------------- */
+function draw(){
+  var W = wrap.clientWidth, H = wrap.clientHeight;
+  var CL = +commClEl.value;
+  var R  = VIEW_RADIUS;                 // 固定 1000 格
+  commClValEl.textContent = CL;
+
+  /* 清屏：保留当前 DPR 变换（resize 里设置），用 CSS 尺寸清，
+     不起用 setTransform(1..0)，否则会把 DPR 缩放重置掉 →
+     画布只清到逻辑像素大小 → 拖动出现残影。 */
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);   // 物理像素全尺寸
+  ctx.restore();
+  ctx.fillStyle = '#181d24';
+  ctx.fillRect(0, 0, W, H);
+
+  var HEX_R = MapGen.HEX_R, HEX_W = MapGen.HEX_W;
+  var cellWorldR = HEX_R * CL;          // 一个六边形的世界半径
+  var cellPx     = cellWorldR * scale;  // 屏幕半径
+
+  /* --- 灵气底色（以中枢为圆心的径向渐变，随相机移动） --- */
+  if (cbs.spirit.checked){
+    var o0 = toScreen(0, 0);
+    var rr = Math.max(1, 1000 * HEX_W * scale);   // 灵气边界半径 1000 格
+    var g = ctx.createRadialGradient(o0.x, o0.y, 0, o0.x, o0.y, rr);
+    g.addColorStop(0,    'rgba(120,165,230,0.20)');
+    g.addColorStop(0.45, 'rgba(90,130,190,0.09)');
+    g.addColorStop(1,    'rgba(24,29,36,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  /* --- 计算可见的晶格索引范围 --- */
+  // 视口四角 → 世界 → 反解晶格坐标；留一格余量
+  var corners = [toWorld(0,0), toWorld(W,0), toWorld(0,H), toWorld(W,H)];
+  var iMin=1e9,iMax=-1e9,jMin=1e9,jMax=-1e9;
+  for (var c = 0; c < 4; c++){
+    var w = corners[c];
+    var jf = w.y / (1.5 * HEX_R) / CL;          // r 方向
+    var if_= (w.x / HEX_W - (w.y / (1.5*HEX_R)) / 2) / CL;  // q 方向
+    if (if_ < iMin) iMin = if_;
+    if (if_ > iMax) iMax = if_;
+    if (jf  < jMin) jMin = jf;
+    if (jf  > jMax) jMax = jf;
+  }
+  iMin = Math.floor(iMin) - 1; iMax = Math.ceil(iMax) + 1;
+  jMin = Math.floor(jMin) - 1; jMax = Math.ceil(jMax) + 1;
+
+  // 安全上限：scale 过小导致范围爆炸时，以中枢为中心裁剪
+  var MAXSPAN = 160;
+  if (iMax - iMin > MAXSPAN){ var mi=(iMin+iMax)/2; iMin=Math.floor(mi-MAXSPAN/2); iMax=iMin+MAXSPAN; }
+  if (jMax - jMin > MAXSPAN){ var mj=(jMin+jMax)/2; jMin=Math.floor(mj-MAXSPAN/2); jMax=jMin+MAXSPAN; }
+
+  /* --- 逐格绘制 --- */
+  var v0=0, v1=0, v2=0, commN=0;
+  var showComm = cbs.comm.checked, showVein = cbs.vein.checked,
+      showName = cbs.name.checked, showGrid = cbs.grid.checked;
+
+  // 网格线在格子太小时不画（避免糊成一片）
+  var drawGridLines = showGrid && cellPx > 3;
+
+  for (var i = iMin; i <= iMax; i++){
+    for (var j = jMin; j <= jMax; j++){
+      var wnode = MapGen.tileToWorld(i * CL, j * CL);
+      var snode = toScreen(wnode.x, wnode.y);
+      if (snode.x < -cellPx*2 || snode.x > W + cellPx*2) continue;
+      if (snode.y < -cellPx*2 || snode.y > H + cellPx*2) continue;
+
+      var cm = null;
+      try { cm = MapGen.communityOf(i, j); } catch(e){}
+
+      /* 底网：所有格子都画一圈淡边 */
+      if (drawGridLines){
+        hexPath(snode.x, snode.y, cellPx);
+        ctx.strokeStyle = cm ? 'rgba(150,180,225,0.30)' : 'rgba(120,140,170,0.13)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      if (!cm) continue;
+      commN++;
+
+      /* 群落格：填色 */
+      if (showComm && cellPx > 2){
+        hexPath(snode.x, snode.y, cellPx);
+        ctx.fillStyle = 'rgba(96,126,176,0.13)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(170,200,235,0.55)';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+
+      /* 灵脉点：按真实地块坐标落位；半径以【格】为单位
+         大=2格、中=1.5格、小=1格  → 屏幕半径 = 格数 * HEX_R * scale */
+      if (showVein && cellPx > 1.5){
+        for (var vi = 0; vi < cm.veins.length; vi++){
+          var v = cm.veins[vi];
+          var wv = MapGen.tileToWorld(v.q, v.r);
+          var sv = toScreen(wv.x, wv.y);
+          var rgb = (v.element != null && MapGen.ELEMENT_RGB[v.element]) || [200,200,200];
+          var col = 'rgb(' + (rgb[0]|0) + ',' + (rgb[1]|0) + ',' + (rgb[2]|0) + ')';
+          var rTiles = v.level===0 ? 2 : v.level===1 ? 1.5 : 1;   // 格
+          var rr = Math.max(0.8, rTiles * HEX_R * scale);         // 屏幕半径
+          ctx.beginPath();
+          ctx.arc(sv.x, sv.y, rr, 0, Math.PI*2);
+          ctx.fillStyle = col;
+          ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
+          if (rr > 2){ ctx.strokeStyle='rgba(255,255,255,0.65)'; ctx.lineWidth=1; ctx.stroke(); }
+          if (v.level===0) v0++; else if (v.level===1) v1++; else v2++;
+
+          /* 名称 + 距中枢格数（半径足够大时才标，避免互相压叠） */
+          if (showName && v.name && v.level === 0 && rr > 3){
+            var dist = MapGen.hexDist(v.q, v.r, 0, 0);
+            ctx.fillStyle = 'rgba(236,242,252,0.92)';
+            ctx.font = 'bold 12px "Microsoft YaHei",sans-serif';
+            ctx.fillText(v.name + ' ·' + dist + '格', sv.x + rr + 4, sv.y - 5);
+          } else if (showName && v.name && v.level === 1 && rr > 9){
+            var d1 = MapGen.hexDist(v.q, v.r, 0, 0);
+            ctx.fillStyle = 'rgba(210,222,240,0.75)';
+            ctx.font = '10px "Microsoft YaHei",sans-serif';
+            ctx.fillText(v.name + ' ·' + d1 + '格', sv.x + rr + 3, sv.y - 3);
+          }
+        }
+      }
+    }
+  }
+
+  /* --- 灵气中枢 (0,0) --- */
+  var so = toScreen(0, 0);
+  ctx.beginPath();
+  ctx.arc(so.x, so.y, 5, 0, Math.PI*2);
+  ctx.fillStyle = '#ffd98a'; ctx.fill();
+  ctx.strokeStyle = '#6b5a2a'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = '#ffd98a';
+  ctx.font = 'bold 12px "Microsoft YaHei",sans-serif';
+  ctx.fillText('灵气中枢 (0,0)', so.x + 9, so.y - 7);
+
+  /* --- 灵气边界圈（取 CFG.SPIRIT_R_TILES 实际值） --- */
+  var spiritR = (MapGen.CFG && MapGen.CFG.SPIRIT_R_TILES) || R;
+  if (cellPx > 3){
+    ctx.beginPath();
+    ctx.arc(so.x, so.y, spiritR * HEX_W * scale, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(150,180,220,0.35)';
+    ctx.setLineDash([6,6]); ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /* --- 统计 --- */
+  var C = MapGen.CFG || {};
+  statsEl.innerHTML =
+    '灵气边界 <b>' + (C.SPIRIT_R_TILES||R) + '</b> 格 · 群落间距 <b>' + CL + '</b> 格<br>' +
+    '群落半径 <b>' + (C.COMM_R||'-') + '</b> · 六边形屏幕半径 <b>' + cellPx.toFixed(1) + '</b> px<br>' +
+    '含脉群落 <b>' + commN + '</b> 个<br>' +
+    '大灵脉 <b>' + v0 + '</b>（2格）· 中 <b>' + v1 + '</b>（1.5格）· 小 <b>' + v2 + '</b>（1格）';
+
+  /* 提示当前缩放级别 */
+  var hb = document.getElementById('hintBar');
+  if (hb) hb.textContent = '拖拽平移 · 滚轮缩放（' + (scale*100).toFixed(0) + '%）· 每个六边形=一个群落';
+}
+
+/* ---------------- 自适应画布尺寸 ---------------- */
+function resize(){
+  var dpr = window.devicePixelRatio || 1;
+  var w = wrap.clientWidth, h = wrap.clientHeight;
+  cv.width  = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  cv.style.width  = w + 'px';
+  cv.style.height = h + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+/* ---------------- 交互：拖拽 ---------------- */
+cv.addEventListener('pointerdown', function(e){
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  wrap.classList.add('grabbing');
+  if (cv.setPointerCapture) cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', function(e){
+  if (!dragging) return;
+  camX += e.clientX - lastX;
+  camY += e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  draw();
+});
+function endDrag(){ dragging = false; wrap.classList.remove('grabbing'); }
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+
+/* ---------------- 交互：缩放（以指针为锚点） ---------------- */
+wrap.addEventListener('wheel', function(e){
+  e.preventDefault();
+  var rect = cv.getBoundingClientRect();
+  var sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+  var before = toWorld(sx, sy);
+  var factor = e.deltaY > 0 ? 0.88 : 1.14;
+  scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * factor));
+  var after = toWorld(sx, sy);
+  /* 让指针下的世界点保持不动 */
+  camX += (after.x - before.x) * scale;
+  camY += (after.y - before.y) * scale;
+  draw();
+}, { passive:false });
+
+/* ---------------- 控件 ---------------- */
+/* 初始缩放：固定基准（150 格间距），不随任何参数变化；
+   之后仅滚轮可缩放。这样调参数时几何真实变化，直观。 */
+var BASE_TARGET_COMM_CL = 150;
+function initScaleOnce(){
+  var W = wrap.clientWidth, H = wrap.clientHeight;
+  var cellWorldW = Math.sqrt(3) * MapGen.HEX_R * BASE_TARGET_COMM_CL;
+  var target = 5;
+  scale = Math.min(W, H) / (target * cellWorldW);
+  scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
+}
+
+/* 把所有 CFG 控件的当前值同步成数字显示 */
+function syncCfgLabels(){
+  CFG_CTRLS.forEach(function(t){
+    var key = t[2];
+    var v = +cfgEls[key].value;
+    var el = cfgValEls[key];
+    if (el) el.textContent = (Math.abs(v) < 1 && v !== 0) ? v.toFixed(2) : v;
+  });
+}
+
+/* 从引擎配置 (mapgen-config.js → global.MapGenConfig) 拉取初值填入滑块。
+   这样【唯一真源 = config 文件】，HTML 里的默认值只在 config 缺失时兜底。 */
+function loadCfgFromConfig(){
+  var C = (typeof MapGenConfig !== 'undefined' && MapGenConfig) || null;
+  if (!C) return;
+  CFG_CTRLS.forEach(function(t){
+    var key = t[2];
+    if (C[key] === undefined) return;
+    var el = cfgEls[key];
+    if (!el) return;
+    var v = C[key];
+    /* 夹到滑块的 min/max 范围内，防止 config 值超界导致滑块错位 */
+    var lo = parseFloat(el.min), hi = parseFloat(el.max);
+    if (!isNaN(lo) && v < lo) v = lo;
+    if (!isNaN(hi) && v > hi) v = hi;
+    el.value = v;
+  });
+  syncCfgLabels();
+}
+
+/* 把全部 CFG 控件当前值打包成 patch，configure 一次性重建世界（清所有缓存） */
+function applyAllCfg(){
+  var patch = {};
+  CFG_CTRLS.forEach(function(t){ patch[t[2]] = +cfgEls[t[2]].value; });
+  try { MapGen.configure(patch); }
+  catch(e){ console.warn('configure 失败', e); }
+}
+
+/* 参数变更 → 重建世界 + 重置视角重画。
+   拖动中(oninput)只更新数字；松手(onchange)才真正重建，避免卡顿。 */
+function onCfgChanging(key){ syncCfgLabels(); }
+function onCfgChanged(){
+  syncCfgLabels();
+  applyAllCfg();
+  camX = 0; camY = 0;
+  initScaleOnce();
+  draw();
+}
+
+CFG_CTRLS.forEach(function(t){
+  var el = cfgEls[t[2]];
+  el.oninput  = function(){ onCfgChanging(t[2]); };
+  el.onchange = onCfgChanged;
+});
+
+/* 生成一个随机种子字符串（形如 seed-7x9k2f）
+   不用 Math.random 直接拼接的话会太丑，这里用 base36 缩短。 */
+function randomSeed(){
+  var a = Math.floor(Math.random() * 0xffffffff) >>> 0;
+  return 'seed-' + a.toString(36);
+}
+
+/* 重新生成：每次点击都换一个新随机种子（写入种子框），
+   CFG 各参数保持不变 → 只换世界布局，不换规则。 */
+function regenerate(){
+  var s = randomSeed();
+  seedEl.value = s;                       // 弹出随机数到输入框
+  try { MapGen.init(s); } catch(e){}
+  applyAllCfg();                          // 保留当前 CFG 控件值
+  camX = 0; camY = 0;
+  initScaleOnce();
+  draw();
+}
+btn.onclick = regenerate;
+
+[ cbs.comm, cbs.vein, cbs.name, cbs.spirit, cbs.grid ].forEach(function(cb){
+  cb.onchange = draw;
+});
+
+window.addEventListener('resize', resize);
+
+/* 手动改种子框后回车 = 用该种子重新生成（参数不动） */
+seedEl.addEventListener('keydown', function(e){
+  if (e.key === 'Enter'){
+    var s = seedEl.value.trim() || randomSeed();
+    seedEl.value = s;
+    try { MapGen.init(s); } catch(err){}
+    applyAllCfg();
+    camX = 0; camY = 0;
+    initScaleOnce();
+    draw();
+  }
+});
+
+/* ---------------- 启动 ---------------- */
+loadCfgFromConfig();                                // 若已内联 config，用其值刷滑块
+seedEl.value = seedEl.value || randomSeed();        // 首次进入也给一个随机种子
+try { MapGen.init(seedEl.value); } catch(e){}
+applyAllCfg();              // 用侧边栏的当前值统一配置一次
+syncCfgLabels();
+initScaleOnce();
+resize();
+
+})();
+
+</script>
+</body>
+</html>

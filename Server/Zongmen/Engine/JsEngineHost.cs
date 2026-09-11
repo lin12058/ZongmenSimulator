@@ -91,7 +91,7 @@ public sealed class JsEngineHost : IDisposable
         var sb = new StringBuilder();
         sb.AppendLine("'use strict';");
         sb.AppendLine("var window = globalThis; var global = window; var self = window;");
-        foreach (var f in new[] { "noise.js", "mapgen.js", "mapgen-server.js" })
+        foreach (var f in new[] { "noise.js", "mapgen-config.js", "mapgen.js", "mapgen-server.js" })
         {
             var p = Path.Combine(jsDir, f);
             if (!File.Exists(p)) throw new FileNotFoundException($"缺少世界脚本: {p}");
