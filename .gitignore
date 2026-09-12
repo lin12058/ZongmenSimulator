@@ -9,10 +9,12 @@ assets/snap_*.png
 Thumbs.db
 Desktop.ini
 
-# AI 本地工作目录（临时截图等不入库；会话记忆 memory/ 例外，需入库留档）
+# AI 本地工作目录（临时截图等不入库；会话记忆 memory/ 与项目 skill 例外，需入库留档）
 .workbuddy/*
 !.workbuddy/memory/
 !.workbuddy/memory/**
+!.workbuddy/skills/
+!.workbuddy/skills/**
 
 # 个人待办/排查记录（非项目交付物）
 待办事项/
