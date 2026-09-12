@@ -130,6 +130,9 @@
     </label>
     <label><input type="checkbox" id="cb_comm"   checked> 群落六边形</label>
     <label><input type="checkbox" id="cb_vein"   checked> 灵脉点（大/中/小）</label>
+    <label style="font-size:11px;color:#8b96a8;margin-top:-2px">
+      六角形标记；尺寸与聚落同一套自动缩放（2~16px × 大1.5/中1/小0.65）
+    </label>
     <label><input type="checkbox" id="cb_name"   checked> 灵脉名称</label>
     <label><input type="checkbox" id="cb_spirit" checked> 灵气强度底色</label>
     <label><input type="checkbox" id="cb_grid"   checked> 全部晶格网格</label>
@@ -158,9 +161,9 @@
   <button id="rerun">重新生成</button>
   <div id="stats"></div>
   <div class="legend-row"><span class="swatch tbar"></span>地形：深海浅海 · 沙岸 · 草地 · 林地 · 沙漠 · 山地</div>
-  <div class="legend-row"><span class="swatch hex" style="background:gold"></span>大灵脉（主脉）半径 2 格</div>
-  <div class="legend-row"><span class="swatch hex" style="background:#ff9f43"></span>中灵脉 半径 1.5 格</div>
-  <div class="legend-row"><span class="swatch hex" style="background:#7fb3ff"></span>小灵脉 半径 1 格</div>
+  <div class="legend-row"><span class="swatch hex" style="background:gold"></span>大灵脉（主脉）· 占地 2 格</div>
+  <div class="legend-row"><span class="swatch hex" style="background:#ff9f43"></span>中灵脉 · 占地 1.5 格</div>
+  <div class="legend-row"><span class="swatch hex" style="background:#7fb3ff"></span>小灵脉 · 占地 1 格</div>
   <div class="legend-row"><span class="swatch sq" style="background:#ffcc66"></span>城市</div>
   <div class="legend-row"><span class="swatch" style="background:#ffb066"></span>城镇</div>
   <div class="legend-row"><span class="swatch tri" style="background:#c79bff"></span>宗门</div>
@@ -1954,6 +1957,13 @@ function draw(){
   var cellWorldR = HEX_R * CL;          // 一个六边形的世界半径
   var cellPx     = cellWorldR * scale;  // 屏幕半径
 
+  /* 标记基准半径 —— 聚落与灵脉共用同一套「随缩放自动放大缩小」机制：
+       正比于一个区域格(REGION_M 格)的屏幕宽度，同时夹在 [2,16] px。
+     ⇒ 缩小时不消失成小点、放大时不糊成一整片；
+       再按等级乘系数（聚落 tier / 灵脉大中小）即可表达大小差异。
+     唯一真源：这里的 markBase。改它 = 同时改聚落与灵脉标记的自动缩放。 */
+  var markBase = Math.max(2, Math.min(16, MapGen.REGION_M * HEX_W * scale * 0.16));
+
   /* --- 灵气底色（以中枢为圆心的径向渐变，随相机移动） ---
       半径同样取引擎 spiritEdgeWorld()，让"蓝色灵气"正好在边界处消失 */
   if (cbs.spirit.checked){
@@ -2030,36 +2040,42 @@ function draw(){
         ctx.stroke();
       }
 
-      /* 灵脉标识：六角形（与地块网格同朝向：尖角朝上下），按真实地块坐标落位；
-         外接圆半径以【格】为单位 —— 大=2格、中=1.5格、小=1格
-         → 屏幕半径 = 格数 * HEX_R * scale */
-      if (showVein && cellPx > 1.5){
+      /* 灵脉标识：六角形徽标（与地块网格同朝向：hexPath 尖顶）。
+         尺寸机制与聚落标记完全一致（draw 顶部 markBase）：随缩放自动放大缩小、
+         夹在 [2,16] px 再乘 大/中/小 = 1.5/1.0/0.65，另有 2.2px 下限。
+         ⇒ 任何缩放、地图任何位置都是清晰可辨的六角形标记；
+           不会像旧公式 rTiles*HEX_R*scale 那样"缩小时看不见的小点、放大时一整片色块"。
+         注：占地半径（大2格/中1.5格/小1格）是地形抬升与图例的口径，不再等于标记屏幕尺寸。 */
+      if (showVein){
         for (var vi = 0; vi < cm.veins.length; vi++){
           var v = cm.veins[vi];
           var wv = MapGen.tileToWorld(v.q, v.r);
           var sv = toScreen(wv.x, wv.y);
+          var vf  = v.level===0 ? 1.5 : v.level===1 ? 1.0 : 0.65;
+          /* max(markBase, 3.0)*vf：低缩放时 markBase 会掉到下限 2px 把三级压平，
+             故给"基准"也设一个 3px 保底，再乘等级系数 → 大/中/小 在任何缩放都可辨；
+             最后再兜 2.2px 绝对下限，保证最小的小灵脉也是能看见的六角形。 */
+          var vrr = Math.max(2.2, Math.max(markBase, 3.0) * vf);
+          if (sv.x < -vrr || sv.x > W + vrr || sv.y < -vrr || sv.y > H + vrr) continue;
           var rgb = (v.element != null && MapGen.ELEMENT_RGB[v.element]) || [200,200,200];
           var col = 'rgb(' + (rgb[0]|0) + ',' + (rgb[1]|0) + ',' + (rgb[2]|0) + ')';
-          var rTiles = v.level===0 ? 2 : v.level===1 ? 1.5 : 1;   // 格
-          var vrr = Math.max(0.8, rTiles * HEX_R * scale);        // 屏幕外接圆半径
           hexPath(sv.x, sv.y, vrr);
           ctx.fillStyle = col;
-          ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
-          if (vrr > 2){
-            ctx.lineJoin = 'round';
-            ctx.strokeStyle = 'rgba(255,255,255,0.65)';
-            ctx.lineWidth = Math.max(1, vrr * 0.10);
-            ctx.stroke();
-          }
+          ctx.globalAlpha = 0.95; ctx.fill(); ctx.globalAlpha = 1;
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = 'rgba(255,255,255,0.80)';
+          ctx.lineWidth = Math.max(1.2, vrr * 0.14);
+          ctx.stroke();
           if (v.level===0) v0++; else if (v.level===1) v1++; else v2++;
 
-          /* 名称 + 距中枢格数（半径足够大时才标，避免互相压叠） */
-          if (showName && v.name && v.level === 0 && vrr > 3){
+          /* 名称 + 距中枢格数：标记够大才标
+             （低缩放下所有标记都 ≥2.2px，纯靠尺寸阈值避免标签互相压叠） */
+          if (showName && v.name && v.level === 0 && vrr >= 7){
             var dist = MapGen.hexDist(v.q, v.r, 0, 0);
             ctx.fillStyle = 'rgba(236,242,252,0.92)';
             ctx.font = 'bold 12px "Microsoft YaHei",sans-serif';
             ctx.fillText(v.name + ' ·' + dist + '格', sv.x + vrr + 4, sv.y - 5);
-          } else if (showName && v.name && v.level === 1 && vrr > 9){
+          } else if (showName && v.name && v.level === 1 && vrr >= 12){
             var d1 = MapGen.hexDist(v.q, v.r, 0, 0);
             ctx.fillStyle = 'rgba(210,222,240,0.75)';
             ctx.font = '10px "Microsoft YaHei",sans-serif';
@@ -2109,7 +2125,7 @@ function draw(){
     var MAXRC = 200;
     if (rrg.iMax - rrg.iMin > MAXRC){ var mri = (rrg.iMin+rrg.iMax)/2; rrg.iMin = Math.floor(mri-MAXRC/2); rrg.iMax = rrg.iMin+MAXRC; }
     if (rrg.jMax - rrg.jMin > MAXRC){ var mrj = (rrg.jMin+rrg.jMax)/2; rrg.jMin = Math.floor(mrj-MAXRC/2); rrg.jMax = rrg.jMin+MAXRC; }
-    var mBase = Math.max(2, Math.min(16, cellRPx * 0.16));  // 标记基准半径
+    var mBase = markBase;   // 标记基准半径 —— 与灵脉标记共用同一套机制（见 draw 顶部 markBase）
     var showSName = cbs.sname.checked;
     for (var si = rrg.iMin; si <= rrg.iMax; si++){
       for (var sj = rrg.jMin; sj <= rrg.jMax; sj++){
@@ -2194,7 +2210,10 @@ function draw(){
     '灵气边界 <b>' + (C.SPIRIT_R_TILES||R) + '</b> ×16 → <b>' + edgeTilesN + '</b> 格（此外全海洋/无聚落）<br>' +
     '群落间距 <b>' + CL + '</b> 格 · 群落半径 <b>' + (C.COMM_R||'-') + '</b> · 六边形屏幕半径 <b>' + cellPx.toFixed(1) + '</b> px<br>' +
     '含脉群落 <b>' + commN + '</b> 个<br>' +
-    '大灵脉 <b>' + v0 + '</b>（2格）· 中 <b>' + v1 + '</b>（1.5格）· 小 <b>' + v2 + '</b>（1格）<br>' +
+    '大灵脉 <b>' + v0 + '</b>（占地2格）· 中 <b>' + v1 + '</b>（1.5格）· 小 <b>' + v2 + '</b>（1格）· 标记 <b>' +
+      Math.max(2.2, Math.max(markBase,3.0)*1.5).toFixed(1) + '/' +
+      Math.max(2.2, Math.max(markBase,3.0)*1.0).toFixed(1) + '/' +
+      Math.max(2.2, Math.max(markBase,3.0)*0.65).toFixed(1) + 'px<br>' +
     '聚落 <b>' + settleN + '</b> 个 · 区域格 <b>' + MapGen.REGION_M + '</b> 格/格<br>' +
     roadStat + '<br>' + terrainStat;
 
