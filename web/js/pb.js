@@ -473,11 +473,45 @@
     }
     return m;
   }
-  /* PlaceEntity: 1id 2type | 3q 4r zz | 5x 6y f32 | 7name | 8pop | 9owner | 10tier | 11state | 12expireTs */
+  /* 建筑/产出子表 (→ 城镇足迹, 与 place 实体同层)
+     注意: C# 侧是 repeated 消息字段 (每个元素一组 tag+len+payload),
+     与 EntityGroup.items[] 同理 —— 每次出现即一个元素, 因此这里解析
+     「单个元素」, 由调用方 push。切勿写成「容器套 field1 条目」:
+     ResourceQuantDto 的 field1 恰是 string, 会被误判为条目而把 UTF-8
+     字节当子消息解 → wire=7 之类 desync。 */
+  function parseBuilding(u8) {                 // BuildingDto: 1q 2r zz | 3kind | 4terrain | 5tier
+    var br = new Reader(u8);
+    var o = { q: 0, r: 0, kind: '', terrain: '', tier: 0 };
+    while (br.p < br.end) {
+      var tb = br.tag();
+      if (tb.field === 1) o.q = rdSInt(br, tb);
+      else if (tb.field === 2) o.r = rdSInt(br, tb);
+      else if (tb.field === 3) o.kind = rdStr(br, tb);
+      else if (tb.field === 4) o.terrain = rdStr(br, tb);
+      else if (tb.field === 5) o.tier = rdInt(br, tb);
+      else br.skip(tb.wire);
+    }
+    return o;
+  }
+  function parseResource(u8) {                 // ResourceQuantDto: 1resource | 2amount
+    var rr = new Reader(u8);
+    var o = { resource: '', amount: 0 };
+    while (rr.p < rr.end) {
+      var tr = rr.tag();
+      if (tr.field === 1) o.resource = rdStr(rr, tr);
+      else if (tr.field === 2) o.amount = rdInt(rr, tr);
+      else rr.skip(tr.wire);
+    }
+    return o;
+  }
+
+  /* PlaceEntity: 1id 2type | 3q 4r zz | 5x 6y f32 | 7name | 8pop | 9owner | 10tier | 11state | 12expireTs
+                   | 13style 14styleName | 15buildings[] | 16resources[] */
   function parsePlaceEntity(u8) {
     var r = new Reader(u8);
     var m = { id: '', type: '', q: 0, r: 0, x: 0, y: 0, name: '', pop: 0,
-              owner: '', tier: 0, state: 0, expireTs: 0 };
+              owner: '', tier: 0, state: 0, expireTs: 0,
+              style: '', styleName: '', buildings: [], resources: [] };
     while (r.p < r.end) {
       var t = r.tag();
       switch (t.field) {
@@ -493,6 +527,10 @@
         case 10: m.tier = rdInt(r, t); break;
         case 11: m.state = rdInt(r, t); break;
         case 12: m.expireTs = rdInt(r, t); break;
+        case 13: m.style = rdStr(r, t); break;
+        case 14: m.styleName = rdStr(r, t); break;
+        case 15: m.buildings.push(parseBuilding(r.bin(rdLen(r, t)))); break;
+        case 16: m.resources.push(parseResource(r.bin(rdLen(r, t)))); break;
         default: r.skip(t.wire);
       }
     }

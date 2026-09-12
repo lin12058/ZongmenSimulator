@@ -9,8 +9,8 @@
     --paper: #ece3d0;
     --ink: #2e2a24;
     --ink-soft: rgba(58, 48, 38, 0.75);
+    --ink-faint: rgba(58, 48, 38, 0.44);
     --seal: #a63a2c;
-    --panel-bg: rgba(248, 243, 230, 0.92);
     --panel-border: rgba(150, 128, 96, 0.55);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -26,13 +26,42 @@
   #glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #overlay { position: absolute; inset: 0; pointer-events: none; }
 
+  /* ---- 水墨纸本 (所有面板共用) ----
+     纸感 = 暖白纸色径向渐变 (底) + 两团极淡墨晕 (multiply, ::before),
+     纯 CSS 叠出「宣纸 + 墨渍」, 不引入任何贴图资源。
+     边框不用直线矩形: ① clip-path 切出轻微不规则的手撕纸边;
+     ② ::after 以内缩细墨线作「双线画框」。 */
   .panel {
-    position: absolute;
-    background: var(--panel-bg);
-    border: 1px solid var(--panel-border);
-    box-shadow: 0 2px 10px rgba(80, 60, 30, 0.12);
-    border-radius: 3px;
-    backdrop-filter: blur(2px);
+    /* 默认在流内 —— 顶栏靠 flex 排序。原先这里写 absolute, 顶栏两块面板全靠
+       「无偏移的绝对定位」凑位置: 一旦其中一块回到流内, 另一块的静态位置就会
+       跑到行首 (曾被这条坑到: 控件跑到左上、压住题名)。需要浮层的面板
+       (#info / #minimapBox) 各自显式声明 absolute。 */
+    position: relative;
+    padding: 10px 13px;
+    color: var(--ink);
+    background:
+      radial-gradient(120% 96% at 16% 8%, rgba(255,253,246,0.97), rgba(246,239,225,0.93) 52%, rgba(234,223,201,0.94)),
+      linear-gradient(180deg, rgba(255,255,255,0.48), rgba(212,197,170,0.22));
+    filter: drop-shadow(0 5px 12px rgba(74,55,28,0.26));
+    clip-path: polygon(0.6% 1.1%, 78% 0.15%, 99.4% 0.9%, 100% 22%, 99.5% 79%, 100% 98.4%,
+                       63% 99.85%, 2.5% 99.5%, 0% 76%, 0.4% 24%);
+  }
+  .panel::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(46% 34% at 88% 5%, rgba(52,44,34,0.10), rgba(52,44,34,0) 72%),
+      radial-gradient(34% 26% at 5% 96%, rgba(52,44,34,0.09), rgba(52,44,34,0) 72%);
+    mix-blend-mode: multiply;
+  }
+  .panel::after {
+    content: ''; position: absolute; inset: 3px; pointer-events: none;
+    border: 1px solid rgba(120, 98, 66, 0.3);
+  }
+  /* 墨线分隔: 两端化开的横线 */
+  .ink-rule {
+    height: 1px; margin: 7px 0;
+    background: linear-gradient(90deg, rgba(46,42,36,0) 0%, rgba(46,42,36,0.5) 14%,
+                rgba(46,42,36,0.32) 68%, rgba(46,42,36,0) 100%);
   }
 
   /* ---- 顶栏 ---- */
@@ -43,7 +72,9 @@
     pointer-events: none;
   }
   #topbar > * { pointer-events: auto; }
-  #titleBox { padding: 10px 16px 8px; }
+  /* 左上纵列: 题名 + 宗门录 (原「山河五色/种子」所在位) */
+  #hudLeft { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+  #titleBox { padding: 9px 15px 7px; }
   #titleBox h1 {
     font-size: 22px; font-weight: 700; letter-spacing: 6px;
     color: var(--ink);
@@ -71,17 +102,77 @@
   button.off { opacity: 0.45; text-decoration: line-through; }
   #stats { font-size: 12px; color: var(--ink-soft); letter-spacing: 1px; }
 
-  /* ---- 图例 ---- */
-  #legend {
-    left: 16px; top: 96px; padding: 10px 12px;
-    font-size: 12.5px; letter-spacing: 1px;
+  /* ---- 宗门录 (代替原「山河五色」图例) ----
+     菜单必须浮出面板之外, 而 .panel 的 clip-path 会裁剪整个子树 →
+     下拉层放在 #sectWrap 里 (与 #sectBox 平级), 由 #sectWrap 作定位上下文。 */
+  #sectWrap { position: relative; }
+  #sectBox { width: 246px; padding: 9px 12px 11px; }
+  #sectHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #sectHead .cap { font-size: 13px; letter-spacing: 5px; color: var(--ink); }
+  #sectHead .cap b { font-weight: 400; color: var(--seal); }
+  #sectMenuBtn {
+    padding: 2px 9px; cursor: pointer; font-family: inherit;
+    font-size: 12px; letter-spacing: 2px; color: var(--ink-soft);
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,252,244,0.92), rgba(237,228,207,0.9));
+    transition: color 0.15s, border-color 0.15s;
   }
-  #legend h3 { font-size: 13px; margin-bottom: 6px; letter-spacing: 3px; }
-  #legend .item { display: flex; align-items: center; gap: 7px; margin: 3px 0; color: var(--ink-soft); }
-  #legend .chip { width: 14px; height: 14px; border: 1px solid rgba(80,60,30,0.35); border-radius: 2px; }
+  #sectMenuBtn:hover, #sectMenuBtn.on { color: var(--seal); border-color: var(--seal); }
+  .sec-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .sec-name { font-size: 17px; line-height: 1.3; letter-spacing: 3px; color: var(--ink); }
+  /* 朱砂印章: 宗门前二字竖排 */
+  .sec-seal {
+    flex: 0 0 auto; width: 32px; height: 32px; border-radius: 2px;
+    display: flex; align-items: center; justify-content: center;
+    writing-mode: vertical-rl; text-orientation: upright;
+    font-size: 12.5px; letter-spacing: 1px; color: rgba(250,241,228,0.95);
+    background: var(--seal); opacity: 0.92;
+    box-shadow: inset 0 0 0 1px rgba(252,242,228,0.42), inset 0 0 7px rgba(58,10,4,0.4);
+  }
+  .sec-sub { margin-top: 2px; font-size: 12px; letter-spacing: 2px; color: var(--ink-soft); }
+  #sectBody .kv { display: flex; justify-content: space-between; gap: 10px; margin: 3px 0; font-size: 12.5px; }
+  #sectBody .kv .k { flex: 0 0 auto; letter-spacing: 2px; color: var(--ink-soft); }
+  #sectBody .kv .v { text-align: right; color: var(--ink); }
+  .sec-cap { margin-top: 6px; font-size: 11.5px; letter-spacing: 3px; color: var(--ink-faint); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .tag {
+    display: inline-flex; align-items: baseline; gap: 3px; padding: 1px 6px;
+    font-size: 11.5px; letter-spacing: 1px; color: rgba(70,58,44,0.92);
+    border: 1px solid rgba(150,128,96,0.45); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.8), rgba(236,227,205,0.7));
+  }
+  .tag b { font-weight: 400; color: var(--seal); }
+  .sec-empty { padding: 12px 2px 8px; font-size: 12.5px; letter-spacing: 2px; color: var(--ink-faint); text-align: center; }
+
+  /* ---- 择宗菜单 (水墨卷轴) ---- */
+  #sectMenu {
+    display: none; position: absolute; left: 0; right: 0; top: calc(100% + 5px); z-index: 6;
+    max-height: 268px; overflow-y: auto; padding: 5px 0;
+    background: radial-gradient(130% 100% at 20% 0%, rgba(255,253,247,0.985), rgba(240,232,216,0.97));
+    filter: drop-shadow(0 6px 14px rgba(74,55,28,0.3));
+    clip-path: polygon(0.8% 0.6%, 99% 0.2%, 99.6% 99%, 0.4% 99.6%);
+  }
+  #sectMenu::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    border: 1px solid rgba(120,98,66,0.42);
+    clip-path: polygon(0.8% 0.6%, 99% 0.2%, 99.6% 99%, 0.4% 99.6%);
+  }
+  #sectMenu.open { display: block; }
+  #sectMenu .mm-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 5px 12px; font-size: 12.5px; letter-spacing: 1px;
+    cursor: pointer; color: var(--ink-soft);
+  }
+  #sectMenu .mm-item:hover { background: rgba(166,58,44,0.09); color: var(--seal); }
+  #sectMenu .mm-item.cur { color: var(--seal); }
+  #sectMenu .mm-item.cur .mm-nm::before { content: '「'; }
+  #sectMenu .mm-item.cur .mm-nm::after { content: '」'; }
+  #sectMenu .mm-d { font-size: 11.5px; color: var(--ink-faint); }
+  #sectMenu .mm-empty { padding: 9px 12px; font-size: 12px; letter-spacing: 2px; color: var(--ink-faint); }
 
   /* ---- 信息面板 ---- */
   #info {
+    position: absolute;
     left: 16px; bottom: 18px; width: 228px; padding: 12px 14px;
     transition: opacity 0.2s;
   }
@@ -97,6 +188,7 @@
 
   /* ---- 小地图 ---- */
   #minimapBox {
+    position: absolute;
     right: 16px; bottom: 18px; padding: 8px;
   }
   #minimap { display: block; width: 216px; height: 141px; cursor: crosshair; border: 1px solid rgba(80,60,30,0.3); }
@@ -113,7 +205,8 @@
   #fatalMsg { color: var(--ink-soft); font-size: 14px; max-width: 560px; line-height: 1.7; }
 
   @media (max-width: 760px) {
-    #legend { display: none; }
+    #sectBox { width: 196px; }
+    .sec-name { font-size: 15px; letter-spacing: 2px; }
     #titleBox h1 { font-size: 17px; letter-spacing: 3px; }
     #minimap { width: 150px; height: 98px; }
   }
@@ -126,9 +219,22 @@
   </div>
 
   <div id="topbar">
-    <div id="titleBox" class="panel">
-      <h1>宗门模拟器 <em>·</em> 山河图</h1>
-      <div class="sub"><span id="era">岁次甲辰 · 春</span>　|　种子「<span id="seedShow">-</span>」</div>
+    <div id="hudLeft">
+      <div id="titleBox" class="panel">
+        <h1>宗门模拟器 <em>·</em> 山河图</h1>
+        <div class="sub"><span id="era">岁次甲辰 · 春</span></div>
+      </div>
+      <div id="sectWrap">
+        <div id="sectBox" class="panel">
+          <div id="sectHead">
+            <span class="cap">宗门<b>录</b></span>
+            <button id="sectMenuBtn">择宗 ▾</button>
+          </div>
+          <div class="ink-rule"></div>
+          <div id="sectBody"><div class="sec-empty">山河初定，尚无所属</div></div>
+        </div>
+        <div id="sectMenu"></div>
+      </div>
     </div>
     <div id="controls" class="panel">
       <div class="row">
@@ -142,11 +248,6 @@
         <span id="stats">-</span>
       </div>
     </div>
-  </div>
-
-  <div id="legend" class="panel">
-    <h3>山河五色</h3>
-    <div id="legendItems"></div>
   </div>
 
   <div id="info" class="panel hidden">

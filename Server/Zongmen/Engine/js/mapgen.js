@@ -4,7 +4,7 @@
  *  - 区块: 半径 CHUNK_R 格的六边形, 中心间距 S=2R+1,
  *          地块归属四候选最近中心 (确定性平局裁决) → 六边形区块
  *  - 内容: 海拔/湿度/气候带 = 坐标的纯噪声函数 (含出生岛保障),
- *          区域/聚落/灵脉 = 全球晶格哈希, 道路 = 纯函数代价场 A*
+ *          区域/聚落/灵脉 = 全球晶格哈希, 道路 = A* 寻路(三重剪枝)
  *          → 无限世界跨区块、跨会话完全一致
  * ============================================================ */
 (function (global) {
@@ -57,7 +57,11 @@
     SUB_ATTEMPTS: 14,
     LIFT_CORE: [0.80, 0.75, 0.70], LIFT_ARM_OFF: 0.05,
     ECO_WATER: 0.25, ECO_WOOD: 0.18,
-    ECO_FIRE_DRY: 0.22, ECO_FIRE_HEAT: 0.15, ECO_METAL: 0.08
+    ECO_FIRE_DRY: 0.22, ECO_FIRE_HEAT: 0.15, ECO_METAL: 0.08,
+    ROAD_COST_MAX: 120, ROAD_STEPS_MAX: 40, ROAD_W: [4, 4, 4, 3, 5, 3, 8, 8],
+    PROSPECT_R: 4, PROSPECT_REFINE: 6, TOWN_R: 3, TOWN_INNER_R: 1, TOWN_HOUSE_RATIO: 0.3, TERR_SCAN_R: 1, FARM_SPIRIT: 0.35,
+    TOWN_BUILD_MAX: { village: 8, town: 16, city: 25, sect: 16 },
+    TRADE_REACH: 40
   };
   /* 五行: 0金 1木 2水 3火 4土 */
   var ELEMENTS = ['金', '木', '水', '火', '土'];
@@ -117,7 +121,12 @@
   var roadCache = new Map();     // "a|b" -> 道路
   var commCache = new Map();     // "i,j" -> 群落 | null
   var veinNearCache = new Map(); // "q,r" -> 灵脉近邻 {d, v} | null
-  var roadFail = new Set();      // "a|b" -> 不可达聚落对 (A* 失败, 终身跳过)
+  var siteScoreCache = new Map();// "q,r" -> 选址打分 (纯函数, 只依赖地形/灵脉)
+  var prospectCache = new Map(); // "aq,ar"-> 勘测结果 {tiles:[{q,r,score}]}
+  var centerCache = new Map();   // "aq,ar"-> 选中中心 {q,r,score} | null
+  var townCache = new Map();     // "聚落id" -> 足迹规划 {style, buildings, resources}
+  var tradeCache = new Map();    // "i,j" -> 该区域格城镇的贸易边数组
+  var roadFail = new Set();      // "a|b" -> 不可达聚落对 (寻路失败, 终身跳过)
   /* P3: 地块级缓存固定容量 (Map 保持插入序)。超限时每次淘汰最旧 1 条,
      单条 delete 的开销摊薄到每次插入 → 不再有「超大 Map 一次性删半」的长停顿;
      内存有界; 淘汰仅影响命中率, 不改变确定性结果。 */
@@ -131,6 +140,12 @@
   var ROAD_CAP = 4096;     // A* 道路 (含 pts/tiles, 单条较大)
   var COMM_CAP = 1024;     // 群落
   var ROADFAIL_CAP = 1024; // 不可达聚落对 (只影响重试频率)
+  var SITE_SCORE_CAP = 40000; // 选址打分 (勘测扫描逐格, 容量须覆盖视野内候选)
+  var PROSPECT_CAP = 8192; // 勘测结果 (按锚点)
+  var CENTER_CAP = 8192;   // 选中中心 (按锚点)
+  var TOWN_CAP = 4096;     // 城镇足迹规划 (按聚落)
+  var TRADE_CAP = 4096;    // 贸易边 (按区域格)
+
   function cacheSet(m, key, val, cap) {
     m.set(key, val);
     if (m.size > cap) m.delete(m.keys().next().value);   // 淘汰最旧插入项
@@ -187,6 +202,7 @@
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
     roadCache.clear(); commCache.clear(); veinNearCache.clear();
+    siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadFail.clear();
     roadVer = 0;
   }
@@ -530,6 +546,325 @@
   }
   NAME.townSuf = ['坊市', '镇', '集'];
 
+  /* ============================================================
+   * 城镇生成 (§三): 勘测(prospect) → 选址(pick center) → 生长(grow)
+   * ------------------------------------------------------------
+   * 取代原先「锚点处 4 次试投、命中即落」的直接落点:
+   *   ① 勘测: 以锚点为中心六边扫描 PROSPECT_R 圈, 逐格打分 (不钉死一格);
+   *   ② 选址: 取最高分格作真实中心 (保证周边确实有「好空间」);
+   *   ③ 生长: 中心 hexDist ≤ TOWN_R 内按 灵气×地形 → 地皮 → 建筑,
+   *          生产型卫星先行、民房殿后, 产出聚合为城镇资源清单。
+   * 三者皆为纯函数 (只依赖 seed 地形/灵脉/坐标), 结果按 key 缓存 → 跨区块、
+   * 跨会话完全一致 (服务端与客户端各自算出的中心/足迹必须逐格相同)。
+   * ============================================================ */
+  var LANDUSE_PRI = { '灵枢': 0, '高阶灵地': 1, '水岸': 2, '良田': 3, '矿脉': 4, '林地': 5, '灼壤': 6, '村落': 9 };
+  /* 地皮 → 建筑候选池 (r/a = 主产出, x/xa = 附加产出); 村落皮为民房/仓库 (无产出) */
+  var BUILDINGS = {
+    '灵枢':     [{ k: '灵枢殿', r: '灵', a: 3 }, { k: '聚灵阵', r: '灵', a: 2 }, { k: '祭坛', r: '灵', a: 2 }],
+    '高阶灵地': [{ k: '炼丹殿', r: '丹', a: 2 }, { k: '炼器殿', r: '器', a: 2 }],
+    '水岸':     [{ k: '码头', r: '渔', a: 2 }, { k: '渔船坞', r: '渔', a: 2 }, { k: '渔亭', r: '渔', a: 1 }],
+    '良田':     [{ k: '农田', r: '粮', a: 2 }, { k: '磨坊', r: '粮', a: 3 }, { k: '谷仓', r: '粮', a: 1 }],
+    '矿脉':     [{ k: '矿山', r: '矿', a: 2 }, { k: '熔炉', r: '矿', a: 3 }],
+    '林地':     [{ k: '伐木场', r: '木', a: 2 }, { k: '药圃', r: '木', a: 1, x: '灵', xa: 1 }],
+    '灼壤':     [{ k: '炼炉', r: '炭', a: 2 }, { k: '焦炭窑', r: '炭', a: 1, x: '矿', xa: 1 }],
+    '村落':     [{ k: '民房' }, { k: '仓库' }]
+  };
+  var CORE_KIND = {
+    city: ['官衙', '集市', '宗祠'], town: ['集市', '祠堂'],
+    village: ['祠堂', '村口'], sect: ['宗门大殿', '祖师殿']
+  };
+  var RES_ORDER = ['粮', '木', '矿', '渔', '炭', '灵', '丹', '器'];
+  var STYLE_NAME = { spirit: '灵修', river: '水乡', farm: '田园', mine: '矿镇',
+                     wood: '山林', desert: '沙镇', plain: '平原', coast: '海滨', mountain: '山城' };
+  var STYLE_BY_LANDUSE = { '灵枢': 'spirit', '高阶灵地': 'spirit', '水岸': 'river',
+                           '良田': 'farm', '矿脉': 'mine', '林地': 'wood', '灼壤': 'desert' };
+
+  /* 地皮判定: 灵脉(灵枢/高阶灵地) > 邻水(水岸) > 地貌 (林/荒漠/山 → 木材/灼壤/矿脉,
+     草地按灵气分 良田 / 村落) —— 即「灵气 → 地皮」, 地皮再决定建筑种类 */
+  function landuseOf(f) {
+    if (f.vein) return f.vein.d === 0 ? '灵枢' : '高阶灵地';
+    if (f.biome === BIOME.BEACH) return '水岸';
+    if (f.biome === BIOME.FOREST) return '林地';
+    if (f.biome === BIOME.DESERT) return '灼壤';
+    if (f.biome >= BIOME.MOUNTAIN) return '矿脉';
+    if (f.biome === BIOME.GRASS) {
+      return spiritAt(f.q, f.r) >= CFG.FARM_SPIRIT ? '良田' : '村落';
+    }
+    return '村落';
+  }
+  /* 是否陆上且邻水 (六邻居中含水面) → 可设码头等水岸设施 */
+  function coastalAt(q, r) {
+    for (var k = 0; k < 6; k++) {
+      if (elevAt(q + NEIGH_SLOTS[k][0], r + NEIGH_SLOTS[k][1]) < SEA_LEVEL - 0.02) return true;
+    }
+    return false;
+  }
+
+  /* 单格选址基础分: 地形宜居 + 海拔适中 + 灵气。水/雪峰 → -Inf (排除)。
+     资源邻近项不在这里做 (它要扫邻域, 贵) —— 由 prospectArea 对头部候选精算。 */
+  function siteScore(q, r) {
+    var key = q + ',' + r;
+    var c = siteScoreCache.get(key);
+    if (c !== undefined) return c;
+    var f = fields(q, r);
+    var s;
+    if (f.biome <= BIOME.OCEAN || f.biome === BIOME.SNOW) {
+      s = -1e18;                                  // 海洋 / 雪峰: 排除
+    } else {
+      var terr = [0, 0, 20, 80, 60, 30, 20, 0][f.biome];   // 草地80 林地60 沙漠30 沙岸/山地20
+      var e = f.e, elev;
+      if (e >= 0.45 && e <= 0.75) elev = 100;               // 海拔 0.45~0.75 最优
+      else if (e < 0.45) elev = Math.max(0, 100 - (0.45 - e) * 400);
+      else elev = Math.max(0, 100 - (e - 0.75) * 400);
+      var vn = veinNear(q, r);
+      var spir = (vn ? (vn.d === 0 ? 60 : vn.d <= 1 ? 30 : 10) : 0) + spiritAt(q, r) * 20;
+      s = terr + elev + spir;
+    }
+    cacheSet(siteScoreCache, key, s, SITE_SCORE_CAP);
+    return s;
+  }
+
+  /* 资源邻近加成: 扫描半径内 水源/森林/山地/荒漠 格 (越近权重越高), 上限 40 */
+  function resourceBonus(q, r) {
+    var R = CFG.TERR_SCAN_R | 0 || 2, bonus = 0;
+    for (var dq = -R; dq <= R; dq++) {
+      for (var dr = -R; dr <= R; dr++) {
+        var d = hexDist(0, 0, dq, dr);
+        if (d < 1 || d > R) continue;
+        var b = fields(q + dq, r + dr).biome;
+        var w = (R - d + 1) / R;
+        if (b <= BIOME.OCEAN) bonus += 6 * w;              // 水源
+        else if (b === BIOME.MOUNTAIN) bonus += 5 * w;      // 矿脉
+        else if (b === BIOME.FOREST) bonus += 4 * w;        // 林木
+        else if (b === BIOME.DESERT) bonus += 2 * w;
+      }
+    }
+    return Math.min(bonus, 40);
+  }
+
+  /* 阶段一 勘测: 锚点周围 PROSPECT_R 圈逐格打分 → 适宜度图 (按锚点缓存)
+     严格取「已勘测区内的最高分格」(不加提前收敛 —— 实测提前收敛会改变 37.8%
+     的城镇中心, 违背 §三.2「取最高分格」)。成本控制改在两项上:
+       · PROSPECT_REFINE: 资源邻近只对基础分前 N 名精算 (它要扫邻域, 是主要开销);
+       · TERR_SCAN_R: 资源扫描半径取 1 (6 邻格)。
+     实测: 精算 12×19=228 次/镇 → 6×6=36 次/镇, 冷启动由 6780ms 降到 ~1.4s。
+     服务端只对「单个区域格的 1~2 座城镇」勘测 (≈2ms), 不受此影响。 */
+  function prospectArea(aq, ar) {
+    var key = aq + ',' + ar;
+    var c = prospectCache.get(key);
+    if (c) return c;
+    var R = CFG.PROSPECT_R | 0 || 4;
+    var tiles = [];
+    for (var dq = -R; dq <= R; dq++) {
+      for (var dr = -R; dr <= R; dr++) {
+        if (hexDist(0, 0, dq, dr) > R) continue;
+        var q = aq + dq, r = ar + dr;
+        var base = siteScore(q, r);
+        if (base < -1e17) continue;                       // 水/雪峰: 不入候选
+        tiles.push({ q: q, r: r, score: base });
+      }
+    }
+    /* 排序 (分数降序, 同分按 q,r → 确定性), 对前 N 名补算「资源邻近」 */
+    tiles.sort(function (a, b) { return (b.score - a.score) || (a.q - b.q) || (a.r - b.r); });
+    var refine = Math.min(tiles.length, CFG.PROSPECT_REFINE | 0 || 6);
+    for (var t2 = 0; t2 < refine; t2++) tiles[t2].score += resourceBonus(tiles[t2].q, tiles[t2].r);
+    var out = { aq: aq, ar: ar, radius: R, tiles: tiles };
+    cacheSet(prospectCache, key, out, PROSPECT_CAP);
+    return out;
+  }
+
+  /* 阶段二 选址: 勘测区内取最高分格为城镇真实中心 (无可选格 → null) */
+  function pickSettlementCenter(aq, ar) {
+    var key = aq + ',' + ar;
+    var c = centerCache.get(key);
+    if (c !== undefined) return c;
+    var tiles = prospectArea(aq, ar).tiles;
+    var best = null;
+    for (var i = 0; i < tiles.length; i++) {
+      if (!best || tiles[i].score > best.score) best = tiles[i];   // 严格 > : 同分取表序首 (确定性)
+    }
+    var out = best ? { q: best.q, r: best.r, score: best.score } : null;
+    cacheSet(centerCache, key, out, CENTER_CAP);
+    return out;
+  }
+
+  /* 阶段三 生长: 以选定中心为锚, hexDist ≤ TOWN_R 内铺建筑 + 聚合产出。
+     结构 (空间分工, 见下方 ⚠ 说明):
+       中心格   → 核心建筑 (集市/祠堂/官衙/宗门大殿, 依 type)
+       内环     → 民房/仓库 (城区); 灵枢/高阶灵地/水岸 等特殊地皮仍出自己的建筑
+       外环     → 生产型卫星建筑 (码头>农田>矿场>林场>炉窑, 依地皮)
+     上限按规模分档 (CFG.TOWN_BUILD_MAX)。纯函数 + 按聚落 id 缓存。
+
+     ⚠ 与文档 §三.4「生产铺完后剩余可用格补民房」的差异 (有意为之):
+       实测草地上「良田」地皮占比极高 (灵气 ≥ FARM_SPIRIT 即判良田),
+       若严格按「生产先行」铺满, 城镇将 100% 是农田/磨坊、一座民房都没有
+       (实测民房仅占 1.4%), 视觉上不成立。
+       故按「卫星 = 环绕中心的外环」的空间语义分工: 内环为城区(民房),
+       外环为生产卫星。生产上限与产出聚合口径不变, 仅位置分工不同。 */
+  function growTownFootprint(id, type, cq, cr) {
+    var c = townCache.get(id);
+    if (c) return c;
+    var R = CFG.TOWN_R | 0 || 3;
+    var innerR = CFG.TOWN_INNER_R | 0;
+    var cells = [];
+    for (var dq = -R; dq <= R; dq++) {
+      for (var dr = -R; dr <= R; dr++) {
+        var d = hexDist(0, 0, dq, dr);
+        if (d > R) continue;
+        cells.push({ q: cq + dq, r: cr + dr, d: d });
+      }
+    }
+    /* 固定序 (环 → q → r): 与扫描顺序无关, 保证确定性 */
+    cells.sort(function (a, b) { return (a.d - b.d) || (a.q - b.q) || (a.r - b.r); });
+
+    var maxN = (CFG.TOWN_BUILD_MAX && CFG.TOWN_BUILD_MAX[type]) || 8;
+    var coreNames = CORE_KIND[type] || CORE_KIND.village;
+    var core = null, inner = [], outer = [];
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      var f = fields(cell.q, cell.r);
+      if (f.biome <= BIOME.OCEAN) continue;                 // 水上不落建筑
+      if (cell.d === 0) {
+        core = { q: cell.q, r: cell.r, kind: coreNames[(hash01(cq, cr, 301) * coreNames.length) | 0],
+                 terrain: 'core', tier: 3 };
+        continue;
+      }
+      var lu = landuseOf(f);
+      var special = (lu === '灵枢' || lu === '高阶灵地');
+      if (!special && lu !== '水岸' && f.biome !== BIOME.BEACH &&
+          coastalAt(cell.q, cell.r)) lu = '水岸';           // 邻水 (且非灵脉) → 水岸地皮
+      /* 内环: 非灵脉地皮一律作城区民居 (城区不种田不开矿) */
+      if (!special && lu !== '水岸' && cell.d <= innerR) lu = '村落';
+      var pool = BUILDINGS[lu] || BUILDINGS['村落'];
+      var b = pool[(hash01(cell.q, cell.r, 311) * pool.length) | 0];
+      var item = { q: cell.q, r: cell.r, kind: b.k, terrain: lu,
+                   tier: b.a ? 2 : 1, res: b };
+      (lu === '村落' ? inner : outer).push(item);
+    }
+    /* 生产型卫星先行 (码头>农田>矿场>林场>炉窑), 同级按环序; 民房殿后补余量 */
+    outer.sort(function (a, b) {
+      return (LANDUSE_PRI[a.terrain] - LANDUSE_PRI[b.terrain]) || (a.q - b.q) || (a.r - b.r);
+    });
+
+    var queue = [];
+    if (core) {
+      queue.push({ q: core.q, r: core.r, kind: core.kind, terrain: core.terrain,
+                   tier: core.tier, res: null });
+    }
+    /* 配额: 民居保底 (否则 maxN 会被 24 格外环卫星吃光 → 城镇一座民房都没有)。
+       TOWN_HOUSE_RATIO 给城区民居预留名额, 其余归生产型卫星; 卫星不足时民居自然补位。 */
+    var coreN = core ? 1 : 0;
+    var houseTarget = Math.min(inner.length,
+      Math.max(2, Math.floor(maxN * (CFG.TOWN_HOUSE_RATIO != null ? CFG.TOWN_HOUSE_RATIO : 0.3))));
+    var satTake = Math.max(0, maxN - coreN - houseTarget);
+    for (var os = 0; os < outer.length && os < satTake; os++) queue.push(outer[os]);
+    for (var hs = 0; hs < inner.length; hs++) queue.push(inner[hs]);
+
+    var buildings = [], res = {};
+    for (var q2 = 0; q2 < queue.length && buildings.length < maxN; q2++) {
+      var it = queue[q2];
+      buildings.push({ q: it.q, r: it.r, kind: it.kind, terrain: it.terrain, tier: it.tier });
+      if (it.res) {
+        if (it.res.r) res[it.res.r] = (res[it.res.r] || 0) + it.res.a;
+        if (it.res.x) res[it.res.x] = (res[it.res.x] || 0) + it.res.xa;
+      }
+    }
+    /* 产出聚合 → 城镇资源清单 (按固定资源序, 只留 >0 项) */
+    var resources = [];
+    for (var ri = 0; ri < RES_ORDER.length; ri++) {
+      var nm = RES_ORDER[ri];
+      if (res[nm] > 0) resources.push({ resource: nm, amount: res[nm] });
+    }
+    /* 城镇风格: 主导地皮 (灵脉/水岸/良田/矿脉/林地/灼壤) → 风格;
+       无特殊地貌时按区域主导 biome 派生 (§五 styles 兜底) */
+    var styleKey = null, cnt = {}, bn = 0;
+    for (var bk = 0; bk < buildings.length; bk++) {
+      var kk = STYLE_BY_LANDUSE[buildings[bk].terrain];
+      if (!kk) continue;
+      cnt[kk] = (cnt[kk] || 0) + 1;
+      if (cnt[kk] > bn) { bn = cnt[kk]; styleKey = kk; }
+    }
+    if (!styleKey) {
+      var rs = regionSeedOf(cq, cr);
+      var rb = regionInfo(rs.i, rs.j).biome;
+      styleKey = rb <= BIOME.BEACH ? 'coast'
+               : rb === BIOME.FOREST ? 'wood'
+               : rb === BIOME.DESERT ? 'desert'
+               : rb >= BIOME.MOUNTAIN ? 'mountain' : 'plain';
+    }
+    var out = { style: styleKey, styleName: STYLE_NAME[styleKey] || '聚落',
+                buildings: buildings, resources: resources };
+    cacheSet(townCache, id, out, TOWN_CAP);
+    return out;
+  }
+
+  /* ============================================================
+   * 贸易网络 (§四): 城镇产出聚合 → 供需缺口 → tradeEdge
+   * ------------------------------------------------------------
+   * 纯计算层 (不落库): 供需按人口折算「每单位资源可养多少口人」,
+   * 同镇内部先自给, 剩余为盈余 / 缺口; 相邻城镇 (六边距 ≤ TRADE_REACH)
+   * 之间按「盈余 × 缺口」配对, 取缺口最大的资源建一条贸易边。
+   * 与道路 A* 寻路同理: 每对只算一次 (按 id 序归一化), 固定资源序 → 确定性。
+   * ============================================================ */
+  var TRADE_DEMAND = { 粮: 500, 木: 800, 渔: 900, 炭: 1200, 矿: 1500, 灵: 5000, 丹: 8000, 器: 8000 };
+
+  function townNet(st) {
+    var plan = growTownFootprint(st.id, st.type, st.q, st.r);
+    var sup = {}, net = {}, k, r;
+    for (k = 0; k < plan.resources.length; k++) sup[plan.resources[k].resource] = plan.resources[k].amount;
+    for (k = 0; k < RES_ORDER.length; k++) {
+      r = RES_ORDER[k];
+      var need = Math.max(1, Math.round((st.pop || 0) / (TRADE_DEMAND[r] || 1000)));
+      net[r] = (sup[r] || 0) - need;
+    }
+    return net;
+  }
+
+  function tradeEdgesFor(i, j) {
+    var key = i + ',' + j;
+    var c = tradeCache.get(key);
+    if (c) return c;
+    var reach = CFG.TRADE_REACH | 0 || 40;
+    var mine = settlementsFor(i, j);
+    var towns = [];
+    for (var di = -1; di <= 1; di++) {
+      for (var dj = -1; dj <= 1; dj++) {
+        var others = settlementsFor(i + di, j + dj);
+        for (var o = 0; o < others.length; o++) if (others[o].type !== 'poi') towns.push(others[o]);
+      }
+    }
+    var out = [];
+    for (var ai = 0; ai < mine.length; ai++) {
+      var a = mine[ai];
+      if (a.type === 'poi') continue;
+      var na = null;
+      for (var bi = 0; bi < towns.length; bi++) {
+        var b = towns[bi];
+        if (b.id === a.id || a.id > b.id) continue;      // 每对只算一次 (小 id 发起)
+        var d = hexDist(a.q, a.r, b.q, b.r);
+        if (d > reach) continue;
+        if (!na) na = townNet(a);
+        var nb = townNet(b);
+        var bestR = null, bestAmt = 0, dir = 0;
+        for (var k = 0; k < RES_ORDER.length; k++) {
+          var r = RES_ORDER[k];
+          var ab = Math.min(Math.max(na[r], 0), Math.max(-nb[r], 0));   // a 余 → b 缺
+          var ba = Math.min(Math.max(nb[r], 0), Math.max(-na[r], 0));   // b 余 → a 缺
+          if (ab > bestAmt) { bestAmt = ab; bestR = r; dir = 1; }
+          if (ba > bestAmt) { bestAmt = ba; bestR = r; dir = -1; }
+        }
+        if (!bestR || bestAmt <= 0) continue;
+        var from = dir > 0 ? a : b, to = dir > 0 ? b : a;
+        out.push({ key: from.id + '|' + to.id, from: from.id, to: to.id,
+                   resource: bestR, amount: bestAmt, dist: d,
+                   x0: from.x, y0: from.y, x1: to.x, y1: to.y });
+      }
+    }
+    cacheSet(tradeCache, key, out, TRADE_CAP);
+    return out;
+  }
+
+  /* ---------- 聚落 (区域格内的城镇/宗门/村庄 + 秘境) ---------- */
   function settlementsFor(i, j) {
     var key = i + ',' + j;
     var c = settleCache.get(key);
@@ -546,14 +881,11 @@
       for (var k = 0; k < count; k++) {
         var sq = i * REGION_M + (hash01(i, j, 21 + k) - 0.5) * REGION_M * 0.7;
         var sr = j * REGION_M + (hash01(i, j, 31 + k) - 0.5) * REGION_M * 0.7;
-        var placed = null;
-        for (var t = 0; t < 4; t++) {
-          var tq = Math.round(sq + (hash01(i, j, 41 + k * 4 + t) - 0.5) * 12);
-          var tr = Math.round(sr + (hash01(i, j, 61 + k * 4 + t) - 0.5) * 12);
-          var f = fields(tq, tr);
-          if (f.biome >= BIOME.GRASS && f.biome <= BIOME.DESERT) { placed = f; break; }
-        }
-        if (!placed) continue;
+        /* 阶段一/二 (勘测 → 选址): 锚点只是「候选点」, 真正落点由周围空间打分选出
+           —— 不再「钉死一格再来补建筑」, 也不再 4 次试投命中即落 (§三.4) */
+        var center = pickSettlementCenter(Math.round(sq), Math.round(sr));
+        if (!center) continue;
+        var placed = fields(center.q, center.r);
         /* 灵脉亲和 (设定 §十一): 灵脉域内宗门概率与人口提升 */
         var cn = communityNear(placed.q, placed.r);
         var inVeinDomain = !!(cn && cn.dist < CFG.COMM_R * 1.4);
@@ -596,145 +928,237 @@
     return arr;
   }
 
-  /* ---------- 道路 (纯函数代价场 A*) ---------- */
-  function roadCost(f) {
-    if (f.biome <= BIOME.OCEAN) return -1;
-    var base = [0, 0, 1.4, 1.0, 1.7, 2.6, 7.0, 5.0][f.biome];
-    return base * (0.9 + f.hash * 0.2);
+  /* ---------- 道路 (A* 寻路: Dial 桶优先队列 + 三重剪枝; 跳板剪枝去重) ----------
+   * 权重表 ROAD_W 见 mapgen-config.js (水4 / 平地3 / 林5 / 山8)。
+   * 路网拓扑 (roadsNear): 每个聚落 × 3x3 邻域格内全部聚落, 按距离升序逐对跑 A*,
+   *   预算内可达即建路 —— 但先过「跳板剪枝」: 若存在中间聚落 m 严格位于两点
+   *   之间且直线绕行 ≤ 直达的 30%, 则不建 a-b 直路 (走 m 即可) —— 消除「跳板
+   *   路线与直达路并行」的三角捆绑重复路。剪枝是纯几何判定 (全整数, 不读缓
+   *   存), 跳板池取 3x3(a格)∪3x3(b格) —— 从任一端评估同一对结果相同 ⇒ 与访
+   *   问顺序无关, 跨会话确定。m 严格介于两点之间 ⇒ 最近邻对与 MST 边永不被
+   *   剪 (环性质) ⇒ 每聚落至少 1 路且路网不碎裂。创建顺序按规模大者先
+   *   (hubBefore), 跳板本身不限规模。
+   * A* 本体 (bfsRoad) 的三个剪枝:
+   *   ① 放弃「跨大陆找路」—— 剪枝把搜索限制在城镇周边邻域:
+   *        · 累计权重 > CFG.ROAD_COST_MAX 的分支不再扩展 (权重剪枝);
+   *        · 距起点层数 > CFG.ROAD_STEPS_MAX 的格不入队 (步数剪枝);
+   *        · 剩余代价可采纳下界 使 g+h > 预算 的格直接跳过 —
+   *          可采纳 ⇒ 不改变任何 ≤预算 路径的存在性与最优值, 只砍掉「注定失败」
+   *          分支的无效扩散。
+   *      A* 时代 guard=12000 步 + 海岸破碎区最长 5.1s 持 V8 门闩的病灶一并消除;
+   *      实测最慢单 region(含 roadsNear+跳板剪枝) ~60ms, 远低于回归预算 250ms。
+   *   ② 实现用 Dial 桶队列做 A* 的优先队列, 桶下标 = f = g + h:
+   *      h = 最小权重 × ⌊笛卡尔欧氏距离⌋ (cartDist: 两端点经 tileToWorld 的
+   *      实际世界坐标代入勾股定理, 借恒等式 dx²+dy² = HEX_W²·(dq²+dq·dr+dr²)
+   *      整数化, 无浮点开方 —— 非 hexDist 步数)。欧氏启发使等代价路径
+   *      向直线收敛 (hexDist 分层会让平地整片同 f, 路形随扩展序锯齿), 更接近真实路网;
+   *      权重为小整数 3..8 且 h 为整数 ⇒ f 仍为 0..COST_MAX 的整数, 桶数固定;
+   *      h 一致 (consistent) ⇒ 按 f 升序出队即标准 A* 展开序, 目标首次出队即最优。
+   *      ⚠ 桶内仍是 FIFO + NEIGH_SLOTS 固定顺序 + 端点按 id 序归一化 ⇒ 确定性。
+   *   ③ 确定性: 上述固定序 + 全整数判定 ⇒ 跨区块/跨会话/冷热缓存完全一致。 */
+  function roadWeight(f) {
+    var w = CFG.ROAD_W;
+    return (w && w[f.biome] != null) ? w[f.biome] : 4;
+  }
+  /* 全域最小通行权重 (可采纳下界用): 取 ROAD_W 最小值, 兜底 3 */
+  function roadMinWeight() {
+    var w = CFG.ROAD_W, m = Infinity;
+    if (w) for (var i = 0; i < w.length; i++) if (w[i] != null && w[i] < m) m = w[i];
+    return isFinite(m) ? m : 3;
   }
 
-  /* 二叉小顶堆: 元素 [q, r], 权值 f */
-  function Heap() { this.a = []; this.p = []; }
-  Heap.prototype.push = function (v, pri) {
-    var a = this.a, p = this.p, i = a.length;
-    a.push(v); p.push(pri);
-    while (i > 0) {
-      var par = (i - 1) >> 1;
-      if (p[par] <= p[i]) break;
-      var tv = a[i]; a[i] = a[par]; a[par] = tv;
-      var tp = p[i]; p[i] = p[par]; p[par] = tp;
-      i = par;
-    }
-  };
-  Heap.prototype.pop = function () {
-    var a = this.a, p = this.p;
-    if (!a.length) return null;
-    var top = a[0], lv = a.pop(), lp = p.pop();
-    if (a.length) {
-      a[0] = lv; p[0] = lp;
-      var i = 0, n = a.length;
-      for (;;) {
-        var l = i * 2 + 1, r2 = l + 1, m = i;
-        if (l < n && p[l] < p[m]) m = l;
-        if (r2 < n && p[r2] < p[m]) m = r2;
-        if (m === i) break;
-        var tv = a[i]; a[i] = a[m]; a[m] = tv;
-        var tp = p[i]; p[i] = p[m]; p[m] = tp;
-        i = m;
-      }
-    }
-    return top;
-  };
+  /* ⌊√n⌋ 纯整数牛顿迭代 (无任何浮点运算 → 无浮点不确定性): 收敛即返回。
+     调用方 n ≤ 3×(2×ROAD_STEPS_MAX)² = 19200, 远小于 2^31, 无溢出风险 */
+  function isqrt(n) {
+    if (n < 2) return n;
+    var x = n, y = ((x + (n / x | 0)) >> 1) | 0;
+    while (y < x) { x = y; y = ((x + (n / x | 0)) >> 1) | 0; }
+    return x;
+  }
 
-  function astar(sq, sr, tq, tr) {
-    var g = new Map(), prev = new Map(), closed = new Set();
-    var open = new Heap();
+  /* 两格间的「实际笛卡尔直线距离」(以格间距 HEX_W 为单位取整)。
+     由 tileToWorld: x = HEX_W·(q+r/2), y = 1.5·HEX_R·r, HEX_W = √3·HEX_R ⇒
+       dx² + dy² = HEX_W²·(dq² + dq·dr + dr²)   —— 精确恒等式, 无任何近似
+     ⇒ 实际欧氏距离 / HEX_W = √(dq² + dq·dr + dr²), isqrt 取整即整数化。
+     这不是「六边格步数」(hexDist), 而是把两端点的笛卡尔世界坐标代入
+     勾股定理的结果 —— 只是借恒等式避开浮点开方。供 A* 启发 / 跳板剪枝 /
+     候选排序等一切「直线距离」语义使用。 */
+  function cartDist(q1, r1, q2, r2) {
+    var dq = q1 - q2, dr = r1 - r2;
+    return isqrt(dq * dq + dr * dr + dq * dr);
+  }
+
+  /* 跳板优先级 (全序, 确定性): 规模(pop)大者优先; 同规模离灵气原点(0,0)近者
+     优先 (轴向平方欧氏距 q²+r²+qr, 纯整数不开方); 再同按 id 字典序 ——
+     任意聚落集合内「最大者」唯一, 剪枝结果与遍历顺序无关 */
+  function hubBefore(p, q2) {
+    if (p.pop !== q2.pop) return p.pop > q2.pop;
+    var dp = p.q * p.q + p.r * p.r + p.q * p.r;
+    var dq2 = q2.q * q2.q + q2.r * q2.r + q2.q * q2.r;
+    if (dp !== dq2) return dp < dq2;
+    return p.id < q2.id;
+  }
+
+  /* 跳板剪枝判定: 中间聚落 m 能否替代 a-b 直路 (笛卡尔实际位置, 全整数)。
+     距离全部用 cartDist (真实笛卡尔直线距离, 非 hexDist 步数)。
+     两个条件缺一不可:
+       ① m 严格位于两点之间 (到两端都严格更近) —— 两重连通性保证:
+          · 最近邻对永不被剪 (m 更近与「b 是 a 的最近邻」矛盾)
+            ⇒ 每个聚落至少保住到它最近邻的 1 条路;
+          · MST 的边也不可能被剪 (环性质: 若 m 到两端都严格更近, 则 (a,b)
+            是环 a-m-b 上的最重边, 不属于任何 MST) ⇒ 路网不碎裂。
+       ② a→m→b 直线绕行 ≤ 直达的 30% (10/13 整数比值, 不用浮点) ——
+          绕行更多说明 m 不顺路, 直达路有独立价值, 保留。
+     注意跳板不限规模: 资格门槛会放过「大城-小镇直达 + 小村跳板」并行的
+     三角捆绑 (实测主线), 去掉门槛后这类冗余由几何条件统一剪掉。 */
+  function hopPrune(a, b, m, dab) {
+    if (m.id === a.id || m.id === b.id) return false;
+    var dam = cartDist(a.q, a.r, m.q, m.r);
+    if (dam >= dab) return false;
+    var dmb = cartDist(m.q, m.r, b.q, b.r);
+    if (dmb >= dab) return false;
+    return 10 * (dam + dmb) <= 13 * dab;
+  }
+
+  /* A* 寻路 (f = g + h, Dial 桶优先队列): 返回 [[q,r], ...] 或 null (超预算/不可达)
+     函数名保留 bfsRoad: 语义为「道路段寻路」, 且 verify/w3_bfs_road.mjs 以此名调用 */
+  function bfsRoad(sq, sr, tq, tr) {
+    var maxCost = CFG.ROAD_COST_MAX | 0;
+    var maxSteps = CFG.ROAD_STEPS_MAX | 0;
+    var minW = roadMinWeight();
+    var d0 = hexDist(sq, sr, tq, tr);
+    if (d0 > maxSteps || d0 * minW > maxCost) return null;   // 直线下界即超预算, 直接放弃
+
+    var buckets = [];
+    for (var b = 0; b <= maxCost; b++) buckets.push([]);
+    var dist = new Map(), prev = new Map(), closed = new Set();
     var sk = sq + ',' + sr;
-    g.set(sk, 0);
-    open.push([sq, sr], hexDist(sq, sr, tq, tr));
-    /* 迭代上限 ASTAR_GUARD: 作用是把「隔水不可达 / 代价过高」的聚落对尽快放弃,
-       不能无界搜索 —— 原值 60000 时海岸破碎区的失败搜索会探完整片大陆
-       (单次 regionJson 实测最长 5.1s, 最坏 10.7s), 且该生成同步持有本 VM 的
-       V8 门闩 (JsWorldVm._gate) → 同 seed 一切请求排队超时 → 黑区 + 卡死。
+    dist.set(sk, 0);
+    buckets[0].push(sq, sr);        // 扁平存 [q,r] 对, 省一次数组分配
 
-       ⚠️ 取舍是**真实存在**的, 并非「零代价」——早期 verify/bench_roads_lost.mjs
-          只比 roadCache.size, 会把「丢一条 + 少算一条」恰好相等误判为无损失 (已弃用)。
-       逐对隔离实测 (verify/bench_guard_frontier.mjs, 3 seed × 3000 区域 = 1070 对,
-       用纯函数 astar 逐对比对, 不受 roadFail/缓存淘汰状态混淆):
-         ≤1500 步 89.81%   ≤3000 5.14%   ≤6000 1.12%
-         6001~12000 0.19%  12001~24000 0.19%  24001~60000 0.37%   >60000/真不可达 3.18%
-       → 相对 60000: 取 12000 丢 6 对 (0.56%), 取 6000 丢 8 对 (0.75%),
-         取 3000 丢 14 对 (1.3%), 取 1500 丢 69 对 (6.4%)。
-       被丢的都是「需上万步的长绕行」海岸断续连接; 实测把这 6 对找回来最坏会让
-       单个 region 构建达 3682ms (另有 543ms/94ms/41ms/24ms/21ms) —— 正是要根治
-       的卡死病灶。故取 12000: 以约 0.56% 的长绕行路, 换取最坏 region 由秒级降为亚秒级。
-       回归: verify/w3_astar_budget.mjs 断言「相对 60000 的丢路率 ≤1%」+ 耗时上界
-       (原先的「零道路损失」断言基于已废弃的 roadCache.size 比法, 不成立)。 */
-    var guard = 0;
-    while (guard++ < 12000) {
-      var cur = open.pop();
-      if (!cur) return null;
-      var cq = cur[0], cr = cur[1], ck = cq + ',' + cr;
-      if (closed.has(ck)) continue;
-      closed.add(ck);
-      if (cq === tq && cr === tr) {
-        var path = [], p = ck;
-        while (p) {
-          var parts = p.split(',');
-          path.push([+parts[0], +parts[1]]);
-          p = prev.get(p);
+    for (var f = 0; f <= maxCost; f++) {
+      var bucket = buckets[f];
+      for (var i = 0; i < bucket.length; i += 2) {
+        var cq = bucket[i], cr = bucket[i + 1], ck = cq + ',' + cr;
+        if (closed.has(ck)) continue;               // 已被更低 f 结算过
+        closed.add(ck);
+        if (cq === tq && cr === tr) {
+          var path = [], p = ck;
+          while (p !== undefined) {
+            var parts = p.split(',');
+            path.push([+parts[0], +parts[1]]);
+            p = prev.get(p);
+          }
+          path.reverse();
+          return path;
         }
-        path.reverse();
-        return path;
-      }
-      for (var k = 0; k < 6; k++) {
-        var nx = cq + NEIGH_SLOTS[k][0], ny = cr + NEIGH_SLOTS[k][1];
-        var f = fields(nx, ny);
-        var c = roadCost(f);
-        if (c < 0) continue;
-        var nk = nx + ',' + ny;
-        if (closed.has(nk)) continue;
-        var ng = g.get(ck) + c;
-        if (ng < (g.has(nk) ? g.get(nk) : 1e18)) {
-          g.set(nk, ng);
-          prev.set(nk, ck);
-          open.push([nx, ny], ng + hexDist(nx, ny, tq, tr));
+        var g = dist.get(ck);
+        for (var k = 0; k < 6; k++) {
+          var nx = cq + NEIGH_SLOTS[k][0], ny = cr + NEIGH_SLOTS[k][1];
+          var ds = hexDist(sq, sr, nx, ny);
+          if (ds > maxSteps) continue;                         // 步数剪枝 (距起点层数)
+          var dn = hexDist(nx, ny, tq, tr);
+          /* 步数透镜: 前缀 ≥ ds 步 + 后缀 ≥ dn 步 > 预算 ⇒ 该格不可能在预算内完成
+             (两侧都是下界, 故为可采纳剪枝, 不改变可行路径集合) */
+          if (ds + dn > maxSteps) continue;
+          /* h = 最小权重 × ⌊笛卡尔欧氏距离⌋ (cartDist: 两端点世界坐标的实际
+             直线距离, 以格间距为单位取整 —— 恒等式见 cartDist 注释, 非六边格
+             步数)。欧氏启发优于 hexDist: 平地上 hexDist 会让所有单调格 f 相同
+             (整片同桶, 路形随扩展序锯齿), 欧氏则让直线走廊的格 f 最低、最先
+             展开 ⇒ 等代价路径向直线收敛。向下取整 ⇒ h 仍是可采纳下界 */
+          var h = minW * cartDist(nx, ny, tq, tr);             // 剩余代价可采纳下界 (实际笛卡尔欧氏距离)
+          if (g + h > maxCost) continue;                       // 下界剪枝: 该分支必超预算 (省一次 fields)
+          var nk = nx + ',' + ny;
+          if (closed.has(nk)) continue;
+          var ng = g + roadWeight(fields(nx, ny));
+          if (ng + h > maxCost) continue;                      // 权重剪枝 (实际权重 ≥ 下界)
+          var old = dist.has(nk) ? dist.get(nk) : 1e18;
+          if (ng < old) {
+            dist.set(nk, ng);
+            prev.set(nk, ck);
+            buckets[ng + h].push(nx, ny);                      // 桶下标 = f
+          }
         }
       }
+      buckets[f] = null;      // 该层已处理完, 及时释放
     }
     return null;
   }
 
   /* 某区域格内聚落的对外道路 (缓存, 全局去重, 预算制)
-     maxNew: 本次调用允许新算的 A* 条数; 0 = 纯读缓存 (绘制帧用), 防止 A* 卡帧 */
+     配对语义: 每个聚落与 3x3 邻域格内全部 n 个聚落 (含跨格) 按六边距离升序
+     逐对跑 A*, 预算内可达即建路 —— 但先过「跳板剪枝」(hopPrune): 存在严格
+     顺路的中间聚落 (两点之间 + 直线绕行 ≤30%) 就不建直达路, 消除跳板/直达
+     并行的三角捆绑重复路; 跳板不限规模, MST 边 + 最近邻对保证不被剪。
+     候选池半径 (~40 格) 已覆盖 ROAD_STEPS_MAX, 池外的对必被 A* 直线下界剪掉。
+     maxNew: 本次调用允许新算的道路条数; 0 = 纯读缓存 (绘制帧用), 防止寻路卡帧 */
   function roadsNear(i, j, maxNew) {
     var budget = maxNew | 0;
     var cellKey = i + ',' + j;
-    var mine = settlementsFor(i, j);
+    /* 创建顺序: 规模大者先 (同规模离原点近者先) —— hubBefore 全序, 确定性;
+       slice 后排序, 不动 settlementsFor 的缓存数组 */
+    var mine = settlementsFor(i, j).slice().sort(function (p, q2) {
+      return hubBefore(p, q2) ? -1 : 1;
+    });
     var out = [];
     for (var s = 0; s < mine.length; s++) {
       var a = mine[s];
       if (a.type === 'poi') continue;
-      // 3x3 邻域格内其他聚落
-      var cands = [];
+      // 3x3 邻域格内全部其他聚落 (候选池)
+      var cands = [], aPoolIds = new Set();
       for (var di = -1; di <= 1; di++) {
         for (var dj = -1; dj <= 1; dj++) {
           var others = settlementsFor(i + di, j + dj);
           for (var o = 0; o < others.length; o++) {
             if (others[o].id === a.id || others[o].type === 'poi') continue;
+            aPoolIds.add(others[o].id);
             cands.push(others[o]);
           }
         }
       }
+      /* 距离升序 (实际笛卡尔直线距离): 先近后远, 近的对几乎必成且便宜,
+         远的对由预算自然截断 */
       cands.sort(function (p, q2) {
-        return hexDist(a.q, a.r, p.q, p.r) - hexDist(a.q, a.r, q2.q, q2.r);
+        return cartDist(a.q, a.r, p.q, p.r) - cartDist(a.q, a.r, q2.q, q2.r);
       });
-      var want = a.type === 'sect' ? 2 : 1;
-      var linked = 0;
-      for (var c2 = 0; c2 < cands.length && linked < want; c2++) {
+      /* 全部候选逐一尝试 (同一对两端各发起一次也只建一条, rkey 去重) */
+      for (var c2 = 0; c2 < cands.length; c2++) {
         var b = cands[c2];
         var rkey = a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id;
         if (roadFail.has(rkey)) continue;          // 已判定不可达: 终身跳过
         var road = roadCache.get(rkey);
         if (!road) {
+          /* 跳板剪枝: 跳板池 = 3x3(a格) ∪ 3x3(b格) —— 取并集使从 a 侧与从 b 侧
+             评估同一对时池子相同 ⇒ 剪枝与「哪侧先处理该对」无关 (跨会话确定)。
+             剪枝判定全整数且不读缓存; 不消耗 A* 预算, 也不记 roadFail (可达,
+             只是无需直达) */
+          var dab = cartDist(a.q, a.r, b.q, b.r);  // 实际笛卡尔直线距离 (非步数)
+          var pruned = false;
+          for (var h2 = 0; h2 < cands.length && !pruned; h2++)
+            pruned = hopPrune(a, b, cands[h2], dab);
+          if (!pruned) {
+            var bp = b.id.split('_');
+            var bic = +bp[0], bjc = +bp[1];        // b 的区域格 (id 前缀 i_j_k)
+            for (var ei = -1; ei <= 1 && !pruned; ei++) {
+              for (var ej = -1; ej <= 1 && !pruned; ej++) {
+                var extras = settlementsFor(bic + ei, bjc + ej);
+                for (var e3 = 0; e3 < extras.length && !pruned; e3++) {
+                  var mm = extras[e3];
+                  if (mm.type === 'poi' || aPoolIds.has(mm.id)) continue;
+                  pruned = hopPrune(a, b, mm, dab);
+                }
+              }
+            }
+          }
+          if (pruned) continue;
           if (budget <= 0) continue;               // 预算用尽: 本帧不算
           budget--;
-          /* 方向归一化: A* 端点固定按 id 序 (小→大), 使道路点列方向
+          /* 方向归一化: 端点固定按 id 序 (小→大), 使道路点列方向
              与「哪个聚落先发起建路」无关 —— 否则热缓存命中与冷生成
              会得到同一路径的相反点列, 破坏跨会话一致性。 */
           var pA = a, pB = b;
           if (b.id < a.id) { pA = b; pB = a; }
-          var path = astar(pA.q, pA.r, pB.q, pB.r);
+          var path = bfsRoad(pA.q, pA.r, pB.q, pB.r);
           if (!path) { setAdd(roadFail, rkey, ROADFAIL_CAP); continue; }
           var pts = [], tset = new Set();
           for (var pj = 0; pj < path.length; pj++) {
@@ -750,7 +1174,6 @@
           roadVer++;                               // 新道路落成 → tile onRoad 缓存整体失效
         }
         out.push(road);
-        linked++;
       }
     }
     return out;
@@ -920,6 +1343,7 @@
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
     roadCache.clear(); roadFail.clear();
+    siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadVer = 0;
   }
 
@@ -938,6 +1362,18 @@
     regionInfo: regionInfo,
     settlementsFor: settlementsFor,
     roadsNear: roadsNear,
+    /* 城镇三段式生成 (§三): 供 mapgen-server.regionJson 与预览页/前端直接调用。
+       prospectArea = 勘测适宜度图; pickSettlementCenter = 选址中心;
+       growTownFootprint = 足迹/建筑/产出/风格 (纯函数 + 按聚落 id 缓存) */
+    prospectArea: prospectArea,
+    pickSettlementCenter: pickSettlementCenter,
+    growTownFootprint: growTownFootprint,
+    siteScore: siteScore,
+    landuseOf: landuseOf,
+    coastalAt: coastalAt,
+    /* 贸易网络 (§四): 产出–供需缺口 → 相邻城镇 tradeEdge (纯计算, 不落库) */
+    tradeEdgesFor: tradeEdgesFor,
+    townNet: townNet,
     spiritAt: spiritAt,
     communityOf: communityOf,
     communityNear: communityNear,
@@ -947,14 +1383,16 @@
     pxToTile: pxToTile,
     tileToWorld: tileToWorld,
     hexDist: hexDist,
+    cartDist: cartDist,
     mountainNear: mountainNear,
     /* 精灵索引分配 (供 verify/w5_sprite_range.mjs 直接断言输出契约:
        各群系索引区间必须落在图集已绘制范围内, 不得溢出到别行素材) */
     propSpriteFor: propSpriteFor,
-    /* 纯函数 A* (只依赖 seed 地形, 不读 roadCache/roadFail) — 供
-       verify/bench_guard_frontier.mjs 逐对隔离测量 «guard 下界 vs 丢路»,
+    /* 纯函数 A* 寻路 (只依赖 seed 地形, 不读 roadCache/roadFail) — 供
+       verify/w3_bfs_road.mjs 逐对隔离断言「预算上限 / 邻域连通 / 权重累加」,
        避免经 roadsNear 时被跨区域的 roadFail/缓存淘汰状态混淆 */
-    astar: astar,
+    bfsRoad: bfsRoad,
+    roadWeight: roadWeight,
     roadCache: roadCache,
     settleCache: settleCache,
     commCache: commCache,

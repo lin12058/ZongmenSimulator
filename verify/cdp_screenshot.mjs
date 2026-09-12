@@ -138,7 +138,22 @@ async function main() {
       return JSON.stringify({
         metaStatus: metaStatus,
         data: window.__data ? window.__data() : null,
-        legendItems: (document.querySelectorAll('#legendItems .item') || []).length,
+        sectName: (document.querySelector('#sectBody .sec-name') || {}).textContent || '',
+        sectRows: (document.querySelectorAll('#sectBody .kv') || []).length,
+        sectTags: (document.querySelectorAll('#sectBody .tag') || []).length,
+        /* HUD 几何: 面板错位/被压这类问题在缩放图上肉眼看不准, 直接报边框 */
+        hud: (function () {
+          var out = [];
+          var ids = ['titleBox', 'sectBox', 'controls', 'minimapBox', 'info'];
+          for (var i = 0; i < ids.length; i++) {
+            var el = document.getElementById(ids[i]);
+            if (!el) { out.push(ids[i] + ':absent'); continue; }
+            var r = el.getBoundingClientRect();
+            out.push(ids[i] + ':' + Math.round(r.left) + ',' + Math.round(r.top) +
+                     ',' + Math.round(r.width) + ',' + Math.round(r.height));
+          }
+          return out.join(' ');
+        })(),
         hasGl: !!document.querySelector('canvas'),
         fatalShown: /后端世界服务不可用/.test(document.body.innerText || ''),
         bodySnippet: (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 260)

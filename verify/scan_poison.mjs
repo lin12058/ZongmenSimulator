@@ -11,7 +11,7 @@ const SEED = process.argv[3] || '42';
 const [ia, ib, ja, jb] = JSON.parse(process.argv[4] || '[-80,80,-80,80]');
 
 global.window = globalThis;
-for (const f of ['noise.js', 'mapgen.js', 'mapgen-server.js']) {
+for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js', 'mapgen-server.js']) {
   (0, eval)(fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js', f), 'utf8'));
 }
 (0, eval)(fs.readFileSync(path.join(ROOT, 'web', 'js', 'pb.js'), 'utf8'));

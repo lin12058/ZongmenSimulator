@@ -50,6 +50,23 @@ public sealed class RegionInfoDto
 }
 
 [ProtoContract]
+public sealed class BuildingDto
+{
+    [ProtoMember(1, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(3)] public string Kind { get; set; } = "";      // 码头/农田/矿山/民房…
+    [ProtoMember(4)] public string Terrain { get; set; } = "";   // 地皮: 灵枢/水岸/良田/矿脉/林地/灼壤/村落/core
+    [ProtoMember(5)] public int Tier { get; set; }
+}
+
+[ProtoContract]
+public sealed class ResourceQuantDto
+{
+    [ProtoMember(1)] public string Resource { get; set; } = "";  // 粮/木/矿/渔/炭/灵/丹/器
+    [ProtoMember(2)] public int Amount { get; set; }
+}
+
+[ProtoContract]
 public sealed class SettlementDto
 {
     [ProtoMember(1)] public string Id { get; set; } = "";
@@ -66,6 +83,33 @@ public sealed class SettlementDto
     [ProtoMember(10)] public int Tier { get; set; }               // 等级/规模
     [ProtoMember(11)] public int State { get; set; }              // 0活跃 1被毁 2刷新中 3事件态
     [ProtoMember(12)] public long ExpireTs { get; set; }          // 0=永久
+    /* 13..16 城镇足迹 (§三/Phase3): 风格 + 建筑 + 产出。
+       ⚠ 与 settle 包 (SettlePack) 同源 — 区域包内这四项仅作「不必二次取包」的冗余,
+       持久化权威在 w:{seed}:settle:{i}:{j}。 */
+    [ProtoMember(13)] public string Style { get; set; } = "";      // 风格 key: farm/mine/river…
+    [ProtoMember(14)] public string StyleName { get; set; } = "";  // 风格中文名
+    [ProtoMember(15)] public List<BuildingDto> Buildings { get; set; } = [];
+    [ProtoMember(16)] public List<ResourceQuantDto> Resources { get; set; } = [];
+}
+
+/// <summary>城镇足迹包 (落 SQLite: w:{seed}:settle:{i}:{j})。
+/// 建筑足迹后续会演化 (事件/毁损/升级), 故独立成包、独立持久化。</summary>
+[ProtoContract]
+public sealed class SettleTownDto
+{
+    [ProtoMember(1)] public string Id { get; set; } = "";
+    [ProtoMember(2)] public string Style { get; set; } = "";
+    [ProtoMember(3)] public string StyleName { get; set; } = "";
+    [ProtoMember(4)] public List<BuildingDto> Buildings { get; set; } = [];
+    [ProtoMember(5)] public List<ResourceQuantDto> Resources { get; set; } = [];
+}
+
+[ProtoContract]
+public sealed class SettlePack
+{
+    [ProtoMember(1, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int I { get; set; }
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int J { get; set; }
+    [ProtoMember(3)] public List<SettleTownDto> Towns { get; set; } = [];
 }
 
 [ProtoContract]
@@ -223,6 +267,12 @@ public sealed class PlaceEntity
     [ProtoMember(10)] public int Tier { get; set; }
     [ProtoMember(11)] public int State { get; set; }           // 0活跃 1被毁 2刷新中 3事件态
     [ProtoMember(12)] public long ExpireTs { get; set; }       // 0=永久
+    /* 13..16 城镇足迹 (§三/Phase3): 供客户端画足迹底框 / 建筑图标 / 产能摘要。
+       与 SettlePack 同源, 由 GetTileBlock 从 settle 包合并进来。 */
+    [ProtoMember(13)] public string Style { get; set; } = "";
+    [ProtoMember(14)] public string StyleName { get; set; } = "";
+    [ProtoMember(15)] public List<BuildingDto> Buildings { get; set; } = [];
+    [ProtoMember(16)] public List<ResourceQuantDto> Resources { get; set; } = [];
 }
 
 /// <summary>按区域格分组的实体列表 (key = 区域格坐标, 客户端据键去重/失效)。</summary>
@@ -293,4 +343,7 @@ public static class WorldKeys
         => $"w:{SeedPrefix(seed)}:region:{i}:{j}";
     public static string Comm(string seed, int ci, int cj)
         => $"w:{SeedPrefix(seed)}:comm:{ci}:{cj}";
+    /// <summary>城镇足迹包 (Phase3): 建筑/产出/风格, 独立持久化 (会随事件演化)。</summary>
+    public static string Settle(string seed, int i, int j)
+        => $"w:{SeedPrefix(seed)}:settle:{i}:{j}";
 }

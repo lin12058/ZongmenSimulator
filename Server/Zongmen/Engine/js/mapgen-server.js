@@ -78,19 +78,32 @@
     return JSON.stringify({ ca: ca, cb: cb, count: n, pn: pn, d: b64FromBytes(buf) });
   }
 
-  /* ---------- 区域包: 区域信息 + 聚落 + 道路(A* 权威) ---------- */
+  /* ---------- 区域包: 区域信息 + 聚落(含城镇足迹) + 道路(权威) ---------- */
+  function settlementJson(st) {
+    /* 城镇足迹 (§三 生长结果): 由纯函数按聚落 id 缓存, 与客户端各算各的必须一致 */
+    var plan = MG.growTownFootprint(st.id, st.type, st.q, st.r);
+    var bs = [];
+    for (var b = 0; b < plan.buildings.length; b++) {
+      var bd = plan.buildings[b];
+      bs.push({ q: bd.q, r: bd.r, kind: bd.kind, terrain: bd.terrain, tier: bd.tier });
+    }
+    var rs = [];
+    for (var r = 0; r < plan.resources.length; r++)
+      rs.push({ resource: plan.resources[r].resource, amount: plan.resources[r].amount });
+    return { id: st.id, type: st.type, q: st.q, r: st.r,
+             x: st.x, y: st.y, name: st.name, pop: st.pop,
+             owner: st.owner || '', tier: st.tier || 0,
+             state: st.state || 0, expireTs: st.expireTs || 0,
+             style: plan.style, styleName: plan.styleName,
+             buildings: bs, resources: rs };
+  }
+
   function regionJson(i, j) {
     var ri = MG.regionInfo(i, j);
     var sts = MG.settlementsFor(i, j);
     var roads = MG.roadsNear(i, j, 9999);     // 服务端权威: 预算充足, 一次算全
     var stArr = [], rdArr = [];
-    for (var s = 0; s < sts.length; s++) {
-      var st = sts[s];
-      stArr.push({ id: st.id, type: st.type, q: st.q, r: st.r,
-                   x: st.x, y: st.y, name: st.name, pop: st.pop,
-                   owner: st.owner || '', tier: st.tier || 0,
-                   state: st.state || 0, expireTs: st.expireTs || 0 });
-    }
+    for (var s = 0; s < sts.length; s++) stArr.push(settlementJson(sts[s]));
     for (var m = 0; m < roads.length; m++) {
       var rd = roads[m], pts = [];
       for (var p = 0; p < rd.pts.length; p++) pts.push(rd.pts[p].x, rd.pts[p].y);
@@ -101,6 +114,30 @@
       region: { q: ri.q, r: ri.r, x: ri.x, y: ri.y, biome: ri.biome, name: ri.name },
       settlements: stArr, roads: rdArr
     });
+  }
+
+  /* ---------- 城镇足迹包: 按区域格持久化 (w:{seed}:settle:{i}:{j}) ----------
+     建筑足迹「后续会演化, 必须持久化」(§Phase3)。与 regionJson 的聚落实体分开成包,
+     由 C# 侧独立落 SQLite + 独立 rev; 结构演化不影响聚落实体层。 */
+  function settleJson(i, j) {
+    var sts = MG.settlementsFor(i, j);
+    var towns = [];
+    for (var s = 0; s < sts.length; s++) {
+      var st = sts[s];
+      if (st.type === 'poi') continue;              // 秘境无城镇足迹
+      var plan = MG.growTownFootprint(st.id, st.type, st.q, st.r);
+      var bs = [];
+      for (var b = 0; b < plan.buildings.length; b++) {
+        var bd = plan.buildings[b];
+        bs.push({ q: bd.q, r: bd.r, kind: bd.kind, terrain: bd.terrain, tier: bd.tier });
+      }
+      var rs = [];
+      for (var r = 0; r < plan.resources.length; r++)
+        rs.push({ resource: plan.resources[r].resource, amount: plan.resources[r].amount });
+      towns.push({ id: st.id, style: plan.style, styleName: plan.styleName,
+                   buildings: bs, resources: rs });
+    }
+    return JSON.stringify({ i: i, j: j, towns: towns });
   }
 
   /* ---------- 群落包: 群落 + 灵脉 ---------- */
@@ -235,6 +272,7 @@
     init: function (seed) { MG.init(String(seed)); return JSON.stringify({ ok: 1 }); },
     chunkJson: chunkJson,
     regionJson: regionJson,
+    settleJson: settleJson,
     commJson: commJson,
     blockLayersJson: blockLayersJson,
     tileJson: tileJson,

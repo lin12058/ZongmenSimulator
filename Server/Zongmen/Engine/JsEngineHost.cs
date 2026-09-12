@@ -60,6 +60,7 @@ public sealed class JsWorldVm : IDisposable
                 "init" => (string)_svc.init(args[0]),
                 "chunkJson" => (string)_svc.chunkJson(args[0], args[1]),
                 "regionJson" => (string)_svc.regionJson(args[0], args[1]),
+                "settleJson" => (string)_svc.settleJson(args[0], args[1]),
                 "commJson" => (string)_svc.commJson(args[0], args[1]),
                 "blockLayersJson" => (string)_svc.blockLayersJson(args[0], args[1]),
                 "tileJson" => (string)_svc.tileJson(args[0], args[1]),

@@ -205,6 +205,13 @@ public sealed class MapWorldService : IDisposable
                 Tier = s.TryGetProperty("tier", out var tr) ? tr.GetInt32() : 0,
                 State = s.TryGetProperty("state", out var stt) ? stt.GetInt32() : 0,
                 ExpireTs = s.TryGetProperty("expireTs", out var ex) ? ex.GetInt64() : 0,
+                /* 城镇足迹 (§三): 区域包内冗余一份, 使单块路径不必再取 settle 包 */
+                Style = s.TryGetProperty("style", out var sy) && sy.ValueKind == JsonValueKind.String
+                    ? sy.GetString() ?? "" : "",
+                StyleName = s.TryGetProperty("styleName", out var sn) && sn.ValueKind == JsonValueKind.String
+                    ? sn.GetString() ?? "" : "",
+                Buildings = ReadBuildings(s, "buildings"),
+                Resources = ReadResources(s, "resources"),
             });
         }
         foreach (var rd in r.GetProperty("roads").EnumerateArray())
@@ -282,6 +289,82 @@ public sealed class MapWorldService : IDisposable
         }
         var proto = ProtoCodec.SerToByte(pack);
         return GZipCodec.Compress(proto);
+    }
+
+    /* ---------------- 城镇足迹包 (Phase3: 建筑足迹会演化 → 独立持久化) ---------------- */
+    /// <summary>取城镇足迹包字节 (gzip(protobuf))。落 SQLite 并支持冷回读 (T8 回填 _mem),
+    /// 与 chunk/comm 同一套两级缓存语义 — 建筑足迹是「后续会演化」的数据, 必须持久化。</summary>
+    public byte[] GetSettleBytes(string seed, int i, int j)
+    {
+        var key = WorldKeys.Settle(seed, i, j);
+        var hit = _mem.GetDataBytes(key) ?? ReadSqlBackfill(key);
+        if (hit != null) return hit;
+
+        return BuildOnce(key, () =>
+        {
+            var vm = World(seed);
+            var gz = BuildSettle(vm, i, j);
+            Store(key, gz);
+            return gz;
+        });
+    }
+
+    private byte[] BuildSettle(JsWorldVm vm, int i, int j)
+    {
+        using var d = JsonDocument.Parse(vm.Call("settleJson", i, j));
+        var root = d.RootElement;
+        var pack = new SettlePack
+        {
+            I = i, J = j,
+        };
+        foreach (var t in root.GetProperty("towns").EnumerateArray())
+        {
+            pack.Towns.Add(new SettleTownDto
+            {
+                Id = t.GetProperty("id").GetString() ?? "",
+                Style = t.TryGetProperty("style", out var sy) && sy.ValueKind == JsonValueKind.String
+                    ? sy.GetString() ?? "" : "",
+                StyleName = t.TryGetProperty("styleName", out var sn) && sn.ValueKind == JsonValueKind.String
+                    ? sn.GetString() ?? "" : "",
+                Buildings = ReadBuildings(t, "buildings"),
+                Resources = ReadResources(t, "resources"),
+            });
+        }
+        return GZipCodec.Compress(ProtoCodec.SerToByte(pack));
+    }
+
+    private static List<BuildingDto> ReadBuildings(JsonElement e, string name)
+    {
+        var list = new List<BuildingDto>();
+        if (!e.TryGetProperty(name, out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
+        foreach (var b in arr.EnumerateArray())
+        {
+            list.Add(new BuildingDto
+            {
+                Q = b.GetProperty("q").GetInt32(),
+                R = b.GetProperty("r").GetInt32(),
+                Kind = b.GetProperty("kind").GetString() ?? "",
+                Terrain = b.TryGetProperty("terrain", out var te) && te.ValueKind == JsonValueKind.String
+                    ? te.GetString() ?? "" : "",
+                Tier = b.TryGetProperty("tier", out var ti) ? ti.GetInt32() : 0,
+            });
+        }
+        return list;
+    }
+
+    private static List<ResourceQuantDto> ReadResources(JsonElement e, string name)
+    {
+        var list = new List<ResourceQuantDto>();
+        if (!e.TryGetProperty(name, out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
+        foreach (var r in arr.EnumerateArray())
+        {
+            list.Add(new ResourceQuantDto
+            {
+                Resource = r.GetProperty("resource").GetString() ?? "",
+                Amount = r.GetProperty("amount").GetInt32(),
+            });
+        }
+        return list;
     }
 
     /* R9: per-key 构建门闩 (chunk/region/comm 共用) */
@@ -380,6 +463,17 @@ public sealed class MapWorldService : IDisposable
         {
             var settleGroups = new List<EntityGroup>();
             var poiGroups = new List<EntityGroup>();
+            /* Phase3: 城镇足迹以 settle 包 (落 SQLite, 会演化) 为权威 —
+               同时取包即完成「生成并落库」, 冷回读走 _mem/SQLite 两级缓存。 */
+            var plans = new Dictionary<string, SettleTownDto>();
+            if (needSettle)
+            {
+                foreach (var (ri, rj) in layers!.Value.regions)
+                {
+                    var sp = DesFromGz<SettlePack>(GetSettleBytes(seed, ri, rj));
+                    foreach (var t in sp.Towns) plans[t.Id] = t;
+                }
+            }
             foreach (var (ri, rj) in layers!.Value.regions)
             {
                 var pack = DesFromGz<RegionPack>(GetRegionBytes(seed, ri, rj));
@@ -396,7 +490,13 @@ public sealed class MapWorldService : IDisposable
                     foreach (var s in pack.Settlements)
                     {
                         if (s.Type == "poi") continue;
-                        items.Add(ToEntity(s));
+                        var e = ToEntity(s);
+                        if (plans.TryGetValue(s.Id, out var plan))
+                        {
+                            e.Style = plan.Style; e.StyleName = plan.StyleName;
+                            e.Buildings = plan.Buildings; e.Resources = plan.Resources;
+                        }
+                        items.Add(e);
                     }
                     if (items.Count > 0) settleGroups.Add(new EntityGroup { I = ri, J = rj, Items = items });
                 }
@@ -429,6 +529,8 @@ public sealed class MapWorldService : IDisposable
         Id = s.Id, Type = s.Type, Q = s.Q, R = s.R, X = s.X, Y = s.Y,
         Name = s.Name, Pop = s.Pop, Owner = s.Owner,
         Tier = s.Tier, State = s.State, ExpireTs = s.ExpireTs,
+        Style = s.Style, StyleName = s.StyleName,
+        Buildings = s.Buildings, Resources = s.Resources,
     };
 
     /* 块归属映射: (regions[], comms[]) — JS 权威 (blockLayersJson)

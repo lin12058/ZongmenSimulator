@@ -187,7 +187,7 @@ async function checkPalettes() {
   const m = await MC.fetchMeta();
   global.window = globalThis;
   if (!global.MapGen) {                       // 与 verify_map 同款: 在 Node 里加载同份引擎作参照
-    for (const f of ['noise.js', 'mapgen.js']) {
+    for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js']) {
       (0, eval)(fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js', f), 'utf8'));
     }
   }

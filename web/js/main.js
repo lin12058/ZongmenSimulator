@@ -26,6 +26,13 @@
   var hoverTile = null, selectedTile = null;
   var showVeins = true, showLabels = true;
 
+  /* ---------- 宗门录 (左上角水墨面板) ----------
+     数据源: 地图实体层 settleCells 中 type==='sect' 的实体 (id/name/pop/tier/
+     styleName/buildings/resources), 不新增任何后端契约。
+     「掌门」一栏: 后端 mapgen 尚无归属系统 (owner 恒为空串, 见 mapgen.js 注释),
+     故由 seed+sect.id 确定性派生一个道号作演示 —— 事件系统接入后改为直接读 owner。 */
+  var sect = { auto: true, pinId: '', curId: '', cur: null, items: [] };
+
   var chunkData = new Map();        // 'ca,cb' -> {arrays, bbox}
   var regionCells = new Map();      // 'i,j'  -> {region, roads}   (图层1: 区域名+道路)
   var commCells = new Map();        // 'ci,cj'-> CommunityPack     (图层4: 灵脉群落)
@@ -312,6 +319,7 @@
         if (keepR.has(gk)) settleCells.set(gk, g.items);
       }
       markStaticDirty();
+      updateSectPanel(false);   // 实体层更新即刷新宗门录 (id 未变时内部直接返回)
     }
     if (resp.poi) {
       for (var pg = 0; pg < resp.poi.groups.length; pg++) {
@@ -719,6 +727,36 @@
     settleCells.forEach(drawEntityList);
     poiCells.forEach(drawEntityList);
 
+    /* 「本宗」朱砂标记: 双圈 + 四角斜标 (与宗门录面板同源, 标明当前展示的是哪一座) */
+    if (sect.cur) {
+      var sc = w2s(sect.cur.x, sect.cur.y);
+      if (sc.x > -70 && sc.y > -70 && sc.x < vw + 70 && sc.y < vh + 70) {
+        var sr = 15 * Math.max(z, 0.7);
+        ctx.save();
+        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.strokeStyle = 'rgba(166,58,44,0.88)'; ctx.lineWidth = 1.7;
+        ctx.beginPath(); ctx.arc(sc.x, sc.y, sr, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = 'rgba(166,58,44,0.32)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(sc.x, sc.y, sr + 3.4, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = 'rgba(166,58,44,0.85)'; ctx.lineWidth = 2;
+        for (var s4 = 0; s4 < 4; s4++) {
+          var sa = Math.PI / 4 + s4 * Math.PI / 2;
+          var sx2 = sc.x + Math.cos(sa) * (sr + 6.5), sy2 = sc.y + Math.sin(sa) * (sr + 6.5);
+          ctx.beginPath();
+          ctx.moveTo(sx2 - Math.cos(sa) * 4, sy2 - Math.sin(sa) * 4);
+          ctx.lineTo(sx2 + Math.cos(sa) * 4, sy2 + Math.sin(sa) * 4);
+          ctx.stroke();
+        }
+        ctx.font = 11.5 * Math.max(z, 0.75) + 'px "KaiTi","STKaiti",serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(240,232,214,0.88)';
+        ctx.strokeText('本宗', sc.x, sc.y - sr - 5);
+        ctx.fillStyle = 'rgba(166,58,44,0.95)';
+        ctx.fillText('本宗', sc.x, sc.y - sr - 5);
+        ctx.restore();
+      }
+    }
+
     staticCam.x = cam.x; staticCam.y = cam.y;
     staticCam.zoom = cam.zoom; staticCam.w = els.app.clientWidth; staticCam.h = els.app.clientHeight;
     staticDirty = false;
@@ -873,8 +911,11 @@
     cam.ty = cam.y = 0;
     cam.tzoom = cam.zoom = 2.2;
     els.seedInput.value = worldSeed;
-    els.seedShow.textContent = worldSeed;
     seedEra(worldSeed);
+    /* 世界重铸: 旧世界的宗门 id 全部失效 → 清固定选择, 回到随行 */
+    sect.auto = true; sect.pinId = ''; sect.curId = ''; sect.curFp = ''; sect.cur = null;
+    openSectMenu(false);
+    updateSectPanel(true);
     hideInfo();
     minimapDirty = true;
     forceStaticDirty();               // R1: 重铸需立即全量重绘 (清节流定时器)
@@ -887,6 +928,173 @@
     regionCells.forEach(function (pack) { rd += pack.roads.length; });
     commCells.forEach(function (cm) { if (cm.exists) veins += cm.veins.length; });
     els.stats.textContent = '已探明 宗门村镇 ' + st + ' · 墨路 ' + rd + ' · 灵脉 ' + veins;
+  }
+
+  /* ---------- 宗门录: 数据整理 + 面板渲染 ---------- */
+  var MASTER_CH = '玄清太云素无孤寒沧离明虚重白赤青洞霄寂衍真澄空'.split('');
+  var MASTER_TAIL = ['真人', '上人', '道人', '散人', '老祖', '尊主'];
+  var TIER_NAME = ['', '下品宗门', '中品宗门', '上品宗门'];
+  var VEIN_LEVEL = ['大', '中', '小'];
+
+  function hash32(str) {
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  /* 距离一律用「格子」: 轴向 (q,r) 的六角立方距离 */
+  function hexDist(q0, r0, q1, r1) {
+    var dq = q1 - q0, dr = r1 - r0;
+    return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
+  }
+  function tileDistFrom(wx, wy, q, r) {
+    var t = MC.pxToTile(wx, wy);
+    return Math.round(hexDist(q, r, t.q, t.r));
+  }
+  function masterOf(ent) {
+    if (ent.owner) return ent.owner;
+    var h = hash32(worldSeed + '#' + ent.id);
+    return MASTER_CH[h % MASTER_CH.length] +
+           MASTER_CH[(h >>> 6) % MASTER_CH.length] +
+           MASTER_TAIL[(h >>> 11) % MASTER_TAIL.length];
+  }
+  function regionNameAt(q, r) {
+    if (!geo) return '';
+    var pack = regionCells.get(cellKey(Math.floor(q / geo.regionM), Math.floor(r / geo.regionM)));
+    return pack && pack.region ? pack.region.name : '';
+  }
+  /* 最近灵脉: 遍历已加载的群落包 (随视野窗口有界, 无额外请求)。
+     VEIN_NEAR 格以外视为「未附」—— 免得写出一条几百格外的灵脉充数。 */
+  var VEIN_NEAR = 60;
+  function nearestVein(q, r) {
+    var best = null;
+    commCells.forEach(function (cm) {
+      if (!cm.exists || !cm.veins) return;
+      for (var i = 0; i < cm.veins.length; i++) {
+        var v = cm.veins[i];
+        var d = tileDistFrom(v.x, v.y, q, r);
+        if (!best || d < best.d) best = { v: v, d: d };
+      }
+    });
+    return best && best.d <= VEIN_NEAR ? best : null;
+  }
+  /* 视野内宗门, 按距相机中心的格距升序 */
+  function collectSects() {
+    var out = [], seen = {}, ct = MC.pxToTile(cam.x, cam.y);
+    settleCells.forEach(function (list) {
+      for (var i = 0; i < list.length; i++) {
+        var ent = list[i];
+        if (ent.type !== 'sect' || ent.state === 1) continue;   // 非宗门 / 已毁
+        if (seen[ent.id]) continue;                            // 邻块重复携带 → 去重
+        seen[ent.id] = true;
+        out.push({ ent: ent, d: Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)) });
+      }
+    });
+    out.sort(function (a, b) { return a.d - b.d; });
+    return out;
+  }
+  function pickSect() {
+    sect.items = collectSects();
+    if (!sect.auto) {
+      for (var i = 0; i < sect.items.length; i++)
+        if (sect.items[i].ent.id === sect.pinId) return sect.items[i];
+      sect.auto = true;                       // 所择宗门已出视野/被毁 → 回退随行
+    }
+    return sect.items.length ? sect.items[0] : null;
+  }
+  function tagList(list) {
+    var h = '<div class="chips">';
+    for (var i = 0; i < list.length && i < 8; i++)
+      h += '<span class="tag">' + esc(list[i].name) + '<b>' + list[i].n + '</b></span>';
+    return h + '</div>';
+  }
+  function kindsOf(buildings) {
+    var c = {}, order = [];
+    for (var i = 0; i < buildings.length; i++) {
+      var k = buildings[i].kind || '屋舍';
+      if (c[k] == null) { c[k] = 0; order.push(k); }
+      c[k]++;
+    }
+    return order.map(function (k) { return { name: k, n: c[k] }; })
+                .sort(function (a, b) { return b.n - a.n; });
+  }
+  function sectBodyHTML(pick) {
+    var ent = pick.ent, row = [];
+    function kv(k, v) {
+      return '<div class="kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
+    }
+    row.push('<div class="sec-top"><div class="sec-name">' + esc(ent.name) + '</div>' +
+             '<div class="sec-seal">' + esc(String(ent.name).slice(0, 2)) + '</div></div>');
+    row.push('<div class="sec-sub">' + (TIER_NAME[ent.tier] || '宗门') +
+             (ent.styleName ? ' · ' + esc(ent.styleName) : '') + '</div>');
+    row.push('<div class="ink-rule"></div>');
+    row.push(kv('掌门', esc(masterOf(ent))));
+    row.push(kv('门人', (ent.pop || 0).toLocaleString() + ' 口'));
+    row.push(kv('地界', esc(regionNameAt(ent.q, ent.r) || '未探明')));
+    row.push(kv('位次', (ent.q < 0 ? '西 ' + (-ent.q) : '东 ' + ent.q) + ' · ' +
+                         (ent.r < 0 ? '北 ' + (-ent.r) : '南 ' + ent.r)));
+    row.push(kv('距此', '<span class="sec-dist">' + pick.d + '</span> 格'));
+    var nv = nearestVein(ent.q, ent.r);
+    row.push(kv('灵脉', nv
+      ? esc(nv.v.name) + '灵脉（' + (VEIN_LEVEL[nv.v.level] || '小') + '）· ' + nv.d + ' 格'
+      : '未附灵脉'));
+    var bl = ent.buildings || [], rs = ent.resources || [];
+    if (bl.length) {
+      row.push('<div class="sec-cap">山门营建</div>');
+      row.push(tagList(kindsOf(bl)));
+    }
+    if (rs.length) {
+      row.push('<div class="sec-cap">岁入</div>');
+      row.push(tagList(rs.map(function (x) { return { name: x.resource, n: x.amount }; })));
+    }
+    return row.join('');
+  }
+  function sectMenuHTML() {
+    var h = '<div class="mm-item' + (sect.auto ? ' cur' : '') + '" data-id="">随行 · 就近择宗</div>';
+    for (var i = 0; i < sect.items.length && i < 30; i++) {
+      var it = sect.items[i];
+      h += '<div class="mm-item' + (!sect.auto && it.ent.id === sect.pinId ? ' cur' : '') +
+           '" data-id="' + esc(it.ent.id) + '"><span class="mm-nm">' + esc(it.ent.name) +
+           '</span><span class="mm-d">' + it.d + ' 格</span></div>';
+    }
+    if (!sect.items.length) h += '<div class="mm-empty">此方地界，未闻宗门</div>';
+    return h;
+  }
+  function openSectMenu(open) {
+    if (open) els.sectMenu.innerHTML = sectMenuHTML();
+    els.sectMenu.classList.toggle('open', open);
+    els.sectMenuBtn.classList.toggle('on', open);
+  }
+  /* 每 1.5s (与统计/小地图同节拍) 刷新一次。
+     ★ 重建判据除「当前宗门 id 变化」外还必须含「图层规模变化」: 区块响应的
+       settle/region/comm 是分先后到达的, 宗门实体往往先到 → 首帧渲染时
+       regionCells/commCells 还是空的, 「地界/灵脉」会算成未探明/未附并**永久滞留**
+       (id 不再变化 → 不再重建)。加了规模指纹后数据补到即自动纠正。 */
+  function layerFingerprint() {
+    return settleCells.size + '|' + regionCells.size + '|' + commCells.size;
+  }
+  function updateSectPanel(force) {
+    if (!metaReady || !geo) return;
+    var pick = pickSect();
+    var ent = pick ? pick.ent : null;
+    var id = ent ? ent.id : '';
+    var fp = layerFingerprint();
+    if (id !== sect.curId || fp !== sect.curFp || force) {
+      sect.curFp = fp;
+      sect.curId = id; sect.cur = ent;
+      els.sectBody.innerHTML = ent ? sectBodyHTML(pick)
+                                   : '<div class="sec-empty">此方地界，未闻宗门</div>';
+      if (els.sectMenu.classList.contains('open')) openSectMenu(true);
+      forceStaticDirty();        // 本宗朱砂标记随选中宗门移动 (相机静止时也须重绘)
+    } else {
+      sect.cur = ent;
+      var dEl = els.sectBody.querySelector('.sec-dist');
+      if (dEl && pick) dEl.textContent = pick.d;
+    }
   }
 
   /* ---------- 输入 ---------- */
@@ -1011,6 +1219,26 @@
       this.classList.toggle('off', !showLabels);
       forceStaticDirty();          // 同上: 区域名/聚落名/灵脉名牌都在静态层
     });
+    /* 择宗菜单: 按钮开合 / 选项落定 / 点空白处收起 */
+    els.sectMenuBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openSectMenu(!els.sectMenu.classList.contains('open'));
+    });
+    els.sectMenu.addEventListener('click', function (e) {
+      var it = e.target && e.target.closest ? e.target.closest('.mm-item') : null;
+      if (!it) return;
+      var id = it.getAttribute('data-id') || '';
+      sect.auto = !id;                    // 空 id = 「随行」项
+      sect.pinId = id;
+      openSectMenu(false);
+      updateSectPanel(true);              // 立即重排面板 + 移动朱砂标记
+    });
+    window.addEventListener('mousedown', function (e) {
+      if (!els.sectMenu.classList.contains('open')) return;
+      if (els.sectBox.contains(e.target) || els.sectMenu.contains(e.target)) return;
+      openSectMenu(false);
+    });
+
     $('infoClose').addEventListener('click', hideInfo);
     window.addEventListener('resize', onResize);
   }
@@ -1046,6 +1274,7 @@
       if ((minimapDirty && minimapTimer > 0.4) || minimapTimer > 1.5) {
         minimapTimer = 0;
         updateStats();
+        updateSectPanel(false);     // 「距此」随相机移动, 与统计同节拍刷新
         if (minimapDirty && !mmInFlight) requestMinimap();
         if (mmData) { refreshMinimap(); minimapDirty = false; }
       }
@@ -1070,7 +1299,10 @@
       stats: $('stats'),
       info: $('info'),
       infoBody: $('infoBody'),
-      seedShow: $('seedShow')
+      sectBox: $('sectBox'),
+      sectBody: $('sectBody'),
+      sectMenu: $('sectMenu'),
+      sectMenuBtn: $('sectMenuBtn')
     };
 
     try {
@@ -1092,13 +1324,6 @@
       renderer.hexR = geo.hexR;
       renderer.seaLevel = geo.seaLevel;
       console.log('[zongmen] meta 就绪 hexW=' + geo.hexW.toFixed(3) + ' chunkS=' + geo.chunkS);
-      /* 图例 */
-      var html = '';
-      for (var i = 0; i < m.biomeMeta.length; i++) {
-        html += '<div class="item"><span class="chip" style="background:' +
-          m.biomeMeta[i].color + '"></span>' + m.biomeMeta[i].name + '</div>';
-      }
-      $('legendItems').innerHTML = html;
 
       var urlParams = new URLSearchParams(location.search);
       var urlSeed = urlParams.get('seed');

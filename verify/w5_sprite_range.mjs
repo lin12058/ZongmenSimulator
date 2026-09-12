@@ -25,7 +25,7 @@ const SEED = process.argv[2] || '42';
 const RAD = parseInt(process.argv[3] || '8', 10);
 
 global.window = globalThis;
-for (const f of ['noise.js', 'mapgen.js', 'mapgen-server.js']) {
+for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js', 'mapgen-server.js']) {
   (0, eval)(fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js', f), 'utf8'));
 }
 const MG = global.MapGen;

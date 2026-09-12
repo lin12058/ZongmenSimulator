@@ -20,7 +20,7 @@ const BASE = process.argv[2] || 'http://127.0.0.1:8140';
 /* 全局注入 window = globalThis 以原样执行浏览器脚本 */
 global.window = globalThis;
 
-for (const f of ['noise.js', 'mapgen.js', 'mapgen-server.js']) {
+for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js', 'mapgen-server.js']) {
   const code = fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js', f), 'utf8');
   (0, eval)(code);
 }

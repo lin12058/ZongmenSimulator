@@ -29,8 +29,8 @@ global.window = global;
 (0, eval)(blocks[0] + '\n' + blocks[1] + '\n' + blocks[2]);
 const M = global.MapGen;
 const has = k => typeof M[k] !== 'undefined';
-console.log('\n引擎导出: settlementsFor=%s roadsNear=%s roadCache=%s REGION_M=%s astar=%s',
-  has('settlementsFor'), has('roadsNear'), has('roadCache'), has('REGION_M'), has('astar'));
+console.log('\n引擎导出: settlementsFor=%s roadsNear=%s roadCache=%s REGION_M=%s bfsRoad=%s',
+  has('settlementsFor'), has('roadsNear'), has('roadCache'), has('REGION_M'), has('bfsRoad'));
 console.log('REGION_M =', M.REGION_M, ' HEX_R =', M.HEX_R);
 
 /* --- 真实跑：聚落扫描 + 道路泵送（复刻页面批次参数） --- */

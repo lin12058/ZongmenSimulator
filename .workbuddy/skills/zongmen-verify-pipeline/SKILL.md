@@ -5,11 +5,12 @@ description: 宗门模拟器 demo3 的构建→启动后端→三层回归验证
 
 # 宗门模拟器 · 验证管线
 
-> 🚫 **当前边界（2026-09-10 用户决定）**：**地图生成（`Engine/js/mapgen*`）暂不改动 —— 后续要整体重构。**
-> 不要再在 `mapgen.js` 上做局部性能/算法改动（A\* guard 调参、走法走廊剪枝、把 A\* 移出 V8 门闩等一概暂停），
-> 以免成为重构的沉没成本。`guard` 保持 **12000**。
-> 但本目录下的**测量/守门工具**（`bench_guard_frontier.mjs`、`w3_astar_budget.mjs`、`w5_sprite_range.mjs`）
-> 与已记录的事实/戒条（如「改了世界内容就要清 `db/zongmen.sqlite`」）**重构后仍然复用**。
+> ✅ **地图生成重构已完成（2026-09-12）**：`Engine/js/mapgen*` 的「道路 A\* → 带权重 BFS」与
+> 「聚落随机落点 → 勘测/选址/生长三段式 + 建筑足迹落库 + 贸易网络」已全部落地并通过回归。
+> A\* 时代产物（`astar`/`Heap`/`roadCost`、`w3_astar_budget.mjs`、`bench_guard_frontier.mjs`）**已删除**，
+> `guard=12000` 的说法作废；道路剪枝现为 **120 权重 / 40 步**（`ROAD_COST_MAX`/`ROAD_STEPS_MAX`）。
+> 相关参数唯一真源 = `Engine/js/mapgen-config.js`（见 §11 第 1 条，**漏加载它会静默跑错口径**）。
+> 已记录的事实/戒条（如「改了世界内容就要清 `db/zongmen.sqlite`」）继续复用。
 
 ## 1. 编译
 ```bash
@@ -31,15 +32,17 @@ dotnet build Server/Zongmen/Zongmen.csproj -v q
 node verify/verify_map.mjs        # 944 项契约: Node 加载同份 Engine/js 作参考 + HTTP/WS 走真实 protobuf+gzip 链路
 node verify/w1_client_revs.mjs    # 客户端 revs 记账: 真实服务端取帧 + 驱动真实 mapclient.js
 node verify/w2_concurrency.mjs    # 新 seed 冷启 24 路并发 + liveSeeds 有界 + 配置生效
-node verify/w3_astar_budget.mjs   # A* guard 区间 + 丢路率上限 + 耗时上界 (离线, 不需起服务)
-node verify/bench_guard_frontier.mjs  # 逐对隔离测 guard 下界 (纯函数 astar; 改了 astar/guard 时用)
+node verify/w3_bfs_road.mjs       # 道路 BFS 契约: 权重表 / 双预算上界 / 权重累加自洽 / 邻域剪枝全量 null / 下界剪枝不改路径 / 确定性(重复+跨实例) / 建路率+耗时 (离线, 不需起服务)
 node verify/w4_revs_at_scale.mjs  # revs 契约 + 毒块恢复 (纯 Node 120 块, 替代跑不动的 CDP 竞态回归)
 node verify/w5_sprite_range.mjs   # 立体精灵索引契约 (与图集/着色器分段一致, 离线)
 node verify/frontend_smoke.mjs    # meta 常量 + HTTP tile/fields + 几何往返 ±1000 格 + DOM id/静态置脏/小地图/色板 契约
 node verify/scan_poison.mjs       # 广域抓毒块 (1681 块 bad=0); 例: node ... 42 '[-20,20,-20,20]'
 node --check web/js/*.js          # 前端语法
 ```
-- **全套基线（一次跑全）**：`verify_map 944 + w1 6 + w2 6 + w3 4 + w4 6 + w5 6 + frontend_smoke 32 = 1004 项全绿`。
+- **全套基线（一次跑全，2026-09-12 重测）**：`verify_map 1206 项` + `w3_bfs_road 7 项断言` +
+  `w1/w2/w4/w5 + frontend_smoke` 全绿；另 `scan_poison 1681 块 bad=0`。
+  （verify_map 由旧基线 944 涨到 1206，是新增 settle 层——城镇足迹/建筑/产出的三方对照断言。
+  **数字变了不是回归**，比对时认「结果: 全部通过 ✔ + 退出码 0」，别拿旧数字当判据。）
 - `frontend_smoke.mjs` 里有几条**静态契约检查**（改前端 UI 状态 / 色板 / 协议字段时最有用，且不依赖浏览器）：
   - **DOM id 契约**：JS 里 `$('x')`/`getElementById('x')` 引用的 id 必须在 `index.html` 定义；
   - **静态层置脏契约**：`showVeins`/`showLabels` 的运行时改写、以及每个 `classList.toggle('off')`
@@ -71,8 +74,10 @@ node --check web/js/*.js          # 前端语法
 - 全绿标准：`结果: 全部通过 ✔`，退出码 0。
 - 改 `web/js/mapclient.js`（revs/连接状态机）务必跑 `w1_client_revs.mjs` —— `verify_map.mjs` 只覆盖服务端契约，**覆盖不到客户端记账**。
 - 改缓存/并发（`blockLayersJson`/`roadVer`/`BuildOnce`/VM 池）跑 `w2_concurrency.mjs`。
-- 改 `Engine/js/mapgen.js`（尤其 astar/寻路）必须跑 `w3_astar_budget.mjs`。
-- 大范围排查空白块/毒块用 `scan_poison.mjs`（注意耗时：1681 块 ≈ 70s）。
+- 改 `Engine/js/mapgen.js`（尤其 road/城镇/贸易）必须跑 `w3_bfs_road.mjs` + `check_preview_settle_road.mjs`。
+- 大范围排查空白块/毒块用 `scan_poison.mjs`（注意耗时：1681 块 ≈ 65s）。
+  ⚠️ **它的 BASE 默认写死 8140**；对着非 8140 的实例跑必须显式传 baseUrl，否则每块都 timeout
+  并打印 `BAD ... timeout(可能解码失败)` —— 那是「连错端口」的假 BAD，不是毒块（本次踩过）。
 - `w1` 依赖 Node 原生 `WebSocket`/`DecompressionStream`/`CompressionStream`/`Blob`（Node ≥ 22 自带），无需浏览器。
 - **在 Node 里 eval `mapclient.js` 必须提供 `global.location`**（模块级读 `location.protocol/host` 拼 WS_URL），否则 `ReferenceError: location is not defined` —— 这是 `frontend_smoke.mjs` 曾长期失效的原因。
 
@@ -215,4 +220,40 @@ tasklist | grep -i zongmen || echo "无进程"
   5. `rm .git/index && git read-tree HEAD` 重建索引（旧索引可能引用已丢对象）。
   6. 工作树改动重新提交（本地未推送的提交对象不可恢复，内容在即可重建）。
 - 触发前兆：复合命令（git + chrome）被 SIGTERM、`.git/gk/` 之类非标准目录出现。
+
+## 11. 新增协议层/图层时的必查项（2026-09-12 settle 层落地总结）
+
+新增一层（如 `settle` 城镇足迹）会同时动 **JS 适配 / C# 白名单 / protobuf 契约 / 前端解码** 四处，
+任何一处漏挂都只在**运行期**才炸，且症状会伪装成别的东西。四条铁律：
+
+1. **Node 侧加载引擎必须带 `mapgen-config.js`**（顺序：`noise → mapgen-config → mapgen → mapgen-server`）。
+   `mapgen.js` 里是 `var CFG = global.MapGenConfig || { 内置兜底 }` —— 漏加载**不报错**，只静默用陈旧兜底参数，
+   于是「参照世界 ≠ 服务端世界」（区域名/灵脉名/chunk 瓦片/道路点列/城镇中心**全都不同**），
+   `verify_map` 会红 292 项而**根因与被测代码无关**。
+   2026-09-12 修复：`verify_map.mjs` / `scan_poison.mjs` / `w5_sprite_range.mjs` / `frontend_smoke.mjs` 四处补齐。
+   **自检一行**：`for f in verify/*.mjs; do grep -q mapgen.js $f && ! grep -q mapgen-config $f && echo "缺配置 $f"; done`。
+2. **`JsWorldVm.Call` 是 `switch (fn)` 白名单**（`Engine/JsEngineHost.cs`）。`mapgen-server.js` 新增导出后
+   **必须补 case**，否则运行期抛 `未知 JS 函数: xxx` → 整个 `TileRequest` 中断。
+   指纹症状：**`mask=ALL 0` + `revs []` + 所有图层「存在」全 FAIL**（看起来像服务端没数据，其实是异常提前返回）；
+   判据：翻服务端 stdout 找 `TileRequest 处理异常`。
+3. **repeated 消息字段在前端必须「每次出现即 push 一个元素」**（同 `EntityGroup.items[]` 的写法）。
+   若误写成「容器套 field 1 条目」，`ResourceQuantDto` 的 field1 恰是 `string`(wire=2) 会被当成条目载荷，
+   把 UTF-8 字节按子消息解 → `不支持的 wire=7` / desync。
+   正确形态：`case 15: m.buildings.push(parseBuilding(r.bin(rdLen(r, t))));`（`parseBuilding` 只解**一个**元素）。
+4. **WS 客户端解码异常必须 reject pending，否则伪装成超时**：`verify_map.mjs` 的 `tile()` 只在 `onmessage`
+   里 resolve，`.catch` 只 `console.error` → 解码失败时 promise 永不落地 → **30s「ws 请求超时」**。
+   看到超时先翻日志里有没有 `TileResponse 解码失败`，别一头扎进性能排查（本次就是解码错，30s 超时是假象）。
+
+### 隔离验证实例（不打断用户正在看的 8140）
+`appsettings.json` 的 `Zongmen.{Port,WebDir,DbPath,EngineJsDir}` 全可覆盖；`ZongmenPaths.FindRoot`
+会自 ContentRoot **向上找 `web/index.html`**，所以从 `verify/_vmsrv/` 跑也能自动指到仓库根的
+`web/` 与 `Server/Zongmen/Engine/js`（=最新源码）。做法：
+1. `dotnet build Server/Zongmen/Zongmen.csproj -o verify/_vmsrv -p:UseAppHost=false`
+   （`-o` 独立目录 + `UseAppHost=false` 可在**正式 exe 被占用时**照样验证；**先停实例再 build**，dll 会被锁）。
+2. 覆写 `verify/_vmsrv/appsettings.json`：`Port` 换一个空闲口、`DbPath` 指到 `verify/` 下的独立库
+   （**关键：别与用户的 `db/zongmen.sqlite` 共用**）。
+3. `cd verify/_vmsrv && dotnet Zongmen.dll`（run_in_background）→ 探活 → 把 baseUrl 传给各回归脚本。
+4. 验完 **只 kill 自己的 PID**，再删 `_vmsrv/` 与临时库。
+> 注：build 会用项目内的 `appsettings.json` 覆盖输出目录 → **写完临时配置后不要再 build**。
+> 另：`verify/ws_size_fullmap.mjs` 注释里的「8141 独立实例」是历史遗留，别当成约定端口（本次就撞上 8141 被占用）。
 
