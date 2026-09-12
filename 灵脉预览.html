@@ -24,6 +24,15 @@
   #stats b{color:#ffd98a}
   .legend-row{display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;color:#c8d2dd}
   .swatch{width:12px;height:12px;border-radius:50%;display:inline-block;border:1px solid rgba(0,0,0,.35)}
+  .swatch.sq{border-radius:2px}
+  .swatch.tri{border-radius:0;clip-path:polygon(50% 0,100% 100%,0 100%)}
+  .swatch.dia{border-radius:0;transform:rotate(45deg) scale(.82)}
+  .swatch.hex{border-radius:0;clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
+  .swatch.road{width:16px;height:0;border:none;border-top:3px solid #d6b26e;border-radius:0}
+  .swatch.tbar{width:26px;height:11px;border-radius:2px;background:
+    linear-gradient(90deg,#6d9aab 0 14%,#9dc2c9 14% 28%,#e0d3ae 28% 42%,#b4c3a0 42% 56%,
+                    #89a27f 56% 70%,#dbc692 70% 84%,#a19a8c 84% 100%)}
+  #stats b.tg{color:#8fd0a8}
   #wrap{flex:1;position:relative;background:#181d24;overflow:hidden;cursor:grab;user-select:none}
   #wrap.grabbing{cursor:grabbing}
   #tip{position:absolute;max-width:240px;pointer-events:none;background:rgba(15,18,24,.93);
@@ -52,7 +61,7 @@
       <input id="seed" style="margin-top:4px" placeholder="点「重新生成」随机">
     </label>
     <div style="font-size:11px;color:#8b96a8;margin-top:8px">
-      视野半径固定 <b style="color:#ffd98a">1000</b> 格（灵气边界）
+      视野半径固定 <b style="color:#ffd98a">1000</b> 格（仅决定浏览范围，不是灵气边界）
     </div>
   </fieldset>
 
@@ -90,16 +99,35 @@
 
   <fieldset>
     <legend>灵气场 CFG</legend>
-    <label>灵气边界半径 SPIRIT_R_TILES <b id="spiritRVal">500</b>
+    <label>灵气边界 SPIRIT_R_TILES <b id="spiritRVal">500</b>
       <input id="spiritR" type="range" min="100" max="2000" step="50" value="500" style="margin-top:4px">
+      <div style="font-size:11px;color:#8b96a8;margin-top:4px">
+        归零世界半径 = 本值 × HEX_R × 2 → 实际 <b id="spiritEdgeTiles">577</b> 格（<span id="spiritEdgeWorld">8000</span> 世界单位）
+      </div>
     </label>
     <label>灵气衰减曲线 SPIRIT_CURVE <b id="spiritCurveVal">0.60</b>
       <input id="spiritCurve" type="range" min="0.2" max="2" step="0.05" value="0.60" style="margin-top:4px">
+    </label>
+    <label>地形边界衰减 EDGE_SEA_SP <b id="edgeSeaSpVal">0.30</b>
+      <input id="edgeSeaSp" type="range" min="0" max="0.6" step="0.05" value="0.30" style="margin-top:4px">
+      <div style="font-size:11px;color:#8b96a8;margin-top:4px">
+        灵气强度低于此值起沉海（放在灵脉抬升之后）→ 界外全海洋；0 = 硬边界
+      </div>
+    </label>
+    <label>聚落边界衰减 EDGE_SETTLE_SP <b id="edgeSettleSpVal">0.35</b>
+      <input id="edgeSettleSp" type="range" min="0" max="0.6" step="0.05" value="0.35" style="margin-top:4px">
+      <div style="font-size:11px;color:#8b96a8;margin-top:4px">
+        灵气强度低于此值起聚落概率衰减 → 界外无聚落、无秘境
+      </div>
     </label>
   </fieldset>
 
   <fieldset>
     <legend>显示</legend>
+    <label><input type="checkbox" id="cb_terrain" checked> 地形（逐格群系色 · 海拔明暗）</label>
+    <label style="font-size:11px;color:#8b96a8;margin-top:-2px">
+      地形按缩放自动分级（放大=逐格，缩小=降采样），分帧构建不卡界面
+    </label>
     <label><input type="checkbox" id="cb_comm"   checked> 群落六边形</label>
     <label><input type="checkbox" id="cb_vein"   checked> 灵脉点（大/中/小）</label>
     <label><input type="checkbox" id="cb_name"   checked> 灵脉名称</label>
@@ -107,11 +135,38 @@
     <label><input type="checkbox" id="cb_grid"   checked> 全部晶格网格</label>
   </fieldset>
 
+  <fieldset>
+    <legend>聚落 / 道路</legend>
+    <label><input type="checkbox" id="cb_settle" checked> 聚落（城/镇/村/宗门/秘境）</label>
+    <label><input type="checkbox" id="cb_sname"> 聚落名称 + 距中枢格数</label>
+    <label><input type="checkbox" id="cb_road"   checked> 道路（A* 渐进建造）</label>
+    <label>道路建造半径（区域格，REGION_M=18格/格）
+      <input id="roadCells" type="range" min="2" max="20" step="1" value="8" style="margin-top:4px">
+      <div style="font-size:11px;color:#8b96a8;margin-top:4px">
+        视野中心 ±<b id="roadCellsVal">8</b> 区域格 ≈ ±<b id="roadCellsTiles">144</b> 格
+      </div>
+    </label>
+    <label>每轮新建道路数（大→快但可能卡顿）
+      <input id="roadBudget" type="range" min="1" max="8" step="1" value="1" style="margin-top:4px">
+      <div style="font-size:11px;color:#8b96a8;margin-top:4px">
+        当前 <b id="roadBudgetVal">1</b> 条/轮 · 实测单条 9ms，最坏一条可到 380ms
+      </div>
+    </label>
+    <button id="roadClear" style="background:#4a5566">清空道路缓存</button>
+  </fieldset>
+
   <button id="rerun">重新生成</button>
   <div id="stats"></div>
-  <div class="legend-row"><span class="swatch" style="background:gold"></span>大灵脉（主脉）半径 2 格</div>
-  <div class="legend-row"><span class="swatch" style="background:#ff9f43"></span>中灵脉 半径 1.5 格</div>
-  <div class="legend-row"><span class="swatch" style="background:#7fb3ff"></span>小灵脉 半径 1 格</div>
+  <div class="legend-row"><span class="swatch tbar"></span>地形：深海浅海 · 沙岸 · 草地 · 林地 · 沙漠 · 山地</div>
+  <div class="legend-row"><span class="swatch hex" style="background:gold"></span>大灵脉（主脉）半径 2 格</div>
+  <div class="legend-row"><span class="swatch hex" style="background:#ff9f43"></span>中灵脉 半径 1.5 格</div>
+  <div class="legend-row"><span class="swatch hex" style="background:#7fb3ff"></span>小灵脉 半径 1 格</div>
+  <div class="legend-row"><span class="swatch sq" style="background:#ffcc66"></span>城市</div>
+  <div class="legend-row"><span class="swatch" style="background:#ffb066"></span>城镇</div>
+  <div class="legend-row"><span class="swatch tri" style="background:#c79bff"></span>宗门</div>
+  <div class="legend-row"><span class="swatch" style="background:#b9c6b0"></span>村庄</div>
+  <div class="legend-row"><span class="swatch dia" style="background:#6fe3d0"></span>秘境</div>
+  <div class="legend-row"><span class="swatch road"></span>道路（A* 连接聚落）</div>
 </div>
 
 <div id="wrap">
@@ -285,8 +340,14 @@
     D_SMALL: 9,             // 小灵脉 ↔ 其他次级 最小间距
 
     /* ---------- 灵气场 ---------- */
-    SPIRIT_R_TILES: 500,    // 灵气边界半径 (格): 距原点该距离处灵气归零
-    SPIRIT_CURVE: 0.60,     // 灵气衰减曲线指数
+    SPIRIT_R_TILES: 500,    // 灵气边界半径参数: 归零世界半径 = 本值 × HEX_R × 2 (见 spiritEdgeWorld)
+    SPIRIT_CURVE: 0.60,     // 灵气衰减曲线指数 (越小越"外圈厚"), sp = (1 - d) ^ CURVE
+
+    /* ---------- 边界衰减 (§九.3: 半径外为凡俗无灵地带 → 界外全海洋、无聚落) ----------
+       两处衰减共用 spiritAt 这一个「灵气强度」驱动 (即"参考灵气强度"), 各配一个系数。
+       系数越大 → 衰减带越宽、越早开始(边界越"软"); 置 0 → 硬边界(一步入海/入海即无聚落)。 */
+    EDGE_SEA_SP: 0.30,      // 地形: 灵气强度低于此值起按曲线沉入海底, 强度=0 处完全沉没
+    EDGE_SETTLE_SP: 0.35,   // 聚落: 灵气强度低于此值起概率衰减, 强度=0 处概率归零
 
     /* ---------- 次级灵脉落位 ---------- */
     SUB_ATTEMPTS: 14,       // 次级灵脉落位尝试次数
@@ -341,6 +402,12 @@
   ];
 
   var SEA_LEVEL = 0.40;
+  /* ---------- 边界沉海 (设定 §九.3) ----------
+     灵气边界外是"凡俗无灵地带": 地形一律沉为海洋, 不产聚落也不出灵脉峰。
+     下沉目标高度 = EDGE_SEA_FLOOR + (e - 0.5) * EDGE_SEA_VAR,
+     取值区间 [0.24, 0.36] 恒 < SEA_LEVEL → 保证界外必为海(含深海), 且保留一点海底起伏。 */
+  var EDGE_SEA_FLOOR = 0.30;
+  var EDGE_SEA_VAR   = 0.12;
   var HEX_R = 8;                          // 外接圆半径 → 直径 16
   var HEX_W = Math.sqrt(3) * HEX_R;
   var CHUNK_R = 10;                       // 区块六边形半径 (格)
@@ -356,6 +423,7 @@
     COMM_CL: 150, COMM_R: 40,
     D_L_M: 18, D_L_S: 12, D_M: 14, D_SMALL: 8,
     SPIRIT_R_TILES: 1000, SPIRIT_CURVE: 0.8,
+    EDGE_SEA_SP: 0.30, EDGE_SETTLE_SP: 0.35,
     COMM_P_MIN: 0.16, COMM_P_SPIRIT: 0.62,
     SUB_ATTEMPTS: 14,
     LIFT_CORE: [0.80, 0.75, 0.70], LIFT_ARM_OFF: 0.05,
@@ -534,6 +602,15 @@
         if (t3 > e) e = e + (t3 - e) * 0.35;
       }
     }
+    /* 边界沉海 (设定 §九.3): 灵气强度向外衰减 → 海拔按同一条曲线压入海底。
+       必须放在灵脉抬升【之后】: 否则边界带上的灵脉峰会被 LIFT_CORE 抬回水面,
+       出现"界外灵脉山"。系数 EDGE_SEA_SP 越大 → 衰减带越宽、越早开始沉。
+       沉没权重 = 1 - edgeKeep (edgeKeep 是"保留", 别直接用) */
+    var gSea = 1 - edgeKeep(spiritAt(q, r), CFG.EDGE_SEA_SP);
+    if (gSea > 0) {
+      var sunk = EDGE_SEA_FLOOR + (e - 0.5) * EDGE_SEA_VAR;
+      e = e * (1 - gSea) + sunk * gSea;
+    }
     cacheSet(elevCache, key, e, ELEV_CAP);
     return e;
   }
@@ -589,9 +666,10 @@
     else if (m + Math.max(0, 0.14 - (e - SEA_LEVEL) * 1.4) > 0.62) biome = BIOME.FOREST; // 海岸加湿
     else biome = BIOME.GRASS;
 
-    /* 灵脉格: 覆写显示用 biome (8..12 = 金木水火土灵脉格) */
+    /* 灵脉格: 覆写显示用 biome (8..12 = 金木水火土灵脉格)
+       仅陆地出灵脉 —— 边界带被沉海的灵脉不再覆写, 否则会在海面上留"无根灵脉峰" */
     var vinfo = null;
-    if (vn && vn.d <= 1) {
+    if (vn && vn.d <= 1 && e >= SEA_LEVEL) {
       vinfo = { element: vn.v.element, variant: vn.v.variant,
                 level: vn.v.level, d: vn.d, name: vn.v.name };
     }
@@ -829,9 +907,12 @@
     if (c) return c;
     var arr = [];
     var h0 = hash01(i, j, 7);
-    /* 灵气梯度 (设定 §九/§十): 聚落密度随灵气衰减, 1000 外无灵凡俗 */
+    /* 灵气梯度 (设定 §九/§十): 聚落密度随灵气衰减;
+       边界衰减: 再乘一次"灵气强度 → 0..1"的衰减系数, 强度归零处概率归零
+       → 灵气边界外(含界外海洋)不再生成任何聚落与秘境 */
     var spLoc = spiritAt(i * REGION_M, j * REGION_M);
-    if (h0 < 0.20 + 0.38 * spLoc) {
+    var pSpawn = (0.20 + 0.38 * spLoc) * edgeKeep(spLoc, CFG.EDGE_SETTLE_SP);
+    if (h0 < pSpawn) {
       var count = h0 < 0.30 ? 1 : 2;
       for (var k = 0; k < count; k++) {
         var sq = i * REGION_M + (hash01(i, j, 21 + k) - 0.5) * REGION_M * 0.7;
@@ -1048,13 +1129,30 @@
 
   /* ---------- 灵气场 / 群落 / 灵脉 (设定: 先定灵脉, 后造山河) ---------- */
 
+  /* 灵气归零的世界半径 (世界单位) —— 引擎内部唯一真源。
+     预览页边界圈、客户端边界显示都必须用它, 否则会"圈内看着是界外" */
+  function spiritEdgeWorld() { return CFG.SPIRIT_R_TILES * HEX_R * 2; }
+
   /* 灵气场 (设定 §九): 以 (0,0) 为灵气中枢, 欧氏直线距离单调衰减,
-     半径 SPIRIT_R_TILES 处归零; 越近群落越密、聚落越繁华 */
+     半径 SPIRIT_R_TILES(×HEX_R×2 世界单位) 处归零; 越近群落越密、聚落越繁华 */
   function spiritAt(q, r) {
     var w = tileToWorld(q, r);
-    var d = Math.sqrt(w.x * w.x + w.y * w.y) / (CFG.SPIRIT_R_TILES * HEX_R * 2);
+    var d = Math.sqrt(w.x * w.x + w.y * w.y) / spiritEdgeWorld();
     var t = Math.max(0, 1 - d);
     return Math.pow(t, CFG.SPIRIT_CURVE);
+  }
+
+  /* 边界"保持系数" edgeKeep (设定 §九.3): 把「灵气强度 sp」映射成 0..1 的**保留**权重。
+     sp ≥ band → 1 (完全保留, 不衰减);  sp = 0 (边界外) → 0 (彻底衰减)。
+     band(=EDGE_SEA_SP / EDGE_SETTLE_SP) 即"灵气降到多少才开始衰减",
+     取 0 时退化为硬边界(只要有一点灵气就全保留)。
+
+     ⚠ 语义只有一个方向: 这是"保留"，不是"衰减"。
+       要拿"衰减/沉没"权重必须写 1 - edgeKeep(…)，别直接当权重乘 —
+       两者写反的画面是: 灵气越浓越沉海 → 内圈全淹、边界反而不动。 */
+  function edgeKeep(sp, band) {
+    if (!(band > 0)) return sp > 0 ? 1 : 0;
+    return NL.smoothstep(0, band, sp);
   }
 
   /* 相冲/相合对 → 异灵根 */
@@ -1081,7 +1179,9 @@
     var comm = null;
     var cq0 = i * CFG.COMM_CL, cr0 = j * CFG.COMM_CL;
     var sp = spiritAt(cq0, cr0);
-    var p = sp < 0.03 ? 0 : CFG.COMM_P_MIN + CFG.COMM_P_SPIRIT * sp;   // 群落存在概率随灵气
+    /* 群落存在概率随灵气; 再乘界面沉海的同一衰减系数
+       (灵脉属地形的立体产出: 群落落进沉海带会变成"水下空壳", 必须在播群落这一步就衰减掉) */
+    var p = sp < 0.03 ? 0 : (CFG.COMM_P_MIN + CFG.COMM_P_SPIRIT * sp) * edgeKeep(sp, CFG.EDGE_SEA_SP);
     if (hash01(i, j, 201) < p) {
       var q = Math.round(cq0 + (hash01(i, j, 202) - 0.5) * CFG.COMM_CL * 0.44);
       var r = Math.round(cr0 + (hash01(i, j, 203) - 0.5) * CFG.COMM_CL * 0.44);
@@ -1242,6 +1342,11 @@
     ELEMENT_RGB: ELEMENT_RGB,
     VARIANT_RGB: VARIANT_RGB,
     SEA_LEVEL: SEA_LEVEL,
+    /* 边界衰减: 预览页/客户端画"灵气边界圈"必须用 spiritEdgeWorld(),
+       不得各自硬编码半径 —— 否则会出现"圈内是海、圈外有山"的错位 */
+    spiritEdgeWorld: spiritEdgeWorld,
+    edgeKeep: edgeKeep,
+    EDGE_SEA_FLOOR: EDGE_SEA_FLOOR,
     BIOME: BIOME,
     BIOME_META: BIOME_META
   };
@@ -1283,7 +1388,9 @@ var CFG_CTRLS = [
   ['dM',          'dMVal',          'D_M'],
   ['dSmall',      'dSmallVal',      'D_SMALL'],
   ['spiritR',     'spiritRVal',     'SPIRIT_R_TILES'],
-  ['spiritCurve', 'spiritCurveVal', 'SPIRIT_CURVE']
+  ['spiritCurve', 'spiritCurveVal', 'SPIRIT_CURVE'],
+  ['edgeSeaSp',    'edgeSeaSpVal',    'EDGE_SEA_SP'],
+  ['edgeSettleSp', 'edgeSettleSpVal', 'EDGE_SETTLE_SP']
 ];
 var cfgEls = {}, cfgValEls = {};
 CFG_CTRLS.forEach(function(t){
@@ -1293,12 +1400,21 @@ CFG_CTRLS.forEach(function(t){
 /* 固定视野半径（格），不再由滑块控制 */
 var VIEW_RADIUS = 1000;
 var cbs = {
+  terrain:document.getElementById('cb_terrain'),
   comm : document.getElementById('cb_comm'),
   vein : document.getElementById('cb_vein'),
   name : document.getElementById('cb_name'),
   spirit:document.getElementById('cb_spirit'),
-  grid : document.getElementById('cb_grid')
+  grid : document.getElementById('cb_grid'),
+  settle:document.getElementById('cb_settle'),
+  sname:document.getElementById('cb_sname'),
+  road : document.getElementById('cb_road')
 };
+var roadCellsEl  = document.getElementById('roadCells'),  roadCellsValEl = document.getElementById('roadCellsVal'),
+    roadCellsTilesEl = document.getElementById('roadCellsTiles');
+var roadBudgetEl = document.getElementById('roadBudget'), roadBudgetValEl= document.getElementById('roadBudgetVal');
+var roadClearBtn = document.getElementById('roadClear');
+var tipEl = document.getElementById('tip');
 
 if (typeof MapGen === 'undefined' || typeof NoiseLib === 'undefined') {
   document.addEventListener('DOMContentLoaded', function(){
@@ -1312,6 +1428,7 @@ var camX = 0, camY = 0;     // 屏幕像素偏移
 var scale = 1;              // 世界 → 屏幕 缩放
 var MIN_SCALE = 0.005, MAX_SCALE = 4;
 var dragging = false, lastX = 0, lastY = 0;
+var pickList = [];          // 上一帧绘制的聚落屏坐标（供 hover 拾取）
 
 /* 世界坐标 → 屏幕坐标（全代码唯一换算入口） */
 function toScreen(wx, wy){
@@ -1340,6 +1457,478 @@ function hexPath(cx, cy, R){
   ctx.closePath();
 }
 
+/* ============================================================
+ * 聚落 / 道路 层
+ * 引擎接口（mapgen.js 导出）：
+ *   settlementsFor(i,j)   区域格(REGION_M=18格)内的聚落数组
+ *     {id, type:'sect'|'city'|'town'|'village'|'poi', q,r,x,y,name,pop,tier,state,...}
+ *   roadsNear(i,j,budget) 该区域格聚落的对外道路；budget = 本次允许新算的 A* 条数
+ *     {key, pts:[{x,y} 世界坐标...], tiles:Set"q,r", x0,x1,y0,y1}
+ *   roadCache             已建成道路 Map（引擎全局，cap 4096）
+ *
+ * 实测（verify/bench_preview_settle_road.mjs，seed=bench-a/b，1400×800 画布）：
+ *   可见区域格 101×53 = 5353 个（初始 scale 下 1 格≈1.07px）
+ *   聚落扫描：冷 95ms，热 14ms；但引擎 settleCache 仅 1024 容量，
+ *             可见范围远超容量 → 会反复淘汰，热扫一度升到 294ms
+ *   A* 道路：单条约 40ms（astar 内每步都要 fields()），可见范围全建 400 条 ≈ 16s
+ * → 因此本页做两层保护：
+ *   ① 聚落结果在【本页再缓存一层】，不受引擎容量淘汰影响，拖动时帧耗时稳定；
+ *   ② 道路只在【视野中心 ±N 个区域格】内渐进建造，每轮限量并让出主线程。
+ * ============================================================ */
+
+/* 本地聚落缓存（对抗引擎 settleCache 的 1024 淘汰） */
+var settleLocal = new Map();
+var SETTLE_LOCAL_CAP = 30000;
+function getSettlements(i, j){
+  var k = i + ',' + j;
+  var v = settleLocal.get(k);
+  if (v !== undefined) return v;
+  try { v = MapGen.settlementsFor(i, j) || []; } catch(e){ v = []; }
+  if (settleLocal.size >= SETTLE_LOCAL_CAP) settleLocal.clear();
+  settleLocal.set(k, v);
+  return v;
+}
+
+/* 聚落视觉：形状区分类型，颜色区分等级 */
+var SETTLE_STYLE = {
+  city   : { col:'#ffcc66', shape:'square',   tier:3, label:'城市' },
+  town   : { col:'#ffb066', shape:'circle',   tier:2, label:'城镇' },
+  village: { col:'#b9c6b0', shape:'circle',   tier:1, label:'村庄' },
+  sect   : { col:'#c79bff', shape:'triangle', tier:2, label:'宗门' },
+  poi    : { col:'#6fe3d0', shape:'diamond',  tier:2, label:'秘境' }
+};
+
+/* 视口四角 → 反解索引范围。step = 一格多少地块：
+     群落用 CL（COMM_CL），聚落/道路用 REGION_M（18 格） */
+function indexRange(step){
+  var W = wrap.clientWidth, H = wrap.clientHeight;
+  var cs = [toWorld(0,0), toWorld(W,0), toWorld(0,H), toWorld(W,H)];
+  var iMin=1e9,iMax=-1e9,jMin=1e9,jMax=-1e9;
+  for (var c=0;c<4;c++){
+    var w = cs[c];
+    var jf  = w.y / (1.5 * MapGen.HEX_R) / step;
+    var if_ = (w.x / MapGen.HEX_W - (w.y / (1.5*MapGen.HEX_R)) / 2) / step;
+    if (if_ < iMin) iMin = if_;
+    if (if_ > iMax) iMax = if_;
+    if (jf  < jMin) jMin = jf;
+    if (jf  > jMax) jMax = jf;
+  }
+  return { iMin: Math.floor(iMin)-1, iMax: Math.ceil(iMax)+1,
+           jMin: Math.floor(jMin)-1, jMax: Math.ceil(jMax)+1 };
+}
+
+/* 聚落标记（形状 = 类型） */
+function drawSettleMark(x, y, r, sty){
+  ctx.beginPath();
+  if (sty.shape === 'square'){
+    ctx.rect(x-r, y-r, r*2, r*2);
+  } else if (sty.shape === 'triangle'){
+    ctx.moveTo(x, y-r); ctx.lineTo(x+r, y+r*0.85); ctx.lineTo(x-r, y+r*0.85); ctx.closePath();
+  } else if (sty.shape === 'diamond'){
+    ctx.moveTo(x, y-r); ctx.lineTo(x+r, y); ctx.lineTo(x, y+r); ctx.lineTo(x-r, y); ctx.closePath();
+  } else {
+    ctx.arc(x, y, r, 0, Math.PI*2);
+  }
+  ctx.fillStyle = sty.col;
+  ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
+  ctx.strokeStyle = 'rgba(18,22,28,0.8)'; ctx.lineWidth = 1; ctx.stroke();
+}
+
+/* ---------------- 道路渐进建造（A* 很贵，必须限量 + 让出主线程） ---------------- */
+var roadQueue = [], roadCursor = 0, roadPumping = false, roadTimer = null, roadBuiltTotal = 0;
+function roadBudget(){ return Math.max(1, +roadBudgetEl.value); }
+function roadCellsN(){ return Math.max(2, +roadCellsEl.value); }
+
+function buildRoadQueue(){
+  var RM = MapGen.REGION_M, W = wrap.clientWidth, H = wrap.clientHeight;
+  var cw = toWorld(W/2, H/2);
+  var cj = cw.y / (1.5*MapGen.HEX_R) / RM;
+  var ci = (cw.x / MapGen.HEX_W - (cw.y/(1.5*MapGen.HEX_R))/2) / RM;
+  var r = roadCellsN();
+  roadQueue = [];
+  for (var i = Math.round(ci)-r; i <= Math.round(ci)+r; i++){
+    for (var j = Math.round(cj)-r; j <= Math.round(cj)+r; j++){
+      /* 跳过「没有任何可建路聚落」的区域格 —— 它们不可能贡献道路端点。
+         本地聚落缓存命中时这一步是纯内存判断，能把队列砍掉约 3/4。 */
+      var arr = getSettlements(i, j), usable = false;
+      for (var a = 0; a < arr.length; a++){ if (arr[a].type !== 'poi'){ usable = true; break; } }
+      if (usable) roadQueue.push([i, j]);
+    }
+  }
+  roadCursor = 0;
+}
+
+function pumpRoads(){
+  roadPumping = false;
+  if (!cbs.road.checked) return;
+  if (roadCursor >= roadQueue.length){ draw(); return; }
+  var budget = roadBudget(), built = 0, scanned = 0;
+  while (roadCursor < roadQueue.length && built < budget && scanned < 40){
+    var cell = roadQueue[roadCursor++]; scanned++;
+    var before = MapGen.roadCache.size;
+    try { MapGen.roadsNear(cell[0], cell[1], budget - built); } catch(e){}
+    var add = MapGen.roadCache.size - before;
+    if (add > 0){ built += add; roadBuiltTotal += add; }
+  }
+  draw();
+  if (roadCursor < roadQueue.length){
+    roadPumping = true;
+    roadTimer = setTimeout(pumpRoads, 24);
+  }
+}
+
+/* 视图稳定后（拖动结束 / 缩放 / 开关）重建队列并启动泵送 */
+function scheduleRoads(){
+  if (roadTimer){ clearTimeout(roadTimer); roadTimer = null; }
+  roadPumping = false;
+  if (!cbs.road.checked) return;
+  buildRoadQueue();
+  roadPumping = true;
+  roadTimer = setTimeout(pumpRoads, 20);
+}
+function resetRoadState(){
+  if (roadTimer){ clearTimeout(roadTimer); roadTimer = null; }
+  roadPumping = false; roadQueue = []; roadCursor = 0; roadBuiltTotal = 0;
+}
+/* 换世界 / 换参数：清掉本页缓存（含地形光栅） */
+function resetWorldCaches(){
+  settleLocal.clear();
+  resetRoadState();
+  resetTerrain();
+}
+
+/* ============================================================
+ * 地形层（多级 LOD 光栅，逐格群系色 + 海拔明暗）
+ * ------------------------------------------------------------
+ * 引擎接口：MapGen.fields(q,r) → { biome, e, m, t, disp, vein, ... }
+ *           MapGen.BIOME_META[biome] = { key, name, color, water? }
+ *
+ * 为什么不能"直接逐格画"：fields() 单格实测 21~30µs（5 阶 fbm ×2 域扭曲
+ *   + 山脊 + 灵脉近邻扫描）。默认视野 scale≈0.077 要覆盖 1313×866 = 1137k 格
+ *   → 逐格是 100 秒级。verify/bench_preview_terrain2.mjs 实测：
+ *     stepT=16 → 83×55  = 4.6k 采样   120ms   (26µs/采样)
+ *     stepT= 8 → 165×109= 18.0k 采样   378ms
+ *     stepT= 1 → 1313×867=1138k 采样  102.6s
+ *   （单块 buildChunk ≈ 441 格 / 16ms，与上面同量级，可交叉印证）
+ *
+ * 策略 = 多级 LOD 光栅 + 分帧渐进构建：
+ *   ① 把"轴坐标晶格"光栅化进离屏 canvas：
+ *        光栅列 i ↔ 世界 x = i*HEX_W   （即 rectified 坐标 dx = q + r/2）
+ *        光栅行 j ↔ 世界 y = j*TILE_H  （TILE_H = 1.5*HEX_R）
+ *      列/行单位恰好等于一格（六边形在 rectified 空间是矩形单元），
+ *      故整张光栅按世界矩形放大 = 与真实格网严格对齐。
+ *   ② LOD 级 = 几何阶梯 stepT ∈ {1,2,3,4,6,8,11,16,22,32,45,64,...,256}（≈×√2）。
+ *      逐级独立缓存（terrainLv[stepT]），缓存键就是步长本身。
+ *      需求级 wantStepT() 由两个约束夹逼后归到阶梯上：
+ *        · 上界 blockOK：屏幕块宽 stepT*√3*HEX_R*scale ≤ TERRAIN_MAX_BLOCK_PX
+ *          （即"每块最多 6px"，决定该缩放档至少要多细）
+ *        · 下界 capStep：采样总数 ≤ TERRAIN_MAX_SAMPLES（默认 24000，与引擎
+ *          fieldCache cap 30000 同量级 → 整张光栅都在缓存里，重建是热的）
+ *      为什么用 √2 阶梯而不是 2 的幂：2 的幂在默认视野会被 16 一档拖到 17px 色块
+ *      （需求 9 只能进到 16），√2 阶梯量化到 11 → 11.7px，同时级数仍然有限。
+ *   ③ 每级起点对齐到本级 stepT 整数倍 ⇒ 同级内采样点稳定、不随视野抖动。
+ *      （相邻级不是严格子集：跨级切换时同一位置会重采样，颜色有极轻微变化，
+ *       但级差 ≤1.45×，切换瞬间视觉上只是"原地细化"，不会整体错位。）
+ *   ④ 绘制选级：取"覆盖视口 且 stepT 最小"（最细）的级；够细就清晰，
+ *      不够细则先拉伸过渡并立刻后台补建更细一级。缩小时各级都留在缓存里，
+ *      来回缩放不再重算。
+ *   ⑤ 空闲时向"更细一级"预取（放大前就备好），预取也受采样上限约束。
+ *   ⑥ 放大到 wantStepT()==1 且 1 级光栅已覆盖视口 → 逐格画真六边形。
+ *      取色直接读 1 级光栅的 ImageData（不再调 fields()），拖动不卡。
+ *   ⑦ 插值平滑只在"每光栅像素 < 2.5px"（缩略成细密纹理）时开；像素更大时
+ *      强制硬边——放大时若还插值，就是糊成一团的元凶。
+ *   ⑧ 分帧构建（每帧 ≤ TERRAIN_SLICE_MS 后让出主线程）；拖动中只拉伸旧图，
+ *      视野稳定 80ms 后才重建 → 拖动过程零重算。
+ * 换种子 / 改 CFG 参数 → 签名变化 → 全部级作废，自动重建。
+ * ============================================================ */
+var TERRAIN_MAX_SAMPLES  = 24000;
+var TERRAIN_MAX_BLOCK_PX = 6;
+var TERRAIN_MARGIN       = 0.25;
+var TERRAIN_SLICE_MS     = 22;
+var TERRAIN_HEX_MAX      = 8000;
+var TERRAIN_PREFETCH_MS  = 160;
+/* LOD 步长阶梯（≈×√2）：级数有限（16 级）且相邻级差小，切换不明显 */
+var TERRAIN_STEP_LADDER  = [1, 2, 3, 4, 6, 8, 11, 16, 22, 32, 45, 64, 90, 128, 181, 256];
+function terrainQuant(s) {
+  for (var i = 0; i < TERRAIN_STEP_LADDER.length; i++) if (TERRAIN_STEP_LADDER[i] >= s) return TERRAIN_STEP_LADDER[i];
+  return TERRAIN_STEP_LADDER[TERRAIN_STEP_LADDER.length - 1];
+}
+/* 阶梯上比 s 更细的一级（没了返回 0） */
+function terrainPrevStep(s) {
+  var L = TERRAIN_STEP_LADDER, i = L.indexOf(s);
+  if (i < 0) i = L.indexOf(terrainQuant(s));
+  return i > 0 ? L[i - 1] : 0;
+}
+
+/* biome → RGB：从引擎色板解析（色板唯一真源仍是 mapgen.js 的 BIOME_META） */
+var TERRAIN_RGB = (function () {
+  var out = [], meta = (MapGen && MapGen.BIOME_META) || [];
+  for (var i = 0; i < meta.length; i++) {
+    var c = String(meta[i].color || '#808080').replace('#', '');
+    out[i] = [parseInt(c.substr(0, 2), 16), parseInt(c.substr(2, 2), 16), parseInt(c.substr(4, 2), 16)];
+  }
+  return out;
+})();
+function terrainShade(f) {
+  /* 陆地 0.72~1.28 随海拔明暗；水下按深度压暗 */
+  return (f.biome <= 1) ? (0.56 + 0.90 * f.e) : (0.72 + 0.56 * f.e);
+}
+
+/* LOD 级缓存：stepT(几何阶梯) → { cv, img, ix0, jy0, nx, ny, stepT, sig, valid }
+   保留 img（ImageData）供"逐格六边形"模式直接取色，避免再调 fields()。
+   正在构建的那一级单独放 terrainJob（构建中旧级继续显示，互不干扰）。 */
+var terrainLv = {};
+var terrainJob = null, terrainTimer = null, terrainPending = false, terrainPrefetchTimer = null;
+var terrainArmedWant = 0;    /* 已排程等待构建的需求级（0 = 无） */
+var terrainMode = 'off', terrainBuilds = 0, terrainLastMs = 0, terrainWant = 1;
+
+function terrainSig() {
+  var s = seedEl.value + '|';
+  CFG_CTRLS.forEach(function (t) { s += (+cfgEls[t[2]].value) + ','; });
+  return s;
+}
+function rasterRect(o) {
+  var HEX_W = MapGen.HEX_W, TILE_H = 1.5 * MapGen.HEX_R;
+  return { x0: o.ix0 * HEX_W,                                        y0: o.jy0 * TILE_H,
+           x1: (o.ix0 + o.nx * o.stepT) * HEX_W, y1: (o.jy0 + o.ny * o.stepT) * TILE_H };
+}
+function viewRect() {
+  var a = toWorld(0, 0), b = toWorld(wrap.clientWidth, wrap.clientHeight);
+  return { x0: Math.min(a.x, b.x), y0: Math.min(a.y, b.y),
+           x1: Math.max(a.x, b.x), y1: Math.max(a.y, b.y) };
+}
+function lvCover(o, v) {
+  if (!o || !o.valid) return false;
+  var r = rasterRect(o);
+  return r.x0 <= v.x0 && r.y0 <= v.y0 && r.x1 >= v.x1 && r.y1 >= v.y1;
+}
+/* 每个光栅像素在屏幕上的宽度（= 一格屏幕宽 × stepT） */
+function lvBlockPx(o) { return Math.sqrt(3) * MapGen.HEX_R * scale * o.stepT; }
+
+/* ---------- LOD 选级 ---------- */
+/* 需求级：把"块宽上界"与"采样上界"夹逼后归到几何阶梯 */
+function wantStepT() {
+  var HEX_W = MapGen.HEX_W, TILE_H = 1.5 * MapGen.HEX_R;
+  var v = viewRect();
+  var mx = (v.x1 - v.x0) * TERRAIN_MARGIN, my = (v.y1 - v.y0) * TERRAIN_MARGIN;
+  var cols = Math.max(1, Math.ceil((v.x1 + mx) / HEX_W) - Math.floor((v.x0 - mx) / HEX_W));
+  var rows = Math.max(1, Math.ceil((v.y1 + my) / TILE_H) - Math.floor((v.y0 - my) / TILE_H));
+  var tileWpx  = Math.sqrt(3) * MapGen.HEX_R * scale;
+  var blockOK  = Math.floor(TERRAIN_MAX_BLOCK_PX / Math.max(0.01, tileWpx));  // 不至于太粗
+  var capStep  = Math.ceil(Math.sqrt(cols * rows / TERRAIN_MAX_SAMPLES));     // 不至于太贵
+  return terrainQuant(Math.max(1, Math.max(blockOK, capStep)));
+}
+/* 指定 stepT 覆盖当前视口(+外扩)需要多少采样 */
+function terrainSamples(step) {
+  var HEX_W = MapGen.HEX_W, TILE_H = 1.5 * MapGen.HEX_R;
+  var v = viewRect();
+  var mx = (v.x1 - v.x0) * TERRAIN_MARGIN, my = (v.y1 - v.y0) * TERRAIN_MARGIN;
+  var i0 = Math.floor((v.x0 - mx) / HEX_W), i1 = Math.ceil((v.x1 + mx) / HEX_W);
+  var j0 = Math.floor((v.y0 - my) / TILE_H), j1 = Math.ceil((v.y1 + my) / TILE_H);
+  var cols = Math.max(1, i1 - i0), rows = Math.max(1, j1 - j0);
+  var nx = Math.floor(cols / step) + 1, ny = Math.floor(rows / step) + 1;
+  return nx * ny;
+}
+/* 覆盖视口、签名一致的最细级；没有则返回 null */
+function pickTerrainLv(v, sig) {
+  var best = null;
+  for (var k in terrainLv) {
+    var o = terrainLv[k];
+    if (!o.valid || o.sig !== sig || !lvCover(o, v)) continue;
+    if (!best || o.stepT < best.stepT) best = o;
+  }
+  return best;
+}
+/* 兜底：没有覆盖级时，挑 stepT 最接近需求的一级拉伸过渡（只作过渡，会立刻补建） */
+function pickTerrainFallback(sig, want) {
+  var best = null, bd = 1e9;
+  for (var k in terrainLv) {
+    var o = terrainLv[k];
+    if (!o.valid || o.sig !== sig) continue;
+    var d = Math.abs(Math.log(o.stepT / Math.max(1, want)));
+    if (d < bd) { bd = d; best = o; }
+  }
+  return best;
+}
+
+function rasterBlit(o) {
+  var r = rasterRect(o), a = toScreen(r.x0, r.y0), b = toScreen(r.x1, r.y1);
+  var px = Math.abs(b.x - a.x) / Math.max(1, o.nx);     // 每个光栅像素的屏幕宽
+  /* 只有像素细到 <2.5px（缩略成细密纹理）才插值柔化；
+     像素更大时保持硬边 —— 放大时若仍插值，就是"糊成一团"的元凶 */
+  ctx.imageSmoothingEnabled = px < 2.5;
+  ctx.drawImage(o.cv, a.x, a.y, b.x - a.x, b.y - a.y);
+  ctx.imageSmoothingEnabled = false;
+}
+
+function terrainAbort() {
+  if (terrainTimer) { clearTimeout(terrainTimer); terrainTimer = null; }
+  if (terrainPrefetchTimer) { clearTimeout(terrainPrefetchTimer); terrainPrefetchTimer = null; }
+  terrainArmedWant = 0;
+  terrainJob = null;                    // 半成品直接丢弃：已完成的级仍是完整的
+}
+function resetTerrain() {
+  terrainAbort();
+  terrainLv = {};                       // 换世界/换参数：所有 LOD 级作废
+  terrainPending = false; terrainBuilds = 0; terrainLastMs = 0; terrainWant = 1;
+}
+/* 换种子/改 CFG → 签名变化 → 丢掉落伍的级，回收内存 */
+function pruneTerrain(sig) {
+  for (var k in terrainLv) if (terrainLv[k].sig !== sig) delete terrainLv[k];
+}
+/* 已缓存且签名一致的级列表（升序），给统计行用 */
+function terrainLevels(sig) {
+  var out = [];
+  for (var k in terrainLv) if (terrainLv[k].valid && terrainLv[k].sig === sig) out.push(terrainLv[k].stepT);
+  out.sort(function (a, b) { return a - b; });
+  return out;
+}
+
+/* 需要就排一次重建（防抖 80ms；拖动中只挂起，等松手由 endDrag 触发） */
+function terrainEnsure(immediate) {
+  if (!cbs.terrain.checked) return;
+  var want = wantStepT();
+  terrainWant = want;
+  if (terrainJob) return;
+  var sig = terrainSig();
+  var lv = terrainLv[want];
+  /* 核心：判据里必须带"当前缩放所需的 stepT"。
+     否则放大后旧粗光栅依然覆盖视口 → 被当成可用 → 永远不重建 → 一直糊。 */
+  if (lv && lv.valid && lv.sig === sig && lvCover(lv, viewRect())) return;
+  if (dragging) { terrainPending = true; return; }
+  terrainPending = false;
+  /* 关键：同一需求级的排程**不要被后续 draw 反复重置**。
+     pumpRoads 每 24ms 就 draw() 一次，纯 debounce（每次都 clearTimeout+重设）
+     会被永久饿死 → terrainStart 一次都跑不到 → 放大后永远重建不出来（一直糊）。
+     只有"需求级变了"或要求立即时才重排。 */
+  if (terrainTimer && terrainArmedWant === want && !immediate) return;
+  if (terrainTimer) clearTimeout(terrainTimer);
+  terrainArmedWant = want;
+  terrainTimer = setTimeout(terrainStart, immediate ? 0 : 80);
+}
+
+/* 空闲时向"更细一级"预取：放大前就备好，放大瞬间即清晰 */
+function scheduleTerrainPrefetch() {
+  if (terrainPrefetchTimer) clearTimeout(terrainPrefetchTimer);
+  terrainPrefetchTimer = setTimeout(terrainPrefetch, TERRAIN_PREFETCH_MS);
+}
+function terrainPrefetch() {
+  terrainPrefetchTimer = null;
+  if (!cbs.terrain.checked || terrainJob || terrainTimer || dragging) return;
+  var finer = terrainPrevStep(terrainWant);
+  if (finer < 1) return;
+  var sig = terrainSig(), lv = terrainLv[finer];
+  if (lv && lv.valid && lv.sig === sig && lvCover(lv, viewRect())) return;
+  if (terrainSamples(finer) > TERRAIN_MAX_SAMPLES) return;   // 超出预算则不预取
+  terrainStart(finer);                                       // 只建这一级，不动 terrainWant
+}
+
+function terrainStart(stepOpt) {
+  terrainTimer = null; terrainArmedWant = 0;
+  if (!cbs.terrain.checked || terrainJob) return;
+  var sig = terrainSig();
+  pruneTerrain(sig);
+  var want = stepOpt || wantStepT();
+  if (stepOpt == null) terrainWant = want;
+  var v = viewRect();
+  var had = terrainLv[want];
+  if (had && had.valid && had.sig === sig && lvCover(had, v)) return;   // 该级已可用
+
+  var HEX_W = MapGen.HEX_W, TILE_H = 1.5 * MapGen.HEX_R;
+  var mx = (v.x1 - v.x0) * TERRAIN_MARGIN, my = (v.y1 - v.y0) * TERRAIN_MARGIN;
+  var i0 = Math.floor((v.x0 - mx) / HEX_W), i1 = Math.ceil((v.x1 + mx) / HEX_W);
+  var j0 = Math.floor((v.y0 - my) / TILE_H), j1 = Math.ceil((v.y1 + my) / TILE_H);
+  /* 起点对齐到本级 stepT 整数倍 ⇒ 同级内采样点稳定，不随视野微调而漂移 */
+  i0 = Math.floor(i0 / want) * want; j0 = Math.floor(j0 / want) * want;
+  i1 = Math.ceil(i1 / want) * want;  j1 = Math.ceil(j1 / want) * want;
+  var nx = Math.max(1, Math.round((i1 - i0) / want));
+  var ny = Math.max(1, Math.round((j1 - j0) / want));
+
+  var c2 = document.createElement('canvas');
+  c2.width = nx; c2.height = ny;
+  var x2 = c2.getContext('2d');
+  terrainJob = { cv: c2, cx: x2, img: x2.createImageData(nx, ny), ix0: i0, jy0: j0,
+                 nx: nx, ny: ny, stepT: want, total: nx * ny, done: 0, sig: sig,
+                 t0: performance.now() };
+  terrainPumpFrame();
+}
+
+function terrainPumpFrame() {
+  var job = terrainJob;
+  if (!job) return;
+  var nx = job.nx, d = job.img.data, t0 = performance.now();
+  while (job.done < job.total && performance.now() - t0 < TERRAIN_SLICE_MS) {
+    var jj = (job.done / nx) | 0, ii = job.done - jj * nx;
+    var r = job.jy0 + jj * job.stepT;
+    var q = Math.round(job.ix0 + ii * job.stepT - r * 0.5);
+    var f = MapGen.fields(q, r);
+    var col = TERRAIN_RGB[f.biome] || [110, 110, 110], k = terrainShade(f), p = job.done * 4;
+    d[p] = col[0] * k; d[p + 1] = col[1] * k; d[p + 2] = col[2] * k; d[p + 3] = 255;
+    job.done++;
+  }
+  job.cx.putImageData(job.img, 0, 0);
+  draw();                                   // 边建边显示
+  if (job.done < job.total) {
+    terrainTimer = setTimeout(terrainPumpFrame, 0);
+  } else {
+    terrainLv[job.stepT] = { cv: job.cv, img: job.img, valid: true, ix0: job.ix0, jy0: job.jy0,
+                             nx: job.nx, ny: job.ny, stepT: job.stepT, sig: job.sig };
+    terrainJob = null;
+    terrainBuilds++; terrainLastMs = performance.now() - job.t0;
+    draw();
+    terrainEnsure();                        // 构建期间视野/需求又变了 → 再补一次
+    scheduleTerrainPrefetch();              // 空闲时预取更细一级
+  }
+}
+
+/* 放大到能看清单格时，逐格画真六边形。
+   取色直接读 LOD-1 光栅的 ImageData（1 级 = 逐格，不再调 fields()）→ 拖动也不卡；
+   前提是 1 级已覆盖视口（由 terrainEnsure 保证会被建出来），否则会取到空像素。 */
+function terrainHexes() {
+  var lv = terrainLv[1];
+  if (!lv || !lv.valid || lv.sig !== terrainSig()) return false;
+  if (wantStepT() > 1) return false;                      // 还没细到需要逐格
+  var v = viewRect();
+  if (!lvCover(lv, v)) return false;
+  var HEX_R = MapGen.HEX_R, HEX_W = MapGen.HEX_W, TILE_H = 1.5 * HEX_R;
+  var rp = HEX_R * scale, W = wrap.clientWidth, H = wrap.clientHeight;
+  var i0 = Math.floor(v.x0 / HEX_W) - 2, i1 = Math.ceil(v.x1 / HEX_W) + 2;
+  var j0 = Math.floor(v.y0 / TILE_H) - 2, j1 = Math.ceil(v.y1 / TILE_H) + 2;
+  if ((i1 - i0) * (j1 - j0) > TERRAIN_HEX_MAX) return false;
+  var nx = lv.nx, ny = lv.ny, d = lv.img.data, ix0 = lv.ix0, jy0 = lv.jy0;
+  for (var j = j0; j <= j1; j++) {
+    var jj = j - jy0;
+    if (jj < 0 || jj >= ny) continue;
+    var rowBase = jj * nx;
+    for (var i = i0; i <= i1; i++) {
+      var ii = i - ix0;
+      if (ii < 0 || ii >= nx) continue;
+      var w = MapGen.tileToWorld(Math.round(i - j * 0.5), j);
+      var s = toScreen(w.x, w.y);
+      if (s.x < -rp || s.x > W + rp || s.y < -rp || s.y > H + rp) continue;
+      var p = (rowBase + ii) * 4;
+      hexPath(s.x, s.y, rp + 0.35);                       // +0.35 消掉相邻格细缝
+      ctx.fillStyle = 'rgb(' + d[p] + ',' + d[p + 1] + ',' + d[p + 2] + ')';
+      ctx.fill();
+    }
+  }
+  return true;
+}
+
+function terrainDraw() {
+  if (!cbs.terrain.checked) { terrainMode = 'off'; return; }
+  var sig = terrainSig();
+  if (terrainHexes()) { terrainMode = 'hex'; return; }
+  var v = viewRect();
+  /* 选"覆盖视口的最细级"；没有覆盖级就取最接近需求的拉伸过渡（会立刻后台补建） */
+  var lv = pickTerrainLv(v, sig) || pickTerrainFallback(sig, terrainWant);
+  if (lv) rasterBlit(lv);
+  /* 正在构建的级若比当前显示的更细则叠加绘制 → 边建边变清晰；
+     更粗则不叠加（那只是缩小时的过渡，盖上去反而更糙） */
+  if (terrainJob && (!lv || terrainJob.stepT < lv.stepT)) rasterBlit(terrainJob);
+  terrainMode = terrainJob ? 'job' : (lv ? 'raster' : 'none');
+}
+
 /* ---------------- 主绘制 ---------------- */
 function draw(){
   var W = wrap.clientWidth, H = wrap.clientHeight;
@@ -1357,17 +1946,24 @@ function draw(){
   ctx.fillStyle = '#181d24';
   ctx.fillRect(0, 0, W, H);
 
+  /* --- 地形层（离屏光栅，可能正在分帧构建；必须最先画） --- */
+  terrainEnsure();
+  terrainDraw();
+
   var HEX_R = MapGen.HEX_R, HEX_W = MapGen.HEX_W;
   var cellWorldR = HEX_R * CL;          // 一个六边形的世界半径
   var cellPx     = cellWorldR * scale;  // 屏幕半径
 
-  /* --- 灵气底色（以中枢为圆心的径向渐变，随相机移动） --- */
+  /* --- 灵气底色（以中枢为圆心的径向渐变，随相机移动） ---
+      半径同样取引擎 spiritEdgeWorld()，让"蓝色灵气"正好在边界处消失 */
   if (cbs.spirit.checked){
     var o0 = toScreen(0, 0);
-    var rr = Math.max(1, 1000 * HEX_W * scale);   // 灵气边界半径 1000 格
+    var rr = Math.max(1, (MapGen.spiritEdgeWorld ? MapGen.spiritEdgeWorld() : 8000) * scale);
+    /* 地形在场时压淡一半，否则整屏糊成一片蓝 */
+    var sm = cbs.terrain.checked ? 0.5 : 1;
     var g = ctx.createRadialGradient(o0.x, o0.y, 0, o0.x, o0.y, rr);
-    g.addColorStop(0,    'rgba(120,165,230,0.20)');
-    g.addColorStop(0.45, 'rgba(90,130,190,0.09)');
+    g.addColorStop(0,    'rgba(120,165,230,' + (0.20*sm).toFixed(3) + ')');
+    g.addColorStop(0.45, 'rgba(90,130,190,'  + (0.09*sm).toFixed(3) + ')');
     g.addColorStop(1,    'rgba(24,29,36,0)');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, H);
@@ -1396,6 +1992,7 @@ function draw(){
 
   /* --- 逐格绘制 --- */
   var v0=0, v1=0, v2=0, commN=0;
+  pickList = [];
   var showComm = cbs.comm.checked, showVein = cbs.vein.checked,
       showName = cbs.name.checked, showGrid = cbs.grid.checked;
 
@@ -1433,8 +2030,9 @@ function draw(){
         ctx.stroke();
       }
 
-      /* 灵脉点：按真实地块坐标落位；半径以【格】为单位
-         大=2格、中=1.5格、小=1格  → 屏幕半径 = 格数 * HEX_R * scale */
+      /* 灵脉标识：六角形（与地块网格同朝向：尖角朝上下），按真实地块坐标落位；
+         外接圆半径以【格】为单位 —— 大=2格、中=1.5格、小=1格
+         → 屏幕半径 = 格数 * HEX_R * scale */
       if (showVein && cellPx > 1.5){
         for (var vi = 0; vi < cm.veins.length; vi++){
           var v = cm.veins[vi];
@@ -1443,25 +2041,94 @@ function draw(){
           var rgb = (v.element != null && MapGen.ELEMENT_RGB[v.element]) || [200,200,200];
           var col = 'rgb(' + (rgb[0]|0) + ',' + (rgb[1]|0) + ',' + (rgb[2]|0) + ')';
           var rTiles = v.level===0 ? 2 : v.level===1 ? 1.5 : 1;   // 格
-          var rr = Math.max(0.8, rTiles * HEX_R * scale);         // 屏幕半径
-          ctx.beginPath();
-          ctx.arc(sv.x, sv.y, rr, 0, Math.PI*2);
+          var vrr = Math.max(0.8, rTiles * HEX_R * scale);        // 屏幕外接圆半径
+          hexPath(sv.x, sv.y, vrr);
           ctx.fillStyle = col;
           ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
-          if (rr > 2){ ctx.strokeStyle='rgba(255,255,255,0.65)'; ctx.lineWidth=1; ctx.stroke(); }
+          if (vrr > 2){
+            ctx.lineJoin = 'round';
+            ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+            ctx.lineWidth = Math.max(1, vrr * 0.10);
+            ctx.stroke();
+          }
           if (v.level===0) v0++; else if (v.level===1) v1++; else v2++;
 
           /* 名称 + 距中枢格数（半径足够大时才标，避免互相压叠） */
-          if (showName && v.name && v.level === 0 && rr > 3){
+          if (showName && v.name && v.level === 0 && vrr > 3){
             var dist = MapGen.hexDist(v.q, v.r, 0, 0);
             ctx.fillStyle = 'rgba(236,242,252,0.92)';
             ctx.font = 'bold 12px "Microsoft YaHei",sans-serif';
-            ctx.fillText(v.name + ' ·' + dist + '格', sv.x + rr + 4, sv.y - 5);
-          } else if (showName && v.name && v.level === 1 && rr > 9){
+            ctx.fillText(v.name + ' ·' + dist + '格', sv.x + vrr + 4, sv.y - 5);
+          } else if (showName && v.name && v.level === 1 && vrr > 9){
             var d1 = MapGen.hexDist(v.q, v.r, 0, 0);
             ctx.fillStyle = 'rgba(210,222,240,0.75)';
             ctx.font = '10px "Microsoft YaHei",sans-serif';
-            ctx.fillText(v.name + ' ·' + d1 + '格', sv.x + rr + 3, sv.y - 3);
+            ctx.fillText(v.name + ' ·' + d1 + '格', sv.x + vrr + 3, sv.y - 3);
+          }
+        }
+      }
+    }
+  }
+
+  /* --- 道路（读引擎 roadCache；新路由 pumpRoads 渐进填充） --- */
+  var roadN = 0;
+  if (cbs.road.checked){
+    var wtl = toWorld(0, 0), wbr = toWorld(W, H);
+    var minX = Math.min(wtl.x, wbr.x) - 60, maxX = Math.max(wtl.x, wbr.x) + 60;
+    var minY = Math.min(wtl.y, wbr.y) - 60, maxY = Math.max(wtl.y, wbr.y) + 60;
+    var lw = Math.max(1, Math.min(4, HEX_R * scale * 0.9));
+    var rcache = MapGen.roadCache;
+    if (rcache && rcache.forEach){
+      rcache.forEach(function(rd){
+        if (rd.x1 < minX || rd.x0 > maxX || rd.y1 < minY || rd.y0 > maxY) return;
+        roadN++;
+        var p = rd.pts;
+        ctx.beginPath();
+        for (var k2 = 0; k2 < p.length; k2++){
+          var sp = toScreen(p[k2].x, p[k2].y);
+          if (k2 === 0) ctx.moveTo(sp.x, sp.y); else ctx.lineTo(sp.x, sp.y);
+        }
+        ctx.strokeStyle = 'rgba(214,178,110,0.72)';
+        ctx.lineWidth = lw;
+        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.stroke();
+      });
+    }
+  }
+
+  /* --- 聚落（区域格 REGION_M 排布，与群落晶格是两套网格） --- */
+  var settleN = 0;
+  var RM = MapGen.REGION_M;
+  var cellRPx = RM * HEX_W * scale;                       // 一个区域格的屏幕宽度
+  /* 门控：缩得太远时区域格不足 2.5px，标记会糊成一片，
+     且区域格数量按平方增长（扫一遍可达 4 万格 ≈ 1s）。
+     此时直接不扫 —— 视口范围本来就是缩出来的，没有观察价值。 */
+  if (cbs.settle.checked && cellRPx >= 2.5){
+    var rrg = indexRange(RM);
+    /* 安全上限：极端缩小视野时别扫爆 */
+    var MAXRC = 200;
+    if (rrg.iMax - rrg.iMin > MAXRC){ var mri = (rrg.iMin+rrg.iMax)/2; rrg.iMin = Math.floor(mri-MAXRC/2); rrg.iMax = rrg.iMin+MAXRC; }
+    if (rrg.jMax - rrg.jMin > MAXRC){ var mrj = (rrg.jMin+rrg.jMax)/2; rrg.jMin = Math.floor(mrj-MAXRC/2); rrg.jMax = rrg.jMin+MAXRC; }
+    var mBase = Math.max(2, Math.min(16, cellRPx * 0.16));  // 标记基准半径
+    var showSName = cbs.sname.checked;
+    for (var si = rrg.iMin; si <= rrg.iMax; si++){
+      for (var sj = rrg.jMin; sj <= rrg.jMax; sj++){
+        var arr = getSettlements(si, sj);
+        for (var ai = 0; ai < arr.length; ai++){
+          var st = arr[ai];
+          var wst = MapGen.tileToWorld(st.q, st.r);
+          var sst = toScreen(wst.x, wst.y);
+          if (sst.x < -30 || sst.x > W+30 || sst.y < -30 || sst.y > H+30) continue;
+          var sty = SETTLE_STYLE[st.type] || SETTLE_STYLE.village;
+          var mr = mBase * (sty.tier === 3 ? 1.5 : sty.tier === 2 ? 1.0 : 0.65);
+          drawSettleMark(sst.x, sst.y, mr, sty);
+          settleN++;
+          var sdist = MapGen.hexDist(st.q, st.r, 0, 0);
+          pickList.push({ x: sst.x, y: sst.y, r: mr + 4, s: st, dist: sdist, style: sty });
+          if (showSName && mr >= 3.2){
+            ctx.fillStyle = 'rgba(255,240,205,0.92)';
+            ctx.font = (sty.tier===3 ? 'bold 12px' : '11px') + ' "Microsoft YaHei",sans-serif';
+            ctx.fillText(st.name + ' ·' + sdist + '格', sst.x + mr + 4, sst.y + 4);
           }
         }
       }
@@ -1478,11 +2145,14 @@ function draw(){
   ctx.font = 'bold 12px "Microsoft YaHei",sans-serif';
   ctx.fillText('灵气中枢 (0,0)', so.x + 9, so.y - 7);
 
-  /* --- 灵气边界圈（取 CFG.SPIRIT_R_TILES 实际值） --- */
-  var spiritR = (MapGen.CFG && MapGen.CFG.SPIRIT_R_TILES) || R;
+  /* --- 灵气边界圈 ---
+     半径必须取引擎口径 MapGen.spiritEdgeWorld()（= SPIRIT_R_TILES×HEX_R×2 世界单位）。
+     ⚠ 不能再用 SPIRIT_R_TILES×HEX_W（那只有真边界的 0.866 → 圈内看着是界外），
+     否则会出现"圈里是海、圈外是山"的错位，正是本地要修的坑。 */
+  var edgeW = (MapGen.spiritEdgeWorld ? MapGen.spiritEdgeWorld() : 0) || (R * HEX_R * 2);
   if (cellPx > 3){
     ctx.beginPath();
-    ctx.arc(so.x, so.y, spiritR * HEX_W * scale, 0, Math.PI*2);
+    ctx.arc(so.x, so.y, edgeW * scale, 0, Math.PI*2);
     ctx.strokeStyle = 'rgba(150,180,220,0.35)';
     ctx.setLineDash([6,6]); ctx.lineWidth = 1;
     ctx.stroke();
@@ -1491,15 +2161,46 @@ function draw(){
 
   /* --- 统计 --- */
   var C = MapGen.CFG || {};
+  var tSig = terrainSig(), tLv = pickTerrainLv(viewRect(), tSig);
+  var terrainStat;
+  if (!cbs.terrain.checked){
+    terrainStat = '地形 <b>关</b>';
+  } else if (terrainJob){
+    terrainStat = '地形构建中 LOD <b class="tg">' + terrainJob.stepT + '</b> <b class="tg">' +
+      Math.round(terrainJob.done / terrainJob.total * 100) + '%</b>' +
+      '（' + terrainJob.nx + '×' + terrainJob.ny + ' 采样）';
+  } else if (tLv){
+    terrainStat = '地形 LOD <b class="tg">' + tLv.stepT + '</b>（' + tLv.nx + '×' + tLv.ny +
+      ' · <b class="tg">' + lvBlockPx(tLv).toFixed(1) + '</b> px/像素）' +
+      (terrainMode === 'hex' ? ' · <b class="tg">逐格六边形</b>' : '') +
+      '<br>缓存级 [<b class="tg">' + terrainLevels(tSig).join(', ') + '</b>] 需 ' + terrainWant +
+      ' · 重建 <b class="tg">' + terrainBuilds + '</b> 次 · 上次 <b class="tg">' +
+      terrainLastMs.toFixed(0) + '</b>ms';
+  } else {
+    terrainStat = '地形排队中…';
+  }
+  var roadStat;
+  if (!cbs.road.checked){
+    roadStat = '道路 <b>关</b>';
+  } else if (roadPumping){
+    roadStat = '道路建造中 <b>' + roadCursor + '/' + roadQueue.length + '</b> 格' +
+               '（已建 ' + roadBuiltTotal + '）';
+  } else {
+    roadStat = '道路缓存 <b>' + (MapGen.roadCache ? MapGen.roadCache.size : 0) + '</b> 条' +
+               '（视野内 ' + roadN + '）';
+  }
+  var edgeTilesN = Math.round((MapGen.spiritEdgeWorld ? MapGen.spiritEdgeWorld() : 8000) / HEX_W);
   statsEl.innerHTML =
-    '灵气边界 <b>' + (C.SPIRIT_R_TILES||R) + '</b> 格 · 群落间距 <b>' + CL + '</b> 格<br>' +
-    '群落半径 <b>' + (C.COMM_R||'-') + '</b> · 六边形屏幕半径 <b>' + cellPx.toFixed(1) + '</b> px<br>' +
+    '灵气边界 <b>' + (C.SPIRIT_R_TILES||R) + '</b> ×16 → <b>' + edgeTilesN + '</b> 格（此外全海洋/无聚落）<br>' +
+    '群落间距 <b>' + CL + '</b> 格 · 群落半径 <b>' + (C.COMM_R||'-') + '</b> · 六边形屏幕半径 <b>' + cellPx.toFixed(1) + '</b> px<br>' +
     '含脉群落 <b>' + commN + '</b> 个<br>' +
-    '大灵脉 <b>' + v0 + '</b>（2格）· 中 <b>' + v1 + '</b>（1.5格）· 小 <b>' + v2 + '</b>（1格）';
+    '大灵脉 <b>' + v0 + '</b>（2格）· 中 <b>' + v1 + '</b>（1.5格）· 小 <b>' + v2 + '</b>（1格）<br>' +
+    '聚落 <b>' + settleN + '</b> 个 · 区域格 <b>' + MapGen.REGION_M + '</b> 格/格<br>' +
+    roadStat + '<br>' + terrainStat;
 
   /* 提示当前缩放级别 */
   var hb = document.getElementById('hintBar');
-  if (hb) hb.textContent = '拖拽平移 · 滚轮缩放（' + (scale*100).toFixed(0) + '%）· 每个六边形=一个群落';
+  if (hb) hb.textContent = '拖拽平移 · 滚轮缩放（' + (scale*100).toFixed(0) + '%）· 底色=地形群系 · 六边形格=群落 · 六角形标记=灵脉（大/中/小） · 方/圆/三角=聚落 · 金线=道路 · 悬停聚落看详情';
 }
 
 /* ---------------- 自适应画布尺寸 ---------------- */
@@ -1512,22 +2213,54 @@ function resize(){
   cv.style.height = h + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   draw();
+  scheduleRoads();
 }
 
 /* ---------------- 交互：拖拽 ---------------- */
 cv.addEventListener('pointerdown', function(e){
   dragging = true; lastX = e.clientX; lastY = e.clientY;
   wrap.classList.add('grabbing');
+  if (tipEl) tipEl.style.display = 'none';
+  terrainAbort();                  // 拖动中不重建地形：先把半成品丢掉，省主线程
   if (cv.setPointerCapture) cv.setPointerCapture(e.pointerId);
 });
 cv.addEventListener('pointermove', function(e){
-  if (!dragging) return;
-  camX += e.clientX - lastX;
-  camY += e.clientY - lastY;
-  lastX = e.clientX; lastY = e.clientY;
-  draw();
+  if (dragging){
+    camX += e.clientX - lastX;
+    camY += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    draw();
+    return;
+  }
+  /* 悬停拾取最近聚落（数据来自上一帧 pickList） */
+  var rect = cv.getBoundingClientRect();
+  var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  var best = null, bd = 1e9;
+  for (var k = 0; k < pickList.length; k++){
+    var p = pickList[k];
+    var d = Math.hypot(p.x - mx, p.y - my);
+    if (d <= p.r + 4 && d < bd){ bd = d; best = p; }
+  }
+  if (!tipEl) return;
+  if (best){
+    tipEl.style.display = 'block';
+    tipEl.style.left = Math.min(wrap.clientWidth - 250, mx + 14) + 'px';
+    tipEl.style.top  = (my + 10) + 'px';
+    tipEl.innerHTML =
+      '<b style="color:' + best.style.col + '">' + best.s.name + '</b>（' + best.style.label + '）<br>' +
+      '人口 ' + best.s.pop + ' · 等级 ' + best.s.tier + '<br>' +
+      '距中枢 <b>' + best.dist + '</b> 格<br>' +
+      '区域格 ' + Math.floor(best.s.q / MapGen.REGION_M) + ',' + Math.floor(best.s.r / MapGen.REGION_M) +
+      ' · 地块 ' + best.s.q + ',' + best.s.r;
+  } else {
+    tipEl.style.display = 'none';
+  }
 });
-function endDrag(){ dragging = false; wrap.classList.remove('grabbing'); }
+function endDrag(){
+  dragging = false; wrap.classList.remove('grabbing');
+  terrainEnsure(true);             // 视野稳定后再补算地形（拖动中只拉伸旧图）
+  scheduleRoads();                 // 视野稳定后再补算道路
+}
 cv.addEventListener('pointerup', endDrag);
 cv.addEventListener('pointercancel', endDrag);
 
@@ -1544,6 +2277,7 @@ wrap.addEventListener('wheel', function(e){
   camX += (after.x - before.x) * scale;
   camY += (after.y - before.y) * scale;
   draw();
+  scheduleRoads();          // 缩放停下后再补算道路（内部防抖）
 }, { passive:false });
 
 /* ---------------- 控件 ---------------- */
@@ -1566,6 +2300,18 @@ function syncCfgLabels(){
     var el = cfgValEls[key];
     if (el) el.textContent = (Math.abs(v) < 1 && v !== 0) ? v.toFixed(2) : v;
   });
+  /* 灵气边界的"实际格数"——直接用引擎口径算, 圈/海/聚落三者才一致 */
+  var elT = document.getElementById('spiritEdgeTiles'),
+      elW = document.getElementById('spiritEdgeWorld');
+  if (elT || elW){
+    var HR = (typeof MapGen !== 'undefined' && MapGen.HEX_R) || 8;
+    var HW = (typeof MapGen !== 'undefined' && MapGen.HEX_W) || Math.sqrt(3) * HR;
+    var rTiles = +cfgEls['SPIRIT_R_TILES'].value;
+    var wUnits = rTiles * HR * 2;                         // = spiritEdgeWorld()
+    var tiles  = Math.round(wUnits / HW);                  // 世界单位 → 格(横轴邻距)
+    if (elT) elT.textContent = tiles;
+    if (elW) elW.textContent = wUnits;
+  }
 }
 
 /* 从引擎配置 (mapgen-config.js → global.MapGenConfig) 拉取初值填入滑块。
@@ -1602,9 +2348,11 @@ function onCfgChanging(key){ syncCfgLabels(); }
 function onCfgChanged(){
   syncCfgLabels();
   applyAllCfg();
+  resetWorldCaches();          // 参数变了 → 聚落/道路缓存全部作废
   camX = 0; camY = 0;
   initScaleOnce();
   draw();
+  scheduleRoads();
 }
 
 CFG_CTRLS.forEach(function(t){
@@ -1627,15 +2375,37 @@ function regenerate(){
   seedEl.value = s;                       // 弹出随机数到输入框
   try { MapGen.init(s); } catch(e){}
   applyAllCfg();                          // 保留当前 CFG 控件值
+  resetWorldCaches();                     // 换世界 → 聚落/道路缓存作废
   camX = 0; camY = 0;
   initScaleOnce();
   draw();
+  scheduleRoads();
 }
 btn.onclick = regenerate;
 
-[ cbs.comm, cbs.vein, cbs.name, cbs.spirit, cbs.grid ].forEach(function(cb){
+[ cbs.terrain, cbs.comm, cbs.vein, cbs.name, cbs.spirit, cbs.grid,
+  cbs.settle, cbs.sname ].forEach(function(cb){
   cb.onchange = draw;
 });
+cbs.road.onchange = function(){ scheduleRoads(); draw(); };
+
+/* 道路半径：拖动只更新数字；松手重建队列 */
+function syncRoadLabels(){
+  var c = roadCellsN();
+  roadCellsValEl.textContent = c;
+  roadCellsTilesEl.textContent = c * MapGen.REGION_M;
+  roadBudgetValEl.textContent = roadBudget();
+}
+roadCellsEl.oninput  = syncRoadLabels;
+roadCellsEl.onchange = function(){ syncRoadLabels(); scheduleRoads(); draw(); };
+roadBudgetEl.oninput = syncRoadLabels;
+
+roadClearBtn.onclick = function(){
+  if (MapGen.roadCache) MapGen.roadCache.clear();
+  resetRoadState();
+  scheduleRoads();
+  draw();
+};
 
 window.addEventListener('resize', resize);
 
@@ -1646,9 +2416,11 @@ seedEl.addEventListener('keydown', function(e){
     seedEl.value = s;
     try { MapGen.init(s); } catch(err){}
     applyAllCfg();
+    resetWorldCaches();
     camX = 0; camY = 0;
     initScaleOnce();
     draw();
+    scheduleRoads();
   }
 });
 
@@ -1658,8 +2430,9 @@ seedEl.value = seedEl.value || randomSeed();        // 首次进入也给一个�
 try { MapGen.init(seedEl.value); } catch(e){}
 applyAllCfg();              // 用侧边栏的当前值统一配置一次
 syncCfgLabels();
+syncRoadLabels();
 initScaleOnce();
-resize();
+resize();                   // resize 内部会 draw + scheduleRoads
 
 })();
 

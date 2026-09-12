@@ -31,6 +31,12 @@
   ];
 
   var SEA_LEVEL = 0.40;
+  /* ---------- 边界沉海 (设定 §九.3) ----------
+     灵气边界外是"凡俗无灵地带": 地形一律沉为海洋, 不产聚落也不出灵脉峰。
+     下沉目标高度 = EDGE_SEA_FLOOR + (e - 0.5) * EDGE_SEA_VAR,
+     取值区间 [0.24, 0.36] 恒 < SEA_LEVEL → 保证界外必为海(含深海), 且保留一点海底起伏。 */
+  var EDGE_SEA_FLOOR = 0.30;
+  var EDGE_SEA_VAR   = 0.12;
   var HEX_R = 8;                          // 外接圆半径 → 直径 16
   var HEX_W = Math.sqrt(3) * HEX_R;
   var CHUNK_R = 10;                       // 区块六边形半径 (格)
@@ -46,6 +52,7 @@
     COMM_CL: 150, COMM_R: 40,
     D_L_M: 18, D_L_S: 12, D_M: 14, D_SMALL: 8,
     SPIRIT_R_TILES: 1000, SPIRIT_CURVE: 0.8,
+    EDGE_SEA_SP: 0.30, EDGE_SETTLE_SP: 0.35,
     COMM_P_MIN: 0.16, COMM_P_SPIRIT: 0.62,
     SUB_ATTEMPTS: 14,
     LIFT_CORE: [0.80, 0.75, 0.70], LIFT_ARM_OFF: 0.05,
@@ -224,6 +231,15 @@
         if (t3 > e) e = e + (t3 - e) * 0.35;
       }
     }
+    /* 边界沉海 (设定 §九.3): 灵气强度向外衰减 → 海拔按同一条曲线压入海底。
+       必须放在灵脉抬升【之后】: 否则边界带上的灵脉峰会被 LIFT_CORE 抬回水面,
+       出现"界外灵脉山"。系数 EDGE_SEA_SP 越大 → 衰减带越宽、越早开始沉。
+       沉没权重 = 1 - edgeKeep (edgeKeep 是"保留", 别直接用) */
+    var gSea = 1 - edgeKeep(spiritAt(q, r), CFG.EDGE_SEA_SP);
+    if (gSea > 0) {
+      var sunk = EDGE_SEA_FLOOR + (e - 0.5) * EDGE_SEA_VAR;
+      e = e * (1 - gSea) + sunk * gSea;
+    }
     cacheSet(elevCache, key, e, ELEV_CAP);
     return e;
   }
@@ -279,9 +295,10 @@
     else if (m + Math.max(0, 0.14 - (e - SEA_LEVEL) * 1.4) > 0.62) biome = BIOME.FOREST; // 海岸加湿
     else biome = BIOME.GRASS;
 
-    /* 灵脉格: 覆写显示用 biome (8..12 = 金木水火土灵脉格) */
+    /* 灵脉格: 覆写显示用 biome (8..12 = 金木水火土灵脉格)
+       仅陆地出灵脉 —— 边界带被沉海的灵脉不再覆写, 否则会在海面上留"无根灵脉峰" */
     var vinfo = null;
-    if (vn && vn.d <= 1) {
+    if (vn && vn.d <= 1 && e >= SEA_LEVEL) {
       vinfo = { element: vn.v.element, variant: vn.v.variant,
                 level: vn.v.level, d: vn.d, name: vn.v.name };
     }
@@ -519,9 +536,12 @@
     if (c) return c;
     var arr = [];
     var h0 = hash01(i, j, 7);
-    /* 灵气梯度 (设定 §九/§十): 聚落密度随灵气衰减, 1000 外无灵凡俗 */
+    /* 灵气梯度 (设定 §九/§十): 聚落密度随灵气衰减;
+       边界衰减: 再乘一次"灵气强度 → 0..1"的衰减系数, 强度归零处概率归零
+       → 灵气边界外(含界外海洋)不再生成任何聚落与秘境 */
     var spLoc = spiritAt(i * REGION_M, j * REGION_M);
-    if (h0 < 0.20 + 0.38 * spLoc) {
+    var pSpawn = (0.20 + 0.38 * spLoc) * edgeKeep(spLoc, CFG.EDGE_SETTLE_SP);
+    if (h0 < pSpawn) {
       var count = h0 < 0.30 ? 1 : 2;
       for (var k = 0; k < count; k++) {
         var sq = i * REGION_M + (hash01(i, j, 21 + k) - 0.5) * REGION_M * 0.7;
@@ -738,13 +758,30 @@
 
   /* ---------- 灵气场 / 群落 / 灵脉 (设定: 先定灵脉, 后造山河) ---------- */
 
+  /* 灵气归零的世界半径 (世界单位) —— 引擎内部唯一真源。
+     预览页边界圈、客户端边界显示都必须用它, 否则会"圈内看着是界外" */
+  function spiritEdgeWorld() { return CFG.SPIRIT_R_TILES * HEX_R * 2; }
+
   /* 灵气场 (设定 §九): 以 (0,0) 为灵气中枢, 欧氏直线距离单调衰减,
-     半径 SPIRIT_R_TILES 处归零; 越近群落越密、聚落越繁华 */
+     半径 SPIRIT_R_TILES(×HEX_R×2 世界单位) 处归零; 越近群落越密、聚落越繁华 */
   function spiritAt(q, r) {
     var w = tileToWorld(q, r);
-    var d = Math.sqrt(w.x * w.x + w.y * w.y) / (CFG.SPIRIT_R_TILES * HEX_R * 2);
+    var d = Math.sqrt(w.x * w.x + w.y * w.y) / spiritEdgeWorld();
     var t = Math.max(0, 1 - d);
     return Math.pow(t, CFG.SPIRIT_CURVE);
+  }
+
+  /* 边界"保持系数" edgeKeep (设定 §九.3): 把「灵气强度 sp」映射成 0..1 的**保留**权重。
+     sp ≥ band → 1 (完全保留, 不衰减);  sp = 0 (边界外) → 0 (彻底衰减)。
+     band(=EDGE_SEA_SP / EDGE_SETTLE_SP) 即"灵气降到多少才开始衰减",
+     取 0 时退化为硬边界(只要有一点灵气就全保留)。
+
+     ⚠ 语义只有一个方向: 这是"保留"，不是"衰减"。
+       要拿"衰减/沉没"权重必须写 1 - edgeKeep(…)，别直接当权重乘 —
+       两者写反的画面是: 灵气越浓越沉海 → 内圈全淹、边界反而不动。 */
+  function edgeKeep(sp, band) {
+    if (!(band > 0)) return sp > 0 ? 1 : 0;
+    return NL.smoothstep(0, band, sp);
   }
 
   /* 相冲/相合对 → 异灵根 */
@@ -771,7 +808,9 @@
     var comm = null;
     var cq0 = i * CFG.COMM_CL, cr0 = j * CFG.COMM_CL;
     var sp = spiritAt(cq0, cr0);
-    var p = sp < 0.03 ? 0 : CFG.COMM_P_MIN + CFG.COMM_P_SPIRIT * sp;   // 群落存在概率随灵气
+    /* 群落存在概率随灵气; 再乘界面沉海的同一衰减系数
+       (灵脉属地形的立体产出: 群落落进沉海带会变成"水下空壳", 必须在播群落这一步就衰减掉) */
+    var p = sp < 0.03 ? 0 : (CFG.COMM_P_MIN + CFG.COMM_P_SPIRIT * sp) * edgeKeep(sp, CFG.EDGE_SEA_SP);
     if (hash01(i, j, 201) < p) {
       var q = Math.round(cq0 + (hash01(i, j, 202) - 0.5) * CFG.COMM_CL * 0.44);
       var r = Math.round(cr0 + (hash01(i, j, 203) - 0.5) * CFG.COMM_CL * 0.44);
@@ -932,6 +971,11 @@
     ELEMENT_RGB: ELEMENT_RGB,
     VARIANT_RGB: VARIANT_RGB,
     SEA_LEVEL: SEA_LEVEL,
+    /* 边界衰减: 预览页/客户端画"灵气边界圈"必须用 spiritEdgeWorld(),
+       不得各自硬编码半径 —— 否则会出现"圈内是海、圈外有山"的错位 */
+    spiritEdgeWorld: spiritEdgeWorld,
+    edgeKeep: edgeKeep,
+    EDGE_SEA_FLOOR: EDGE_SEA_FLOOR,
     BIOME: BIOME,
     BIOME_META: BIOME_META
   };
