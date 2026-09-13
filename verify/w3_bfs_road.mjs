@@ -65,6 +65,7 @@ const MG = makeEngine(mapSrc);
 
 const COST_MAX = MG.CFG.ROAD_COST_MAX | 0;
 const STEPS_MAX = MG.CFG.ROAD_STEPS_MAX | 0;
+const STEP_CAP_A = Math.floor(COST_MAX / (MG.CFG.ROAD_W_ROAD | 0));   // 复用模式步数上限 (60)
 const W = MG.CFG.ROAD_W;
 
 /* 参照实现保留「无下界剪枝」语义 ⇒ 桶下标 f=g+h 允许超出预算 (g≤maxCost, h≤maxW×maxSteps),
@@ -193,14 +194,13 @@ const MG3 = makeEngine(mapSrc);
 MG3.init('seed-check');
 {
   const E2E_SPAN = 14;
-  /* 配对语义 = roadsNear 现行规则: 聚落 × 3x3 邻域内全部聚落, 按距离升序逐对 A*,
-     但「跳板剪枝」会故意不建冗余直达路 —— 分母须排除这些对。
-     attempted = 预算内(下界可达) 且未被跳板剪枝的去重候选对;
+  /* 配对语义 = roadsNear 现行规则 (Network-First): 需求边 = 聚落 × 3x3 池的
+     近似 RNG (被第三点支配的冗余边不入图, 取代跳板剪枝), 按建网规范序逐边 A*。
+     attempted = 复用模式预算内 (d0 ≤ COST_MAX/ROAD_W_ROAD) 且未被 RNG 支配的
+     去重候选对 (绕行闸 DI 拒绝的对属「建后按闸放弃」, 计入分母);
      built     = roadsNear 产出按 key 去重的建成路 (同一条路从两端区域各返回一次)。
-     跳板剪枝判定复刻 hopPrune: 距离全部用 cartDist (实际笛卡尔直线距离,
-     借恒等式 dx²+dy² = HEX_W²·(dq²+dq·dr+dr²) 整数化), ∃m (3x3(a格)∪3x3(b格),
-     非poi, 非端点) 使 dam<dab && dmb<dab (严格介于两点之间) 且
-     10(dam+dmb) ≤ 13·dab (直线绕行 ≤30%)。 */
+     RNG 支配判定复刻 rngDominated: ∃m (3x3(a格)∪3x3(b格), 非poi, 非端点) 使
+       dam < dab && dmb < dab (cartDist, 严格介于两点之间)。 */
   const isqrtT = (n) => {
     if (n < 2) return n;
     let x = n, y = ((x + (n / x | 0)) >> 1) | 0;
@@ -211,8 +211,7 @@ MG3.init('seed-check');
     const dq = q1 - q2, dr = r1 - r2;
     return isqrtT(dq * dq + dr * dr + dq * dr);
   };
-  const prunedT = (a, b) => {
-    const dab = cartT(a.q, a.r, b.q, b.r);
+  const dominatedT = (a, b, dab) => {
     const pa = a.id.split('_'), pb = b.id.split('_');
     const cells = new Set();
     for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
@@ -228,11 +227,7 @@ MG3.init('seed-check');
       }
     }
     for (const m of pool.values()) {
-      const dam = cartT(a.q, a.r, m.q, m.r);
-      if (dam >= dab) continue;
-      const dmb = cartT(m.q, m.r, b.q, b.r);
-      if (dmb >= dab) continue;
-      if (10 * (dam + dmb) <= 13 * dab) return true;
+      if (cartT(a.q, a.r, m.q, m.r) < dab && cartT(m.q, m.r, b.q, b.r) < dab) return true;
     }
     return false;
   };
@@ -251,8 +246,8 @@ MG3.init('seed-check');
           if (seenPair.has(key)) continue;
           seenPair.add(key);
           const d0 = MG3.hexDist(a.q, a.r, b.q, b.r);
-          if (d0 > STEPS_MAX || d0 * minW > COST_MAX) continue;   // 预算外: A* 必 null (步数下界)
-          if (prunedT(a, b)) continue;                            // 跳板剪枝: 有意不建
+          if (d0 > STEP_CAP_A || d0 * 2 > COST_MAX) continue;     // 复用模式预算外: A* 必 null
+          if (dominatedT(a, b, cartT(a.q, a.r, b.q, b.r))) continue;  // RNG 支配: 有意不建
           attempted++;
         }
       }
@@ -266,7 +261,7 @@ MG3.init('seed-check');
   }
   const built = seenRoad.size;
   const rate = built / attempted;
-  console.log(`\n  seed=seed-check ±${E2E_SPAN}: 建成路 ${built} 条 / 可建候选对(预算内且未被跳板剪枝) ${attempted} → 建路率 ${(rate * 100).toFixed(1)}%`);
+  console.log(`\n  seed=seed-check ±${E2E_SPAN}: 建成路 ${built} 条 / 可建候选对(预算内且未被 RNG 支配) ${attempted} → 建路率 ${(rate * 100).toFixed(1)}%`);
   console.log(`  roadsNear 冷启动合计 ${total.toFixed(0)}ms / ${cells} 区域格, 最慢单区域 ${worst.toFixed(1)}ms`);
   /* 阈值: 可建对绝大多数应连通 (旧近邻版实测 ~89-92%); 留出余量, 只在「路网大幅退化」时报错 */
   check('⑦ 建路率 ≥ 70% (路网未退化)', rate >= 0.70, `${(rate * 100).toFixed(1)}%`);

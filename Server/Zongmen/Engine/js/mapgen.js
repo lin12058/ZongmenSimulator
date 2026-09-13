@@ -131,7 +131,11 @@
   var centerCache = new Map();   // "aq,ar"-> 选中中心 {q,r,score} | null
   var townCache = new Map();     // "聚落id" -> 足迹规划 {style, buildings, resources}
   var tradeCache = new Map();    // "i,j" -> 该区域格城镇的贸易边数组
-  var roadFail = new Set();      // "a|b" -> 不可达聚落对 (寻路失败, 终身跳过)
+  var roadFail = new Set();      // "a|b" -> 不可达聚落对 (重试 3 次仍失败才入内, 终身跳过)
+  var roadFailTrials = new Map(); // "a|b" -> 已尝试次数: 复用是路径依赖的 (路网变密后骑路可达性会变),
+                                  // null 失败不立即终身标记, 进重试队列 3 次后仍失败才转终身
+  var diRetryQueue = [];         // DI 闸拒绝的边 {a,b,rkey}: 等路网变密后重试 (会话级 FIFO,
+                                 // 每次 roadsNear 限量消化; 重试仍超限则回队尾, 容量上限丢最旧)
   /* P3: 地块级缓存固定容量 (Map 保持插入序)。超限时每次淘汰最旧 1 条,
      单条 delete 的开销摊薄到每次插入 → 不再有「超大 Map 一次性删半」的长停顿;
      内存有界; 淘汰仅影响命中率, 不改变确定性结果。 */
@@ -206,7 +210,7 @@
     nDetail = new NL.SimplexNoise(rng);
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); roadTileIdx.clear(); commCache.clear(); veinNearCache.clear();
+    roadCache.clear(); roadTileIdx.clear(); diRetryQueue.length = 0; roadFailTrials.clear(); commCache.clear(); veinNearCache.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadFail.clear();
     roadVer = 0;
@@ -933,25 +937,27 @@
     return arr;
   }
 
-  /* ---------- 道路 (A* 寻路: Dial 桶优先队列 + 三重剪枝; 跳板剪枝去重) ----------
-   * 权重表 ROAD_W 见 mapgen-config.js (水4 / 平地3 / 林5 / 山8)。
-   * 路网拓扑 (roadsNear): 每个聚落 × 3x3 邻域格内全部聚落, 按距离升序逐对跑 A*,
-   *   预算内可达即建路 —— 但先过「跳板剪枝」: 若存在中间聚落 m 严格位于两点
-   *   之间且直线绕行 ≤ 直达的 30%, 则不建 a-b 直路 (走 m 即可) —— 消除「跳板
-   *   路线与直达路并行」的三角捆绑重复路。剪枝是纯几何判定 (全整数, 不读缓
-   *   存), 跳板池取 3x3(a格)∪3x3(b格) —— 从任一端评估同一对结果相同 ⇒ 与访
-   *   问顺序无关, 跨会话确定。m 严格介于两点之间 ⇒ 最近邻对与 MST 边永不被
-   *   剪 (环性质) ⇒ 每聚落至少 1 路且路网不碎裂。创建顺序按规模大者先
-   *   (hubBefore), 跳板本身不限规模。
+  /* ---------- 道路 (A* 寻路: Dial 桶优先队列 + 三重剪枝; 路网优先拓扑) ----------
+   * 权重表 ROAD_W 见 mapgen-config.js (深海8/浅海6/沙岸4/草地3/林地4/沙漠5/山地8/雪峰8)。
+   * 路网拓扑 (roadsNear, Network-First 详见 docs/道路网络重构方案.md):
+   *   ① 需求边 = 本格聚落 × 3x3 池的近似 RNG (被第三点支配的冗余边不入图,
+   *      取代跳板剪枝; MST ⊆ RNG ⇒ 骨架连通, 孤岛不再出现);
+   *   ② 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序;
+   *   ③ 逐边 A*: 已建路格全局折扣 ROAD_W_ROAD=2 (不限走廊 ⇒ 分叉聚落共享干道);
+   *   ④ 绕行闸: DI = 步数/六边距 > ROAD_DI_MAX10/10 ⇒ 先试无折扣直连,
+   *      仍超限则骨架边 (Kruskal) 强制建, 非骨架放弃。
+   *   跳板池/支配判定全部全整数; 复用与闸门使可行性「路径依赖」(先建路的形状
+   *   影响后建路), 会话内严格确定。
    * A* 本体 (bfsRoad) 的三个剪枝:
    *   ① 放弃「跨大陆找路」—— 剪枝把搜索限制在城镇周边邻域:
    *        · 累计权重 > CFG.ROAD_COST_MAX 的分支不再扩展 (权重剪枝);
-   *        · 距起点层数 > CFG.ROAD_STEPS_MAX 的格不入队 (步数剪枝);
+   *        · 距起点层数 > 步数上限的格不入队 (步数剪枝; 复用模式上限自动放宽,
+   *          见 bfsRoad 注释);
    *        · 剩余代价可采纳下界 使 g+h > 预算 的格直接跳过 —
    *          可采纳 ⇒ 不改变任何 ≤预算 路径的存在性与最优值, 只砍掉「注定失败」
    *          分支的无效扩散。
    *      A* 时代 guard=12000 步 + 海岸破碎区最长 5.1s 持 V8 门闩的病灶一并消除;
-   *      实测最慢单 region(含 roadsNear+跳板剪枝) ~60ms, 远低于回归预算 250ms。
+   *      实测最慢单 region(含 roadsNear+闸门) ~130ms, 远低于回归预算 250ms。
    *   ② 实现用 Dial 桶队列做 A* 的优先队列, 桶下标 = f = g + h:
    *      h = 最小权重 × ⌊笛卡尔欧氏距离⌋ (cartDist: 两端点经 tileToWorld 的
    *      实际世界坐标代入勾股定理, 借恒等式 dx²+dy² = HEX_W²·(dq²+dq·dr+dr²)
@@ -1004,39 +1010,123 @@
     return p.id < q2.id;
   }
 
-  /* 跳板剪枝判定: 中间聚落 m 能否替代 a-b 直路 (笛卡尔实际位置, 全整数)。
-     距离全部用 cartDist (真实笛卡尔直线距离, 非 hexDist 步数)。
-     两个条件缺一不可:
-       ① m 严格位于两点之间 (到两端都严格更近) —— 两重连通性保证:
-          · 最近邻对永不被剪 (m 更近与「b 是 a 的最近邻」矛盾)
-            ⇒ 每个聚落至少保住到它最近邻的 1 条路;
-          · MST 的边也不可能被剪 (环性质: 若 m 到两端都严格更近, 则 (a,b)
-            是环 a-m-b 上的最重边, 不属于任何 MST) ⇒ 路网不碎裂。
-       ② a→m→b 直线绕行 ≤ 直达的 30% (10/13 整数比值, 不用浮点) ——
-          绕行更多说明 m 不顺路, 直达路有独立价值, 保留。
-     注意跳板不限规模: 资格门槛会放过「大城-小镇直达 + 小村跳板」并行的
-     三角捆绑 (实测主线), 去掉门槛后这类冗余由几何条件统一剪掉。 */
-  function hopPrune(a, b, m, dab) {
-    if (m.id === a.id || m.id === b.id) return false;
-    var dam = cartDist(a.q, a.r, m.q, m.r);
-    if (dam >= dab) return false;
-    var dmb = cartDist(m.q, m.r, b.q, b.r);
-    if (dmb >= dab) return false;
-    return 10 * (dam + dmb) <= 13 * dab;
+  /* 近似 RNG 支配判定: 边 (a,b) 是否被第三点 m 支配
+     (m 到两端都严格更近 ⇒ (a,b) 冗余, 不入需求图 —— 取代旧跳板剪枝)。
+     池 = 3x3(a格) ∪ 3x3(b格): 从任一端评估池子相同 ⇒ 判定与发起侧无关 (跨会话确定)。
+     窗口外的支配点会漏检 (近似), 只会多连不会断连 (MST ⊆ RNG 的连通保证保持)。 */
+  function rngDominated(a, b, dab) {
+    var ap = a.id.split('_'), bp = b.id.split('_');
+    var ai = +ap[0], aj = +ap[1], bi = +bp[0], bj = +bp[1];
+    for (var di = -2; di <= 2; di++) {
+      for (var dj = -2; dj <= 2; dj++) {
+        for (var c2 = 0; c2 < 2; c2++) {
+          var ci = c2 === 0 ? ai + di : bi + di, cj = c2 === 0 ? aj + dj : bj + dj;
+          var others = settlementsFor(ci, cj);
+          for (var o = 0; o < others.length; o++) {
+            var m = others[o];
+            if (m.id === a.id || m.id === b.id || m.type === 'poi') continue;
+            if (cartDist(a.q, a.r, m.q, m.r) < dab &&
+                cartDist(m.q, m.r, b.q, b.r) < dab) return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /* 骨架边 (懒计算): 本格聚落所在池 (3x3 格内全部聚落) 的 RNG 边集跑 Kruskal
+     (权 = 笛卡尔距离), 得到维持局部连通必须保留的边 —— 绕行闸超限时骨架边
+     强制建 (连通优先), 非骨架边放弃。纯函数, 确定性。 */
+  function skeletonEdgesFor(i, j) {
+    var P = [], seen = new Set();
+    for (var di = -2; di <= 2; di++) for (var dj = -2; dj <= 2; dj++) {
+      var others = settlementsFor(i + di, j + dj);
+      for (var o = 0; o < others.length; o++) {
+        var s = others[o];
+        if (s.type === 'poi' || seen.has(s.id)) continue;
+        seen.add(s.id);
+        P.push(s);
+      }
+    }
+    var edges = [];
+    for (var p1 = 0; p1 < P.length; p1++) for (var p2 = p1 + 1; p2 < P.length; p2++) {
+      var a = P[p1], b = P[p2];
+      var dab = cartDist(a.q, a.r, b.q, b.r);
+      var dom = false;
+      for (var m3 = 0; m3 < P.length && !dom; m3++) {
+        if (P[m3] === a || P[m3] === b) continue;
+        if (cartDist(a.q, a.r, P[m3].q, P[m3].r) < dab &&
+            cartDist(P[m3].q, P[m3].r, b.q, b.r) < dab) dom = true;
+      }
+      if (!dom) edges.push({ a: a, b: b, d: dab, rkey: a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id });
+    }
+    edges.sort(function (e1, e2) { return e1.d - e2.d; });
+    var parent = new Map();
+    function find(x) {
+      if (!parent.has(x)) parent.set(x, x);
+      var r = x;
+      while (parent.get(r) !== r) r = parent.get(r);
+      while (parent.get(x) !== r) { var nx = parent.get(x); parent.set(x, r); x = nx; }
+      return r;
+    }
+    var sk = new Set();
+    for (var e2 = 0; e2 < edges.length; e2++) {
+      var ra = find(edges[e2].a.id), rb = find(edges[e2].b.id);
+      if (ra !== rb) { parent.set(ra, rb); sk.add(edges[e2].rkey); }
+    }
+    return sk;
+  }
+
+  /* 需求边集 (Network-First 第一层): 本格聚落 × 3x3 池的近似 RNG 边,
+     按建网规范序排列 —— 端点 hub 等级高者先建 (干线先行), 同级距离升序, 再按 rkey。 */
+  function demandEdgesFor(i, j) {
+    var mine = settlementsFor(i, j), edges = [], edgeSeen = new Set();
+    for (var s = 0; s < mine.length; s++) {
+      var a = mine[s];
+      if (a.type === 'poi') continue;
+      var pool = [];
+      for (var di = -2; di <= 2; di++) for (var dj = -2; dj <= 2; dj++) {
+        var others = settlementsFor(i + di, j + dj);
+        for (var o = 0; o < others.length; o++) {
+          if (others[o].id === a.id || others[o].type === 'poi') continue;
+          pool.push(others[o]);
+        }
+      }
+      pool.sort(function (p, q2) {
+        return cartDist(a.q, a.r, p.q, p.r) - cartDist(a.q, a.r, q2.q, q2.r);
+      });
+      for (var c2 = 0; c2 < pool.length; c2++) {
+        var b = pool[c2];
+        var rkey = a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id;
+        if (edgeSeen.has(rkey)) continue;              // 两端同格时会从两侧各扫到一次
+        edgeSeen.add(rkey);
+        if (rngDominated(a, b, cartDist(a.q, a.r, b.q, b.r))) continue;
+        edges.push({ a: a, b: b, rkey: rkey });
+      }
+    }
+    edges.sort(function (e1, e2) {
+      var h1 = hubBefore(e1.a, e1.b) ? e1.a : e1.b;    // 边的较高 hub 端
+      var h2 = hubBefore(e2.a, e2.b) ? e2.a : e2.b;
+      if (hubBefore(h1, h2)) return -1;
+      if (hubBefore(h2, h1)) return 1;
+      var d1 = cartDist(e1.a.q, e1.a.r, e1.b.q, e1.b.r);
+      var d2 = cartDist(e2.a.q, e2.a.r, e2.b.q, e2.b.r);
+      if (d1 !== d2) return d1 - d2;
+      return e1.rkey < e2.rkey ? -1 : 1;
+    });
+    return edges;
   }
 
   /* A* 寻路 (f = g + h, Dial 桶优先队列): 返回 [[q,r], ...] 或 null (超预算/不可达)
-     roadTiles (可选): 会话内已建路格索引 (Set "q,r")。传入后, 落在「起点→终点
-     直线走廊」(垂直距离 ≤ ROAD_REUSE_CORRIDOR 格, 见 inCorridor) 内的已铺路格
-     每格只算 ROAD_W_ROAD(2) —— 新路顺路并线到既有路廊; 走廊外的旧路按正常地形
-     计价, 不会被远处干道拽离直线。此时 h 的下界系数同步降为
+     roadTiles (可选): 会话内已建路格索引 (Set "q,r")。传入后已铺路格每格只算
+     ROAD_W_ROAD(2) —— 全局折扣, 不限走廊: 新路顺路并线到既有路廊 (分叉聚落
+     共享干道); 绕行副作用由调用方的 DI 闸兜底。此时 h 的下界系数同步降为
      min(地形最小权重, ROAD_W_ROAD) = 2, 保证可采纳。不传 = 纯地形寻路
      (回归测试/跨实例确定性用), 函数名保留 bfsRoad: verify/w3_bfs_road.mjs 以此名调用 */
   function bfsRoad(sq, sr, tq, tr, roadTiles) {
     var maxCost = CFG.ROAD_COST_MAX | 0;
     var maxSteps = CFG.ROAD_STEPS_MAX | 0;
     var roadW = CFG.ROAD_W_ROAD | 0;
-    var corrD = (CFG.ROAD_REUSE_CORRIDOR | 0);
     var minW = roadMinWeight();
     var hMin = (roadTiles && roadW < minW) ? roadW : minW;   // 启发下界系数: 已铺路格更便宜
     if (roadTiles) maxSteps = Math.floor(maxCost / Math.max(1, hMin));
@@ -1046,14 +1136,6 @@
        Dijkstra 对拍实测 4/148 例)。代价预算才是真约束, 步数只是搜索限界。 */
     var d0 = hexDist(sq, sr, tq, tr);
     if (d0 > maxSteps || d0 * hMin > maxCost) return null;   // 直线下界即超预算, 直接放弃 (hMin=实际最低单格价)
-
-    /* 走廊判定预计算: v = 终点−起点; Qv = Q(v) (见 cartDist 二次型) */
-    var vdq = tq - sq, vdr = tr - sr;
-    var Qv = roadTiles ? (vdq * vdq + vdq * vdr + vdr * vdr) : 0;
-    /* 格 t 是否在 s→g 直线走廊内 (点到线段垂距 ≤ corrD, 全整数):
-       u = t−s; Q(x)=dq²+dq·dr+dr² (=|x|²/HEX_W²); B = 2·u.dq·v.dq + u.dq·v.dr + u.dr·v.dq + 2·u.dr·v.dr (=2u·v)。
-       垂距² = Q(u) − (B/2)²/Qv ≤ corrD²  ⟺  4·Q(u)·Qv − B² ≤ 4·corrD²·Qv;
-       垂足在线段上 ⟺ 0 ≤ B ≤ 2·Qv。 */
 
     var buckets = [];
     for (var b = 0; b <= maxCost; b++) buckets.push([]);
@@ -1096,25 +1178,8 @@
           if (g + h > maxCost) continue;                       // 下界剪枝: 该分支必超预算 (省一次 fields)
           var nk = nx + ',' + ny;
           if (closed.has(nk)) continue;
-          var ng;
-          if (roadTiles && roadTiles.has(nk)) {
-            /* 已铺路格: 仅直线走廊(胶囊体)内享受复用价 2, 走廊外按地形计价 (不绕远路)。
-               垂足越出线段时按到较近端点的距离计 (与「点到线段距离」语义一致) */
-            var udq = nx - sq, udr = ny - sr;
-            var Qu = udq * udq + udq * udr + udr * udr;
-            var Bl = 2 * udq * vdq + udq * vdr + udr * vdq + 2 * udr * vdr;
-            var inCorr;
-            if (Bl < 0) inCorr = Qu <= corrD * corrD;                       // 垂足越过起点 → 到起点距离
-            else if (Bl > 2 * Qv) {                                         // 垂足越过终点 → 到终点距离
-              var gdq = nx - tq, gdr = ny - tr;
-              inCorr = (gdq * gdq + gdq * gdr + gdr * gdr) <= corrD * corrD;
-            } else {
-              inCorr = 4 * Qu * Qv - Bl * Bl <= 4 * corrD * corrD * Qv;     // 垂距² ≤ D²
-            }
-            ng = g + (inCorr ? roadW : roadWeight(fields(nx, ny)));
-          } else {
-            ng = g + roadWeight(fields(nx, ny));
-          }
+          /* 已铺路格全局折扣 (不限走廊): 并线副作用由调用方 DI 闸兜底 */
+          var ng = g + (roadTiles && roadTiles.has(nk) ? roadW : roadWeight(fields(nx, ny)));
           if (ng + h > maxCost) continue;                      // 权重剪枝 (实际权重 ≥ 下界)
           var old = dist.has(nk) ? dist.get(nk) : 1e18;
           if (ng < old) {
@@ -1129,97 +1194,140 @@
     return null;
   }
 
-  /* 某区域格内聚落的对外道路 (缓存, 全局去重, 预算制)
-     配对语义: 每个聚落与 3x3 邻域格内全部 n 个聚落 (含跨格) 按六边距离升序
-     逐对跑 A*, 预算内可达即建路 —— 但先过「跳板剪枝」(hopPrune): 存在严格
-     顺路的中间聚落 (两点之间 + 直线绕行 ≤30%) 就不建直达路, 消除跳板/直达
-     并行的三角捆绑重复路; 跳板不限规模, MST 边 + 最近邻对保证不被剪。
-     候选池半径 (~40 格) 已覆盖 ROAD_STEPS_MAX, 池外的对必被 A* 直线下界剪掉。
+  /* 某区域格内聚落的对外道路 (路网优先 Network-First, 缓存, 全局去重, 预算制)
+     流程:
+       ① 需求边 = 本格聚落 × 3x3 池的近似 RNG (被第三点支配的冗余边不入图,
+          取代旧跳板剪枝; MST ⊆ RNG ⇒ 骨架连通);
+       ② 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序 ——
+          干线先落成, 支线后续并线;
+       ③ 逐边 A* (已建路格全局折扣 ROAD_W_ROAD, 不限走廊 —— 分叉聚落共享干道);
+       ④ 绕行闸: DI = 步数/六边距 > ROAD_DI_MAX10/10 ⇒ 先试无折扣直连, 仍超限则
+          骨架边 (Kruskal) 强制建 (连通优先), 非骨架放弃并标 roadFail (不可达或不需要)。
      maxNew: 本次调用允许新算的道路条数; 0 = 纯读缓存 (绘制帧用), 防止寻路卡帧 */
   function roadsNear(i, j, maxNew) {
     var budget = maxNew | 0;
-    var cellKey = i + ',' + j;
-    /* 创建顺序: 规模大者先 (同规模离原点近者先) —— hubBefore 全序, 确定性;
-       slice 后排序, 不动 settlementsFor 的缓存数组 */
-    var mine = settlementsFor(i, j).slice().sort(function (p, q2) {
-      return hubBefore(p, q2) ? -1 : 1;
-    });
+    var roadDI = CFG.ROAD_DI_MAX10 | 0;          // 绕行系数上限 ×10
+    var mine = settlementsFor(i, j);
+    var hasMine = false;
+    for (var s0 = 0; s0 < mine.length; s0++) if (mine[s0].type !== 'poi') { hasMine = true; break; }
+    if (!hasMine) return [];
+    var edges = demandEdgesFor(i, j);
+    var skel = null;                             // 骨架边集合 (DI 超限时懒计算)
+    var deferred = [];                           // DI 闸拒绝的边: 路网变密后可能达标, 循环末重试
     var out = [];
-    for (var s = 0; s < mine.length; s++) {
-      var a = mine[s];
-      if (a.type === 'poi') continue;
-      // 3x3 邻域格内全部其他聚落 (候选池)
-      var cands = [], aPoolIds = new Set();
-      for (var di = -1; di <= 1; di++) {
-        for (var dj = -1; dj <= 1; dj++) {
-          var others = settlementsFor(i + di, j + dj);
-          for (var o = 0; o < others.length; o++) {
-            if (others[o].id === a.id || others[o].type === 'poi') continue;
-            aPoolIds.add(others[o].id);
-            cands.push(others[o]);
+    /* DI 重试队列消化 (每次调用限量 8 条, 与主循环共享预算): 早先被 DI 闸拒绝的边,
+       路网随建随密, 在更密的路网上往往直接达标。建成路不入本格 out (属其端点所在格,
+       由那格的 roadsNear 从缓存返回); 队首是已建/已拒的项则静默丢弃。 */
+    var drained = 0;
+    while (diRetryQueue.length > 0 && budget > 0 && drained < 8) {
+      var dq = diRetryQueue.shift();
+      if (roadFail.has(dq.rkey) || roadCache.get(dq.rkey)) continue;
+      budget--; drained++;
+      var qa = dq.a.id < dq.b.id ? dq.a : dq.b, qb = dq.a.id < dq.b.id ? dq.b : dq.a;
+      var qp = bfsRoad(qa.q, qa.r, qb.q, qb.r, roadTileIdx);
+      if (!qp) {
+        var tr3 = (roadFailTrials.get(dq.rkey) || 0) + 1;
+        roadFailTrials.set(dq.rkey, tr3);
+        if (tr3 >= 3) setAdd(roadFail, dq.rkey, ROADFAIL_CAP);   // 3 次仍无路: 终身不可达
+        else diRetryQueue.push(dq);
+        continue;
+      }
+      if ((qp.length - 1) * 10 > roadDI * hexDist(qa.q, qa.r, qb.q, qb.r)) { diRetryQueue.push(dq); continue; }
+      var dpts = [], dts = new Set();
+      for (var dk = 0; dk < qp.length; dk++) {
+        var dw = tileToWorld(qp[dk][0], qp[dk][1]);
+        dpts.push({ x: dw.x + (hash01(qp[dk][0], qp[dk][1], 5) - 0.5) * 4,
+                    y: dw.y + (hash01(qp[dk][0], qp[dk][1], 6) - 0.5) * 4 });
+        dts.add(qp[dk][0] + ',' + qp[dk][1]);
+      }
+      var droad = { key: dq.rkey, pts: dpts, tiles: dts,
+                    x0: Math.min(dq.a.x, dq.b.x), x1: Math.max(dq.a.x, dq.b.x),
+                    y0: Math.min(dq.a.y, dq.b.y), y1: Math.max(dq.a.y, dq.b.y) };
+      cacheSet(roadCache, dq.rkey, droad, ROAD_CAP);
+      dts.forEach(function (t) { roadTileIdx.add(t); });
+      roadVer++;
+    }
+    for (var e = 0; e < edges.length; e++) {
+      var a = edges[e].a, b = edges[e].b, rkey = edges[e].rkey;
+      if (roadFail.has(rkey)) continue;          // 不可达: 终身跳过
+      var road = roadCache.get(rkey);
+      if (!road) {
+        if (budget <= 0) continue;               // 预算用尽: 本帧不算
+        budget--;
+        /* 方向归一化: 端点固定按 id 序 (小→大), 使道路点列方向
+           与「哪个聚落先发起建路」无关 —— 否则热缓存命中与冷生成
+           会得到同一路径的相反点列, 破坏跨会话一致性。 */
+        var pA = a, pB = b;
+        if (b.id < a.id) { pA = b; pB = a; }
+        var path = bfsRoad(pA.q, pA.r, pB.q, pB.r, roadTileIdx);   // 已建路格 2 费: 并线旧路廊
+        if (!path) {
+          var tr2 = (roadFailTrials.get(rkey) || 0) + 1;
+          roadFailTrials.set(rkey, tr2);
+          if (tr2 >= 3) setAdd(roadFail, rkey, ROADFAIL_CAP);      // 3 次仍无路: 终身不可达
+          else diRetryQueue.push({ a: a, b: b, rkey: rkey });      // 路网变密后骑路可能可达, 再试
+          continue;
+        }
+        /* 绕行闸: DI = 步数/六边距 ≤ ROAD_DI_MAX10/10 (整数比, 无浮点)。
+           超限 ⇒ 先试无折扣直连 (更直); 仍超限 ⇒ 骨架边强制建 (连通优先),
+           非骨架**不建且不标 roadFail** —— 建路顺序依赖: 现在绕行超限可能只是
+           路网还太稀, 密后重试即可达标; 记入 roadFail 会永久毒化该对 (实测)。 */
+        var steps = path.length - 1, d0hex = hexDist(a.q, a.r, b.q, b.r);
+        if (steps * 10 > roadDI * d0hex) {
+          var direct = bfsRoad(pA.q, pA.r, pB.q, pB.r);
+          if (direct && (direct.length - 1) * 10 <= roadDI * d0hex) {
+            path = direct;                       // 无折扣直连更直且达标 → 用直连
+          } else {
+            if (skel === null) skel = skeletonEdgesFor(i, j);
+            if (!skel.has(rkey)) { deferred.push(edges[e]); continue; }
+            // 骨架边: 保留折扣路径 (连通优先, 接受迂回)
           }
         }
-      }
-      /* 距离升序 (实际笛卡尔直线距离): 先近后远, 近的对几乎必成且便宜,
-         远的对由预算自然截断 */
-      cands.sort(function (p, q2) {
-        return cartDist(a.q, a.r, p.q, p.r) - cartDist(a.q, a.r, q2.q, q2.r);
-      });
-      /* 全部候选逐一尝试 (同一对两端各发起一次也只建一条, rkey 去重) */
-      for (var c2 = 0; c2 < cands.length; c2++) {
-        var b = cands[c2];
-        var rkey = a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id;
-        if (roadFail.has(rkey)) continue;          // 已判定不可达: 终身跳过
-        var road = roadCache.get(rkey);
-        if (!road) {
-          /* 跳板剪枝: 跳板池 = 3x3(a格) ∪ 3x3(b格) —— 取并集使从 a 侧与从 b 侧
-             评估同一对时池子相同 ⇒ 剪枝与「哪侧先处理该对」无关 (跨会话确定)。
-             剪枝判定全整数且不读缓存; 不消耗 A* 预算, 也不记 roadFail (可达,
-             只是无需直达) */
-          var dab = cartDist(a.q, a.r, b.q, b.r);  // 实际笛卡尔直线距离 (非步数)
-          var pruned = false;
-          for (var h2 = 0; h2 < cands.length && !pruned; h2++)
-            pruned = hopPrune(a, b, cands[h2], dab);
-          if (!pruned) {
-            var bp = b.id.split('_');
-            var bic = +bp[0], bjc = +bp[1];        // b 的区域格 (id 前缀 i_j_k)
-            for (var ei = -1; ei <= 1 && !pruned; ei++) {
-              for (var ej = -1; ej <= 1 && !pruned; ej++) {
-                var extras = settlementsFor(bic + ei, bjc + ej);
-                for (var e3 = 0; e3 < extras.length && !pruned; e3++) {
-                  var mm = extras[e3];
-                  if (mm.type === 'poi' || aPoolIds.has(mm.id)) continue;
-                  pruned = hopPrune(a, b, mm, dab);
-                }
-              }
-            }
-          }
-          if (pruned) continue;
-          if (budget <= 0) continue;               // 预算用尽: 本帧不算
-          budget--;
-          /* 方向归一化: 端点固定按 id 序 (小→大), 使道路点列方向
-             与「哪个聚落先发起建路」无关 —— 否则热缓存命中与冷生成
-             会得到同一路径的相反点列, 破坏跨会话一致性。 */
-          var pA = a, pB = b;
-          if (b.id < a.id) { pA = b; pB = a; }
-          var path = bfsRoad(pA.q, pA.r, pB.q, pB.r, roadTileIdx);   // 已建路格代价 2: 新路并线旧路廊
-          if (!path) { setAdd(roadFail, rkey, ROADFAIL_CAP); continue; }
-          var pts = [], tset = new Set();
-          for (var pj = 0; pj < path.length; pj++) {
-            var w = tileToWorld(path[pj][0], path[pj][1]);
-            pts.push({ x: w.x + (hash01(path[pj][0], path[pj][1], 5) - 0.5) * 4,
-                       y: w.y + (hash01(path[pj][0], path[pj][1], 6) - 0.5) * 4 });
-            tset.add(path[pj][0] + ',' + path[pj][1]);
-          }
-          road = { key: rkey, pts: pts, tiles: tset,
-                   x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x),
-                   y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
-          cacheSet(roadCache, rkey, road, ROAD_CAP);
-          tset.forEach(function (t) { roadTileIdx.add(t); });      // 路格并入复用索引 (add-only)
-          roadVer++;                               // 新道路落成 → tile onRoad 缓存整体失效
+        var pts = [], tset = new Set();
+        for (var pj = 0; pj < path.length; pj++) {
+          var w = tileToWorld(path[pj][0], path[pj][1]);
+          pts.push({ x: w.x + (hash01(path[pj][0], path[pj][1], 5) - 0.5) * 4,
+                     y: w.y + (hash01(path[pj][0], path[pj][1], 6) - 0.5) * 4 });
+          tset.add(path[pj][0] + ',' + path[pj][1]);
         }
-        out.push(road);
+        road = { key: rkey, pts: pts, tiles: tset,
+                 x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x),
+                 y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
+        cacheSet(roadCache, rkey, road, ROAD_CAP);
+        tset.forEach(function (t) { roadTileIdx.add(t); });      // 路格并入复用索引 (add-only)
+        roadVer++;                               // 新道路落成 → tile onRoad 缓存整体失效
       }
+      out.push(road);
+    }
+    /* DI 闸延迟重试: 主循环里被拒的边, 此时本批新路的路格已入索引, 重寻常可直接达标 */
+    for (var d4 = 0; d4 < deferred.length && budget > 0; d4++) {
+      var de = deferred[d4];
+      if (roadFail.has(de.rkey) || roadCache.get(de.rkey)) continue;
+      budget--;
+      var da = de.a, db = de.b;
+      var qA = da.id < db.id ? da : db, qB = da.id < db.id ? db : da;
+      var p2 = bfsRoad(qA.q, qA.r, qB.q, qB.r, roadTileIdx);
+      if (!p2) continue;
+      if ((p2.length - 1) * 10 > roadDI * hexDist(qA.q, qA.r, qB.q, qB.r)) continue;   // 仍超限: 放弃 (下次调用路网更密再试)
+      var pts2 = [], ts2 = new Set();
+      for (var q4 = 0; q4 < p2.length; q4++) {
+        var w2 = tileToWorld(p2[q4][0], p2[q4][1]);
+        pts2.push({ x: w2.x + (hash01(p2[q4][0], p2[q4][1], 5) - 0.5) * 4,
+                    y: w2.y + (hash01(p2[q4][0], p2[q4][1], 6) - 0.5) * 4 });
+        ts2.add(p2[q4][0] + ',' + p2[q4][1]);
+      }
+      var road2 = { key: de.rkey, pts: pts2, tiles: ts2,
+                    x0: Math.min(da.x, db.x), x1: Math.max(da.x, db.x),
+                    y0: Math.min(da.y, db.y), y1: Math.max(da.y, db.y) };
+      cacheSet(roadCache, de.rkey, road2, ROAD_CAP);
+      ts2.forEach(function (t) { roadTileIdx.add(t); });
+      roadVer++;
+      out.push(road2);
+    }
+    /* 本轮仍未达标的 DI 拒绝边 → 入会话级重试队列 (后续调用路网更密再试; 容量上限丢最旧) */
+    for (var d5 = 0; d5 < deferred.length; d5++) {
+      if (roadCache.get(deferred[d5].rkey)) continue;          // 重试轮已建成的无须入队
+      diRetryQueue.push(deferred[d5]);
+      if (diRetryQueue.length > 4096) diRetryQueue.shift();
     }
     return out;
   }
@@ -1387,7 +1495,7 @@
     commCache.clear(); veinNearCache.clear();
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); roadTileIdx.clear(); roadFail.clear();
+    roadCache.clear(); roadTileIdx.clear(); diRetryQueue.length = 0; roadFailTrials.clear(); roadFail.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadVer = 0;
   }
@@ -1439,6 +1547,7 @@
     bfsRoad: bfsRoad,
     roadWeight: roadWeight,
     roadCache: roadCache,
+    roadFail: roadFail,
     settleCache: settleCache,
     commCache: commCache,
     NEIGH_SLOTS: NEIGH_SLOTS,
