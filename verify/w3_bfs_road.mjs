@@ -199,8 +199,8 @@ MG3.init('seed-check');
      attempted = 复用模式预算内 (d0 ≤ COST_MAX/ROAD_W_ROAD) 且未被 RNG 支配的
      去重候选对 (绕行闸 DI 拒绝的对属「建后按闸放弃」, 计入分母);
      built     = roadsNear 产出按 key 去重的建成路 (同一条路从两端区域各返回一次)。
-     RNG 支配判定复刻 rngDominated: ∃m (3x3(a格)∪3x3(b格), 非poi, 非端点) 使
-       dam < dab && dmb < dab (cartDist, 严格介于两点之间)。 */
+     RNG 支配判定复刻 rngDominated: ∃m (5x5(a格)∪5x5(b格), 非poi, 非端点) 使
+       dam<dab && dmb<dab (cartDist 严格介于) 且 10(dam+dmb) ≤ 13·dab (绕行 ≤30%)。 */
   const isqrtT = (n) => {
     if (n < 2) return n;
     let x = n, y = ((x + (n / x | 0)) >> 1) | 0;
@@ -227,7 +227,11 @@ MG3.init('seed-check');
       }
     }
     for (const m of pool.values()) {
-      if (cartT(a.q, a.r, m.q, m.r) < dab && cartT(m.q, m.r, b.q, b.r) < dab) return true;
+      const dam = cartT(a.q, a.r, m.q, m.r);
+      if (dam >= dab) continue;
+      const dmb = cartT(m.q, m.r, b.q, b.r);
+      if (dmb >= dab) continue;
+      if (10 * (dam + dmb) <= 13 * dab) return true;   // 顺路跳板 (绕行 ≤30%)
     }
     return false;
   };

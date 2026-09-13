@@ -136,6 +136,8 @@
                                   // null 失败不立即终身标记, 进重试队列 3 次后仍失败才转终身
   var diRetryQueue = [];         // DI 闸拒绝的边 {a,b,rkey}: 等路网变密后重试 (会话级 FIFO,
                                  // 每次 roadsNear 限量消化; 重试仍超限则回队尾, 容量上限丢最旧)
+  var demandCache = new Map();   // "i,j" -> 未排序需求边 (纯几何, 与中心无关; 排序每调用做)
+  var DEMAND_CAP = 2048;
   /* P3: 地块级缓存固定容量 (Map 保持插入序)。超限时每次淘汰最旧 1 条,
      单条 delete 的开销摊薄到每次插入 → 不再有「超大 Map 一次性删半」的长停顿;
      内存有界; 淘汰仅影响命中率, 不改变确定性结果。 */
@@ -210,7 +212,7 @@
     nDetail = new NL.SimplexNoise(rng);
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); roadTileIdx.clear(); diRetryQueue.length = 0; roadFailTrials.clear(); commCache.clear(); veinNearCache.clear();
+    roadCache.clear(); roadTileIdx.clear(); diRetryQueue.length = 0; demandCache.clear(); roadFailTrials.clear(); commCache.clear(); veinNearCache.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadFail.clear();
     roadVer = 0;
@@ -1011,9 +1013,11 @@
   }
 
   /* 近似 RNG 支配判定: 边 (a,b) 是否被第三点 m 支配
-     (m 到两端都严格更近 ⇒ (a,b) 冗余, 不入需求图 —— 取代旧跳板剪枝)。
-     池 = 3x3(a格) ∪ 3x3(b格): 从任一端评估池子相同 ⇒ 判定与发起侧无关 (跨会话确定)。
-     窗口外的支配点会漏检 (近似), 只会多连不会断连 (MST ⊆ RNG 的连通保证保持)。 */
+     (m 到两端都严格更近 **且** a→m→b 直线绕行 ≤30% ⇒ (a,b) 冗余, 不入需求图)。
+     池 = 5x5(a格) ∪ 5x5(b格): 从任一端评估池子相同 ⇒ 判定与发起侧无关 (跨会话确定)。
+     窗口外的支配点会漏检 (近似), 只会多连不会断连 (MST ⊆ RNG 的连通保证保持)。
+     ⚠ 30% 绕行上限不可省: 纯「更近」支配会误剪紧邻对 (dab 小, 稍偏的第三点即支配,
+     绕行可达 1.5×+) —— 2026-09-13 实测 840 近距对 239 对被误剪 (绕行比最高 1.65×)。 */
   function rngDominated(a, b, dab) {
     var ap = a.id.split('_'), bp = b.id.split('_');
     var ai = +ap[0], aj = +ap[1], bi = +bp[0], bj = +bp[1];
@@ -1025,8 +1029,13 @@
           for (var o = 0; o < others.length; o++) {
             var m = others[o];
             if (m.id === a.id || m.id === b.id || m.type === 'poi') continue;
-            if (cartDist(a.q, a.r, m.q, m.r) < dab &&
-                cartDist(m.q, m.r, b.q, b.r) < dab) return true;
+            var dam = cartDist(a.q, a.r, m.q, m.r);
+            if (dam >= dab) continue;
+            var dmb = cartDist(m.q, m.r, b.q, b.r);
+            if (dmb >= dab) continue;
+            /* ② 绕行上限: a→m→b 直线绕行 ≤ 直达的 30% 才算「顺路跳板」——
+               只看①会误剪紧邻对 ( dab 小, 位置稍偏的第三点即支配, 绕行可达 1.5×+) */
+            if (10 * (dam + dmb) <= 13 * dab) return true;
           }
         }
       }
@@ -1081,8 +1090,9 @@
      排序 (建网序):
        cq/cr 传中心点 (玩家/点击位置, 轴坐标) ⇒ 按边到中心的距离升序 ——
        **由内向外生长**: 玩家/点击处附近的路先算, 路网一圈圈往外扩 (渐进加载);
-       未传 ⇒ 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序, 再按 rkey。 */
-  function demandEdgesFor(i, j, cq, cr) {
+       未传 ⇒ 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序, 再按 rkey。
+     边集纯几何 (与中心无关) ⇒ 按 "i,j" 缓存, 排序在副本上做。 */
+  function scanDemandEdges(i, j) {
     var mine = settlementsFor(i, j), edges = [], edgeSeen = new Set();
     for (var s = 0; s < mine.length; s++) {
       var a = mine[s];
@@ -1107,6 +1117,16 @@
         edges.push({ a: a, b: b, rkey: rkey });
       }
     }
+    return edges;
+  }
+  function demandEdgesFor(i, j, cq, cr) {
+    var key = i + ',' + j;
+    var edges = demandCache.get(key);
+    if (!edges) {
+      edges = scanDemandEdges(i, j);
+      cacheSet(demandCache, key, edges, DEMAND_CAP);
+    }
+    edges = edges.slice();                         // 排序副本 (不动缓存)
     edges.sort(function (e1, e2) {
       if (cq !== undefined && cq !== null) {
         var c1 = Math.min(cartDist(e1.a.q, e1.a.r, cq, cr), cartDist(e1.b.q, e1.b.r, cq, cr));
@@ -1126,80 +1146,90 @@
   }
 
   /* A* 寻路 (f = g + h, Dial 桶优先队列): 返回 [[q,r], ...] 或 null (超预算/不可达)
-     roadTiles (可选): 会话内已建路格索引 (Set "q,r")。传入后已铺路格每格只算
+     roadTiles (可选): 会话内已建路格索引 (Set \"q,r\")。传入后已铺路格每格只算
      ROAD_W_ROAD(2) —— 全局折扣, 不限走廊: 新路顺路并线到既有路廊 (分叉聚落
      共享干道); 绕行副作用由调用方的 DI 闸兜底。此时 h 的下界系数同步降为
      min(地形最小权重, ROAD_W_ROAD) = 2, 保证可采纳。不传 = 纯地形寻路
      (回归测试/跨实例确定性用), 函数名保留 bfsRoad: verify/w3_bfs_road.mjs 以此名调用 */
   function bfsRoad(sq, sr, tq, tr, roadTiles) {
     var maxCost = CFG.ROAD_COST_MAX | 0;
-    var maxSteps = CFG.ROAD_STEPS_MAX | 0;
     var roadW = CFG.ROAD_W_ROAD | 0;
     var minW = roadMinWeight();
     var hMin = (roadTiles && roadW < minW) ? roadW : minW;   // 启发下界系数: 已铺路格更便宜
-    if (roadTiles) maxSteps = Math.floor(maxCost / Math.max(1, hMin));
-    /* ⚠ 复用模式下步数上限自动放宽: ROAD_STEPS_MAX(40) 是「每格最低 3 费」时代的
-       隐含总长上限 (40×3=120=预算), 路格 2 费后骑路长径最多 120÷2=60 步,
-       仍按 40 剪会把「沿旧路骑很远」的便宜路径误杀 (假不可达/次优, 独立
-       Dijkstra 对拍实测 4/148 例)。代价预算才是真约束, 步数只是搜索限界。 */
+    var stepsTight = CFG.ROAD_STEPS_MAX | 0;                 // 40: 紧凑镜头 (搜索小)
+    var cap = roadTiles ? Math.floor(maxCost / Math.max(1, hMin)) : stepsTight;  // 复用模式: 60
+    /* ⚠ 步数上限双语义: ROAD_STEPS_MAX(40) 是「每格最低 3 费」时代的隐含总长上限
+       (40×3=120=预算); 路格 2 费后骑路长径最多 120÷2=60 步, 复用模式上限自动放宽。
+       代价预算才是真约束, 步数只是搜索限界。 */
     var d0 = hexDist(sq, sr, tq, tr);
-    if (d0 > maxSteps || d0 * hMin > maxCost) return null;   // 直线下界即超预算, 直接放弃 (hMin=实际最低单格价)
+    if (d0 > cap || d0 * hMin > maxCost) return null;   // 直线下界即超预算, 直接放弃
 
-    var buckets = [];
-    for (var b = 0; b <= maxCost; b++) buckets.push([]);
-    var dist = new Map(), prev = new Map(), closed = new Set();
-    var sk = sq + ',' + sr;
-    dist.set(sk, 0);
-    buckets[0].push(sq, sr);        // 扁平存 [q,r] 对, 省一次数组分配
+    /* 两段式镜头 (复用模式性能优化): 弱启发 (hMin=2) × 60 步大镜头的单次 A* 可达
+       ~50ms; 先用紧凑镜头 40 搜索 —— 绝大多数对在此命中且即该镜头内最优; 未中
+       (骑路长径 / 真不可达) 再用 60 步重搜兜底。
+       ⚠ 有界次优: 第一段命中时, 41-60 步的更便宜骑路路径不会返回 —— 代价差有界
+       且 DI 闸兜底质量; 盲寻(纯地形)单段不受影响。 */
+    function search(maxSteps) {
+      var buckets = [];
+      for (var b = 0; b <= maxCost; b++) buckets.push([]);
+      var dist = new Map(), prev = new Map(), closed = new Set();
+      var sk = sq + ',' + sr;
+      dist.set(sk, 0);
+      buckets[0].push(sq, sr);        // 扁平存 [q,r] 对, 省一次数组分配
 
-    for (var f = 0; f <= maxCost; f++) {
-      var bucket = buckets[f];
-      for (var i = 0; i < bucket.length; i += 2) {
-        var cq = bucket[i], cr = bucket[i + 1], ck = cq + ',' + cr;
-        if (closed.has(ck)) continue;               // 已被更低 f 结算过
-        closed.add(ck);
-        if (cq === tq && cr === tr) {
-          var path = [], p = ck;
-          while (p !== undefined) {
-            var parts = p.split(',');
-            path.push([+parts[0], +parts[1]]);
-            p = prev.get(p);
+      for (var f = 0; f <= maxCost; f++) {
+        var bucket = buckets[f];
+        for (var i = 0; i < bucket.length; i += 2) {
+          var cq = bucket[i], cr = bucket[i + 1], ck = cq + ',' + cr;
+          if (closed.has(ck)) continue;               // 已被更低 f 结算过
+          closed.add(ck);
+          if (cq === tq && cr === tr) {
+            var path = [], p = ck;
+            while (p !== undefined) {
+              var parts = p.split(',');
+              path.push([+parts[0], +parts[1]]);
+              p = prev.get(p);
+            }
+            path.reverse();
+            return path;
           }
-          path.reverse();
-          return path;
-        }
-        var g = dist.get(ck);
-        for (var k = 0; k < 6; k++) {
-          var nx = cq + NEIGH_SLOTS[k][0], ny = cr + NEIGH_SLOTS[k][1];
-          var ds = hexDist(sq, sr, nx, ny);
-          if (ds > maxSteps) continue;                         // 步数剪枝 (距起点层数)
-          var dn = hexDist(nx, ny, tq, tr);
-          /* 步数透镜: 前缀 ≥ ds 步 + 后缀 ≥ dn 步 > 预算 ⇒ 该格不可能在预算内完成
-             (两侧都是下界, 故为可采纳剪枝, 不改变可行路径集合) */
-          if (ds + dn > maxSteps) continue;
-          /* h = hMin × ⌊笛卡尔欧氏距离⌋ (cartDist: 两端点世界坐标的实际直线距离,
-             以格间距为单位取整 —— 恒等式见 cartDist 注释, 非六边格步数)。欧氏启发
-             优于 hexDist 分层: 平地上全部单调格同 f (整片同桶, 路形随扩展序锯齿),
-             欧氏让直线走廊的格 f 最低、最先展开 ⇒ 等代价路径向直线收敛。
-             向下取整 + hMin ≤ 任何单格实际权重 ⇒ h 仍是可采纳下界 */
-          var h = hMin * cartDist(nx, ny, tq, tr);             // 剩余代价可采纳下界 (实际笛卡尔欧氏距离)
-          if (g + h > maxCost) continue;                       // 下界剪枝: 该分支必超预算 (省一次 fields)
-          var nk = nx + ',' + ny;
-          if (closed.has(nk)) continue;
-          /* 已铺路格全局折扣 (不限走廊): 并线副作用由调用方 DI 闸兜底 */
-          var ng = g + (roadTiles && roadTiles.has(nk) ? roadW : roadWeight(fields(nx, ny)));
-          if (ng + h > maxCost) continue;                      // 权重剪枝 (实际权重 ≥ 下界)
-          var old = dist.has(nk) ? dist.get(nk) : 1e18;
-          if (ng < old) {
-            dist.set(nk, ng);
-            prev.set(nk, ck);
-            buckets[ng + h].push(nx, ny);                      // 桶下标 = f
+          var g = dist.get(ck);
+          for (var k = 0; k < 6; k++) {
+            var nx = cq + NEIGH_SLOTS[k][0], ny = cr + NEIGH_SLOTS[k][1];
+            var ds = hexDist(sq, sr, nx, ny);
+            if (ds > maxSteps) continue;                         // 步数剪枝 (距起点层数)
+            var dn = hexDist(nx, ny, tq, tr);
+            /* 步数透镜: 前缀 ≥ ds 步 + 后缀 ≥ dn 步 > 预算 ⇒ 该格不可能在预算内完成
+               (两侧都是下界, 故为可采纳剪枝, 不改变可行路径集合) */
+            if (ds + dn > maxSteps) continue;
+            /* h = hMin × ⌊笛卡尔欧氏距离⌋ (cartDist: 两端点世界坐标的实际直线距离,
+               以格间距为单位取整 —— 恒等式见 cartDist 注释, 非六边格步数)。欧氏启发
+               优于 hexDist 分层: 平地上全部单调格同 f (整片同桶, 路形随扩展序锯齿),
+               欧氏让直线走廊的格 f 最低、最先展开 ⇒ 等代价路径向直线收敛。
+               向下取整 + hMin ≤ 任何单格实际权重 ⇒ h 仍是可采纳下界 */
+            var h = hMin * cartDist(nx, ny, tq, tr);             // 剩余代价可采纳下界 (实际笛卡尔欧氏距离)
+            if (g + h > maxCost) continue;                       // 下界剪枝: 该分支必超预算 (省一次 fields)
+            var nk = nx + ',' + ny;
+            if (closed.has(nk)) continue;
+            /* 已铺路格全局折扣 (不限走廊): 并线副作用由调用方 DI 闸兜底 */
+            var ng = g + (roadTiles && roadTiles.has(nk) ? roadW : roadWeight(fields(nx, ny)));
+            if (ng + h > maxCost) continue;                      // 权重剪枝 (实际权重 ≥ 下界)
+            var old = dist.has(nk) ? dist.get(nk) : 1e18;
+            if (ng < old) {
+              dist.set(nk, ng);
+              prev.set(nk, ck);
+              buckets[ng + h].push(nx, ny);                      // 桶下标 = f
+            }
           }
         }
+        buckets[f] = null;      // 该层已处理完, 及时释放
       }
-      buckets[f] = null;      // 该层已处理完, 及时释放
+      return null;
     }
-    return null;
+
+    if (!roadTiles) return search(stepsTight);                    // 纯地形: 单段
+    var p1 = search(stepsTight);                                  // 第一段: 紧凑镜头 (快)
+    return p1 || search(cap);                                     // 第二段: 骑路长径兜底
   }
 
   /* 某区域格内聚落的对外道路 (路网优先 Network-First, 缓存, 全局去重, 预算制)
@@ -1505,7 +1535,7 @@
     commCache.clear(); veinNearCache.clear();
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); roadTileIdx.clear(); diRetryQueue.length = 0; roadFailTrials.clear(); roadFail.clear();
+    roadCache.clear(); roadTileIdx.clear(); diRetryQueue.length = 0; demandCache.clear(); roadFailTrials.clear(); roadFail.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadVer = 0;
   }
