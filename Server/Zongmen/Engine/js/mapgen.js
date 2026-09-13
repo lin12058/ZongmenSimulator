@@ -1077,9 +1077,12 @@
     return sk;
   }
 
-  /* 需求边集 (Network-First 第一层): 本格聚落 × 3x3 池的近似 RNG 边,
-     按建网规范序排列 —— 端点 hub 等级高者先建 (干线先行), 同级距离升序, 再按 rkey。 */
-  function demandEdgesFor(i, j) {
+  /* 需求边集 (Network-First 第一层): 本格聚落 × 5x5 池的近似 RNG 边。
+     排序 (建网序):
+       cq/cr 传中心点 (玩家/点击位置, 轴坐标) ⇒ 按边到中心的距离升序 ——
+       **由内向外生长**: 玩家/点击处附近的路先算, 路网一圈圈往外扩 (渐进加载);
+       未传 ⇒ 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序, 再按 rkey。 */
+  function demandEdgesFor(i, j, cq, cr) {
     var mine = settlementsFor(i, j), edges = [], edgeSeen = new Set();
     for (var s = 0; s < mine.length; s++) {
       var a = mine[s];
@@ -1105,6 +1108,11 @@
       }
     }
     edges.sort(function (e1, e2) {
+      if (cq !== undefined && cq !== null) {
+        var c1 = Math.min(cartDist(e1.a.q, e1.a.r, cq, cr), cartDist(e1.b.q, e1.b.r, cq, cr));
+        var c2v = Math.min(cartDist(e2.a.q, e2.a.r, cq, cr), cartDist(e2.b.q, e2.b.r, cq, cr));
+        if (c1 !== c2v) return c1 - c2v;               // 由中心向外: 离中心近的边先算
+      }
       var h1 = hubBefore(e1.a, e1.b) ? e1.a : e1.b;    // 边的较高 hub 端
       var h2 = hubBefore(e2.a, e2.b) ? e2.a : e2.b;
       if (hubBefore(h1, h2)) return -1;
@@ -1203,15 +1211,17 @@
        ③ 逐边 A* (已建路格全局折扣 ROAD_W_ROAD, 不限走廊 —— 分叉聚落共享干道);
        ④ 绕行闸: DI = 步数/六边距 > ROAD_DI_MAX10/10 ⇒ 先试无折扣直连, 仍超限则
           骨架边 (Kruskal) 强制建 (连通优先), 非骨架放弃并标 roadFail (不可达或不需要)。
+     cq/cr (可选): 修路中心点 (玩家/点击位置) —— 需求边按到中心的距离升序计算,
+     路网由内向外生长 (渐进加载); 未传 = 干线优先规范序。
      maxNew: 本次调用允许新算的道路条数; 0 = 纯读缓存 (绘制帧用), 防止寻路卡帧 */
-  function roadsNear(i, j, maxNew) {
+  function roadsNear(i, j, maxNew, cq, cr) {
     var budget = maxNew | 0;
     var roadDI = CFG.ROAD_DI_MAX10 | 0;          // 绕行系数上限 ×10
     var mine = settlementsFor(i, j);
     var hasMine = false;
     for (var s0 = 0; s0 < mine.length; s0++) if (mine[s0].type !== 'poi') { hasMine = true; break; }
     if (!hasMine) return [];
-    var edges = demandEdgesFor(i, j);
+    var edges = demandEdgesFor(i, j, cq, cr);
     var skel = null;                             // 骨架边集合 (DI 超限时懒计算)
     var deferred = [];                           // DI 闸拒绝的边: 路网变密后可能达标, 循环末重试
     var out = [];
