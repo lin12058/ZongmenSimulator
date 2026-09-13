@@ -25,6 +25,10 @@
               new URLSearchParams(location.search).get('capture') === '1';
   var hoverTile = null, selectedTile = null;
   var showVeins = true, showLabels = true;
+  /* 建筑层开关 (headless 视觉验证用, 与 nofade/capture 同族):
+     nobldg=1 → 不画建筑层, 同机位可与开启态做逐像素 A/B, 判定
+     「建筑确实画上去了 / 画在哪里」。日常游玩不传此参数。 */
+  var NO_BLDG = new URLSearchParams(location.search).get('nobldg') === '1';
 
   /* ---------- 宗门录 (左上角水墨面板) ----------
      数据源: 地图实体层 settleCells 中 type==='sect' 的实体 (id/name/pop/tier/
@@ -583,6 +587,125 @@
     });
   }
 
+  /* ---------- 建筑层: 在六边格上实时绘制 (真源 web/js/bldg_ink.js) ----------
+     与「图标代替建筑」的区别:
+       · 贴格  —— 每座建筑落在后端下发的 (q,r) 格心, 半径/朝向与地图网格同源;
+       · 朝向  —— 按地类推导: 码头朝水面 / 炉窑朝山 / 料场朝林 / 民房朝中枢 /
+                  殿宇坐北朝南, 探针失败才回退默认朝向;
+       · 变体  —— 逐格取自 hash3(q,r,kind) → 同格恒定 (平移不闪), 异格各异;
+       · 缓存  —— 绘制结果按 (种类+朝向+变体+等级+尺寸档) 存小位图, 平移只做贴图。
+     ⚠ 必须整块绘制在 drawEntityList 之前 (建筑在地面, 名牌/标记在其上)。 */
+  var BI = window.BldgInk;
+  var CS_OFF = 16;                 // 后端 chunk 覆盖 ca*chunkS ± 16 (=33 格边长)
+  var CS_SPAN = 33;
+  /* 精灵渲染半径档 (设备像素): 随 zoom 拾级而上, 换档即清缓存 → 单档位内条数有界 */
+  var R_BUCKETS = [8, 11, 15, 20, 27, 36, 48, 64];
+  var lastRBucket = -1;
+  var bldgShown = false;           // 本帧建筑层是否已绘制 (供实体图标让位)
+  var bldgPlan = [];               // 复用的绘制计划数组
+  /* 格 → 地类 (biome)。数据来自已加载区块; 未加载返回 -1 (探针自动放弃)。
+     ⚠ 区块归属**不能**用 round(q/chunkS): 引擎 chunkOfTile 是「区块格心四候选
+       取六边距最近 + 固定平局序」, 与四舍五入不等价 (chunkS=21 时 (32,32) 归
+       (2,1) 而 round 给 (2,2))。这里改为枚举 4 个候选区块、直接问「索引里有没有
+       这一格」—— 索引本身由服务端 qrel 生成, 归属天然权威, 无需复制平局规则。
+       (2026-09-13 w6 对拍: round 版本 3 区块中 2 个整体错位) */
+  function buildTileIdx(info, ca, cb) {
+    var d = info.arrays, S = geo.chunkS;
+    var idx = new Int16Array(CS_SPAN * CS_SPAN);
+    idx.fill(-1);
+    var hw = geo.hexW, h15 = 1.5 * geo.hexR;
+    for (var i = 0; i < d.count; i++) {
+      /* centers 由 (qa,ra) 用同一公式正算 → 反解取整即精确还原 */
+      var ra = Math.round(d.centers[i * 2 + 1] / h15);
+      var qa = Math.round(d.centers[i * 2] / hw - ra / 2);
+      var cq = qa - ca * S + CS_OFF, cr = ra - cb * S + CS_OFF;
+      if (cq >= 0 && cq < CS_SPAN && cr >= 0 && cr < CS_SPAN) idx[cr * CS_SPAN + cq] = i;
+    }
+    info.tileIdx = idx;
+  }
+  function biomeAt(q, r) {
+    if (!geo) return -1;
+    var S = geo.chunkS;
+    var qb = Math.floor(q / S) * S, rb = Math.floor(r / S) * S;
+    for (var a = 0; a < 4; a++) {
+      var ca = (qb + (a % 2) * S) / S, cb = (rb + (a >> 1) * S) / S;
+      var info = chunkData.get(chunkKey(ca, cb));
+      if (!info) continue;
+      if (!info.tileIdx) buildTileIdx(info, ca, cb);
+      var cq = q - ca * S + CS_OFF, cr = r - cb * S + CS_OFF;
+      if (cq < 0 || cq >= CS_SPAN || cr < 0 || cr >= CS_SPAN) continue;
+      var i = info.tileIdx[cr * CS_SPAN + cq];
+      if (i >= 0) return (info.arrays.tiles[i] / 4) | 0;
+    }
+    return -1;
+  }
+  /* 朝向求解器来自绘制核心 (web/js/bldg_ink.js 的 faceSolver):
+     朝向规则表/回退逻辑/环枚举与离线预览页、对拍脚本共用同一份实现,
+     本文件只负责把「浏览器侧的 biomeAt」注入进去。geo 就绪后建一次即可。 */
+  var bldgSolver = null;
+  function solverFor() {
+    if (!bldgSolver && geo && BI && BI.faceSolver) {
+      bldgSolver = BI.faceSolver({ biome: biomeAt, hexW: geo.hexW, hexR: geo.hexR, ringMax: 3 });
+    }
+    return bldgSolver;
+  }
+  /* 逐格变体: 同 kind 同格恒定 → 平移/重绘不闪; 异格不同 → 去掉重复感。
+     精灵缓存键不含格位, 故变体个数即「同种建筑可见造型数」→ 取 8 档。 */
+  function variantOf(b) {
+    return BI.hash3(b.q | 0, b.r | 0, BI.kindIdOf(b.kind)) % 8;
+  }
+  function bucketOf(rDev) {
+    for (var i = 0; i < R_BUCKETS.length; i++) if (rDev <= R_BUCKETS[i]) return i;
+    return R_BUCKETS.length - 1;
+  }
+  /* 屏幕空间 (dpr 变换下) 逐格贴图。六边格半径 <5px 时不画, 交给聚落图标。 */
+  function drawBuildings(ctx, vw, vh, z) {
+    bldgShown = false;
+    if (NO_BLDG) return;                       // headless A/B 验证开关 (见顶部 NO_BLDG)
+    var solver = solverFor();
+    if (!BI || !BI.spriteOf || !geo || !solver) return;
+    if (geo.hexR * z < 5) return;
+    var tgt = geo.hexR * z * dpr;                 // 目标半径 (设备像素)
+    var bkt = bucketOf(tgt);
+    if (bkt !== lastRBucket) { BI.spriteClear(); lastRBucket = bkt; }
+    var R = R_BUCKETS[bkt], scale = tgt / R;
+    var detail = z >= 1.35 ? 3 : (z >= 0.9 ? 2 : 1);
+    var list = bldgPlan;
+    list.length = 0;
+    settleCells.forEach(function (ents) {
+      for (var i = 0; i < ents.length; i++) {
+        var st = ents[i];
+        if (st.state === 1 || !st.buildings || !st.buildings.length) continue;
+        for (var j = 0; j < st.buildings.length; j++) {
+          var b = st.buildings[j];
+          var w = MC.tileToWorld(b.q, b.r);
+          var ps = w2s(w.x, w.y);
+          /* 留足余量: 栈桥/树冠/幡可越出本格 (SPR_BOX 上界 2.4R) */
+          if (ps.x < -70 || ps.y < -100 || ps.x > vw + 70 || ps.y > vh + 100) continue;
+          list.push({ b: b, st: st, x: ps.x * dpr, y: ps.y * dpr, d: w.y });
+        }
+      }
+    });
+    if (!list.length) return;
+    /* 深度序: 世界 y 小者远, 先画; 同深按 q 定序, 保证遮挡关系稳定不闪 */
+    list.sort(function (p, q2) { return (p.d - q2.d) || (p.b.q - q2.b.q); });
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);           // 精灵为设备像素位图 → 原样贴
+    for (var k = 0; k < list.length; k++) {
+      var it = list[k], b = it.b;
+      var fi = solver.faceInfo(b, it.st);
+      var rec = BI.spriteOf({
+        kind: b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
+        face: fi.face, water: fi.water, R: R, detail: detail, plateA: 0.16
+      });
+      if (!rec) continue;
+      ctx.drawImage(rec.cv, it.x + rec.ox * scale, it.y + rec.oy * scale,
+                    rec.w * scale, rec.h * scale);
+    }
+    ctx.restore();
+    bldgShown = true;
+  }
+
   function renderStaticInto() {
     var cw = els.overlay.width, ch = els.overlay.height;
     if (!staticLayer) staticLayer = document.createElement('canvas');
@@ -678,6 +801,9 @@
       });
     }
 
+    /* 建筑层 (地面实体 → 压在淡淡的区域名之上, 名牌/灵脉标之下) */
+    drawBuildings(ctx, vw, vh, z);
+
     /* 灵脉名牌 */
     if (showLabels && z >= 1.0) {
       ctx.textAlign = 'center';
@@ -708,7 +834,10 @@
         var fn = ICON_FN[st.type];
         if (!fn) continue;
         var baseSize = { sect: 17, city: 15, town: 12, village: 10, poi: 11 }[st.type] || 10;
-        fn(ctx, ps2.x, ps2.y, baseSize * zoomClamp);
+        /* 建筑层已把聚落实体化 → 叠在上面的示意图标让位, 只留名牌;
+           景点无建筑, 图标照旧。远景 (格半径不足, 建筑层未画) 两种都保留。 */
+        var solid = bldgShown && st.type !== 'poi';
+        if (!solid) fn(ctx, ps2.x, ps2.y, baseSize * zoomClamp);
         var showName = st.type === 'sect' || st.type === 'city' || st.type === 'poi' || z > 0.72;
         if (showLabels && showName) {
           var nfs = 11.5 * Math.max(z, 0.75);
@@ -717,7 +846,10 @@
           ctx.textBaseline = 'top';
           ctx.lineWidth = 3 * Math.max(z, 0.75);
           ctx.strokeStyle = 'rgba(240,232,214,0.88)';
-          var ly = ps2.y + baseSize * zoomClamp * 0.75 + 3 * Math.max(z, 0.75);
+          /* 实体化时名牌落在建筑群外沿之下 (TOWN_R 格 ≈ 4.5·hexR) */
+          var ly = solid
+            ? ps2.y + (4.8 * geo.hexR * z + 4)
+            : ps2.y + baseSize * zoomClamp * 0.75 + 3 * Math.max(z, 0.75);
           ctx.strokeText(st.name, ps2.x, ly);
           ctx.fillStyle = st.type === 'poi' ? 'rgba(140,48,34,0.95)' : 'rgba(50,42,34,0.92)';
           ctx.fillText(st.name, ps2.x, ly);
@@ -899,6 +1031,8 @@
     MC.blockForgetAll();                             // rev 缓存随世界重铸失效
     keepChunk = new Set();                            // R4: 世界重铸后旧窗口失效, 待 updateStreaming 重建
     keepR = new Set(); keepC = new Set();
+    if (BI && BI.spriteClear) BI.spriteClear();       // 建筑精灵缓存随世界重铸失效
+    lastRBucket = -1;
     chunkQueue.length = 0;
     chunkRetry.clear();
     chunkBusy.clear();                // 旧世界在途回调带 gen 守卫, 不会误删新世界标记

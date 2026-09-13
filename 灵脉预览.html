@@ -592,6 +592,16 @@
      服务端据此为 tile 缓存做新鲜度校验 — onRoad 语义依赖 roadCache 热状态,
      只有「真有新路落成」才需要失效旧 tile 缓存 (比按区域包生成计数更精准)。 */
   var roadVer = 0;
+  /* DI 重试队列节流游标: 记录上次「消化一条老边」时的 roadVer。
+     重试的价值完全来自「路网变密」, 所以每建成 128 条新路才值得试 1 条老边 (见 roadsNear 末)。
+
+     实测 (±14 区域格冷启动 = 841 格, mapgen.js 单线程):
+       · 每次调用都消化 1 条 → drain 烧 216 次 A* (均 27.9ms, 主循环的 2.3 倍 —— FIFO
+         取出的多为大跨度老边), 只多建 7 条路, 且单区域峰值从 239ms 抬到 424ms;
+       · 每 128 条新路消化 1 条 → 总耗时 20015ms (改动前 34542ms, -42%),
+         峰值 239.1ms (改动前 249.0ms)。
+     ⇒ 阈值取 128: 既保住「路网变密后跨调用重试」的语义, 又让代价落到噪声以下。 */
+  var drainMark = 0;
 
   /* ---------- 基础工具 ---------- */
   function hash01(a, b, salt) {
@@ -637,7 +647,7 @@
     roadCache.clear(); roadTileIdx.clear(); diRetryQueue.length = 0; demandCache.clear(); roadFailTrials.clear(); commCache.clear(); veinNearCache.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadFail.clear();
-    roadVer = 0;
+    roadVer = 0; drainMark = 0;
   }
 
   /* ---------- 海拔场 (纯函数, 带缓存) ---------- */
@@ -1121,6 +1131,61 @@
     return out;
   }
 
+  /* 候选取样: 把 take 个名额「按环比例 + 环内方位角等距」撒到候选盘上。
+     ⚠ 旧实现是 按 (地皮优先级, q, r) 升序 取前 take 个 —— q 升序 ⇒ 越靠左越先入选，
+       名额会整片落在 -q(左) 半边，城镇建筑只在候选盘左缘露出一条，看起来
+       「建筑全挤在左下角」(2026-09-13 用 verify/_dbg_town_page.mjs 叠加候选盘复现)。
+     本函数只改「同一类地皮里取哪些格」，不改「每类地皮各取几个」⇒ 建筑种类构成、
+     产出聚合与旧版逐项相同，只有格位分布变均匀。纯函数、无随机、可跨端复算。 */
+  function spreadPick(cells, take, cq, cr) {
+    var out = [], n = cells.length;
+    if (!n || take <= 0) return out;
+    if (take > n) take = n;
+    /* ① 按环分组; 环内按「绕中心的世界方位角」排序 ⇒ 等距取样 = 绕中心一圈均匀铺开 */
+    var rings = [], sized = 0;
+    for (var i = 0; i < n; i++) {
+      var oq = cells[i].q - cq, or_ = cells[i].r - cr;
+      cells[i].a = Math.atan2(1.5 * or_, oq + or_ / 2);        // 世界方位角 (tileToWorld 同口径)
+      var d = hexDist(0, 0, oq, or_);
+      var ring = rings[d] || (rings[d] = []);
+      ring.push(cells[i]);
+    }
+    for (var k = 0; k < rings.length; k++) {
+      if (!rings[k]) { continue; }
+      sized += rings[k].length;
+      rings[k].sort(function (x, y) { return (x.a - y.a) || (x.q - y.q) || (x.r - y.r); });
+    }
+    /* ② 名额按环格数比例分配 (最大余数法; 余数并列取环号小的 → 确定性) */
+    var quota = [], frac = [], given = 0;
+    for (var k2 = 0; k2 < rings.length; k2++) {
+      if (!rings[k2]) { quota[k2] = 0; frac[k2] = 0; continue; }
+      var ex = take * rings[k2].length / sized;
+      quota[k2] = Math.floor(ex); frac[k2] = ex - quota[k2]; given += quota[k2];
+    }
+    while (given < take) {
+      var bi = -1, bv = -1;
+      for (var k3 = 0; k3 < rings.length; k3++) {
+        if (!rings[k3] || quota[k3] >= rings[k3].length) continue;
+        if (frac[k3] > bv) { bv = frac[k3]; bi = k3; }
+      }
+      if (bi < 0) break;
+      quota[bi]++; frac[bi] = -1; given++;
+    }
+    /* ③ 环内等距取 quota 个。起始相位由中心格决定 ⇒ 各城镇的缺口方向不同，
+          不会所有城镇都在同一个方位留洞 (仍然完全确定: 无 Math.random)。 */
+    for (var k4 = 0; k4 < rings.length; k4++) {
+      var rr = rings[k4];
+      if (!rr) continue;
+      var want = quota[k4], sz = rr.length;
+      if (want >= sz) { for (var j0 = 0; j0 < sz; j0++) out.push(rr[j0]); continue; }
+      var ph = (hash01(cq + k4 * 7, cr, 7027) * sz) | 0;
+      for (var j1 = 0; j1 < want; j1++) {
+        out.push(rr[((Math.floor(j1 * sz / want) + ph) % sz + sz) % sz]);
+      }
+    }
+    return out;
+  }
+
   /* 阶段三 生长: 以选定中心为锚, hexDist ≤ TOWN_R 内铺建筑 + 聚合产出。
      结构 (空间分工, 见下方 ⚠ 说明):
        中心格   → 核心建筑 (集市/祠堂/官衙/宗门大殿, 依 type)
@@ -1174,10 +1239,10 @@
                    tier: b.a ? 2 : 1, res: b };
       (lu === '村落' ? inner : outer).push(item);
     }
-    /* 生产型卫星先行 (码头>农田>矿场>林场>炉窑), 同级按环序; 民房殿后补余量 */
-    outer.sort(function (a, b) {
-      return (LANDUSE_PRI[a.terrain] - LANDUSE_PRI[b.terrain]) || (a.q - b.q) || (a.r - b.r);
-    });
+    /* 生产型卫星先行 (码头>农田>矿场>林场>炉窑), 民房殿后补余量。
+       ⚠ 取「哪些格」交给 spreadPick (环比例 + 方位角等距); 旧实现按 (pri,q,r) 取前缀，
+         名额全挤在 -q(左) 半边 ⇒ 建筑堆在城镇左下角。每类地皮各取几个的口径不变。 */
+    outer.sort(function (a, b) { return LANDUSE_PRI[a.terrain] - LANDUSE_PRI[b.terrain]; });
 
     var queue = [];
     if (core) {
@@ -1190,8 +1255,20 @@
     var houseTarget = Math.min(inner.length,
       Math.max(2, Math.floor(maxN * (CFG.TOWN_HOUSE_RATIO != null ? CFG.TOWN_HOUSE_RATIO : 0.3))));
     var satTake = Math.max(0, maxN - coreN - houseTarget);
-    for (var os = 0; os < outer.length && os < satTake; os++) queue.push(outer[os]);
-    for (var hs = 0; hs < inner.length; hs++) queue.push(inner[hs]);
+    /* 同类地皮分一组、组内空间均匀取 —— 每组取几个与旧版逐个一致 (只换格位) */
+    var satLeft = satTake;
+    for (var gs = 0; gs < outer.length && satLeft > 0; ) {
+      var gpri = LANDUSE_PRI[outer[gs].terrain], ge = gs;
+      while (ge < outer.length && LANDUSE_PRI[outer[ge].terrain] === gpri) ge++;
+      var picked = spreadPick(outer.slice(gs, ge), satLeft, cq, cr);
+      for (var gp = 0; gp < picked.length; gp++) queue.push(picked[gp]);
+      satLeft -= picked.length;
+      gs = ge;
+    }
+    /* 民居: 名额 = 剩余空额 (卫星不足时自动多补, 与原版同口径) */
+    var houseWant = Math.min(inner.length, maxN - coreN - (satTake - satLeft));
+    var hsel = spreadPick(inner, houseWant, cq, cr);
+    for (var hs = 0; hs < hsel.length; hs++) queue.push(hsel[hs]);
 
     var buildings = [], res = {};
     for (var q2 = 0; q2 < queue.length && buildings.length < maxN; q2++) {
@@ -1677,38 +1754,6 @@
     var skel = null;                             // 骨架边集合 (DI 超限时懒计算)
     var deferred = [];                           // DI 闸拒绝的边: 路网变密后可能达标, 循环末重试
     var out = [];
-    /* DI 重试队列消化 (每次调用限量 8 条, 与主循环共享预算): 早先被 DI 闸拒绝的边,
-       路网随建随密, 在更密的路网上往往直接达标。建成路不入本格 out (属其端点所在格,
-       由那格的 roadsNear 从缓存返回); 队首是已建/已拒的项则静默丢弃。 */
-    var drained = 0;
-    while (diRetryQueue.length > 0 && budget > 0 && drained < 8) {
-      var dq = diRetryQueue.shift();
-      if (roadFail.has(dq.rkey) || roadCache.get(dq.rkey)) continue;
-      budget--; drained++;
-      var qa = dq.a.id < dq.b.id ? dq.a : dq.b, qb = dq.a.id < dq.b.id ? dq.b : dq.a;
-      var qp = bfsRoad(qa.q, qa.r, qb.q, qb.r, roadTileIdx);
-      if (!qp) {
-        var tr3 = (roadFailTrials.get(dq.rkey) || 0) + 1;
-        roadFailTrials.set(dq.rkey, tr3);
-        if (tr3 >= 3) setAdd(roadFail, dq.rkey, ROADFAIL_CAP);   // 3 次仍无路: 终身不可达
-        else diRetryQueue.push(dq);
-        continue;
-      }
-      if ((qp.length - 1) * 10 > roadDI * hexDist(qa.q, qa.r, qb.q, qb.r)) { diRetryQueue.push(dq); continue; }
-      var dpts = [], dts = new Set();
-      for (var dk = 0; dk < qp.length; dk++) {
-        var dw = tileToWorld(qp[dk][0], qp[dk][1]);
-        dpts.push({ x: dw.x + (hash01(qp[dk][0], qp[dk][1], 5) - 0.5) * 4,
-                    y: dw.y + (hash01(qp[dk][0], qp[dk][1], 6) - 0.5) * 4 });
-        dts.add(qp[dk][0] + ',' + qp[dk][1]);
-      }
-      var droad = { key: dq.rkey, pts: dpts, tiles: dts,
-                    x0: Math.min(dq.a.x, dq.b.x), x1: Math.max(dq.a.x, dq.b.x),
-                    y0: Math.min(dq.a.y, dq.b.y), y1: Math.max(dq.a.y, dq.b.y) };
-      cacheSet(roadCache, dq.rkey, droad, ROAD_CAP);
-      dts.forEach(function (t) { roadTileIdx.add(t); });
-      roadVer++;
-    }
     for (var e = 0; e < edges.length; e++) {
       var a = edges[e].a, b = edges[e].b, rkey = edges[e].rkey;
       if (roadFail.has(rkey)) continue;          // 不可达: 终身跳过
@@ -1790,6 +1835,55 @@
       if (roadCache.get(deferred[d5].rkey)) continue;          // 重试轮已建成的无须入队
       diRetryQueue.push(deferred[d5]);
       if (diRetryQueue.length > 4096) diRetryQueue.shift();
+    }
+    /* DI 重试队列消化 —— 位置从「主循环之前」移到「主循环 + 延迟重试轮之后」,
+       且按 roadVer 节流 (每建成 128 条新路才试 1 条老边), 不再与主循环抢预算。
+
+       为什么必须让位: drain 里的边几乎全是「闸拒边」—— 因为已建路只收 ROAD_W_ROAD(2) 费,
+       寻路总能骑着旧路绕出一条路来 (所以永远不会进「!qp 终身拉黑」分支), 但那条路永远
+       步数/六边距 > 1.4, 于是被原样推回队列。原先只 push 不记账 ⇒ 队列自我补充、永不排空,
+       每次调用先在队首烧掉 8 条 A*。小预算 (预览页默认 1) 下等于每次先交过路费,
+       「当前视野该修的路」彻底排不上号。
+
+       三处配套: ① 闸拒边与寻路失败同账, 3 次即终身 roadFail ⇒ 队列有终止条件;
+                 ② 消化让到主循环之后 ⇒ 当前视野的路先吃满预算;
+                 ③ 按 roadVer 节流 ⇒ 只在路网真的变密时才值得重试, 峰值开销封顶。
+       建成路不入本格 out (属其端点所在格, 由那格的 roadsNear 从缓存返回);
+       队首是已建/已拉黑的项则静默丢弃。maxNew=0 (纯读路径) 时不消化, 保持零开销。 */
+    if (maxNew > 0 && diRetryQueue.length > 0 && roadVer - drainMark >= 128) {
+      drainMark = roadVer;
+      var dq = diRetryQueue.shift();
+      if (!roadFail.has(dq.rkey) && !roadCache.get(dq.rkey)) {
+        var qa = dq.a.id < dq.b.id ? dq.a : dq.b, qb = dq.a.id < dq.b.id ? dq.b : dq.a;
+        var qp = bfsRoad(qa.q, qa.r, qb.q, qb.r, roadTileIdx);
+        if (!qp) {
+          var tr3 = (roadFailTrials.get(dq.rkey) || 0) + 1;
+          roadFailTrials.set(dq.rkey, tr3);
+          if (tr3 >= 3) setAdd(roadFail, dq.rkey, ROADFAIL_CAP);   // 3 次仍无路: 终身不可达
+          else diRetryQueue.push(dq);
+        } else if ((qp.length - 1) * 10 > roadDI * hexDist(qa.q, qa.r, qb.q, qb.r)) {
+          /* 闸拒: 与上面「寻路失败」同账 —— 骑旧路总能找到路但永远超限,
+             不记账则本分支永不终止 (实测 77% 的 drain A* 卡死于此, 产出 0)。 */
+          var tr4 = (roadFailTrials.get(dq.rkey) || 0) + 1;
+          roadFailTrials.set(dq.rkey, tr4);
+          if (tr4 >= 3) setAdd(roadFail, dq.rkey, ROADFAIL_CAP);
+          else diRetryQueue.push(dq);
+        } else {
+          var dpts = [], dts = new Set();
+          for (var dk = 0; dk < qp.length; dk++) {
+            var dw = tileToWorld(qp[dk][0], qp[dk][1]);
+            dpts.push({ x: dw.x + (hash01(qp[dk][0], qp[dk][1], 5) - 0.5) * 4,
+                        y: dw.y + (hash01(qp[dk][0], qp[dk][1], 6) - 0.5) * 4 });
+            dts.add(qp[dk][0] + ',' + qp[dk][1]);
+          }
+          var droad = { key: dq.rkey, pts: dpts, tiles: dts,
+                        x0: Math.min(dq.a.x, dq.b.x), x1: Math.max(dq.a.x, dq.b.x),
+                        y0: Math.min(dq.a.y, dq.b.y), y1: Math.max(dq.a.y, dq.b.y) };
+          cacheSet(roadCache, dq.rkey, droad, ROAD_CAP);
+          dts.forEach(function (t) { roadTileIdx.add(t); });
+          roadVer++;
+        }
+      }
     }
     return out;
   }
@@ -1959,7 +2053,7 @@
     regionCache.clear(); settleCache.clear();
     roadCache.clear(); roadTileIdx.clear(); diRetryQueue.length = 0; demandCache.clear(); roadFailTrials.clear(); roadFail.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
-    roadVer = 0;
+    roadVer = 0; drainMark = 0;
   }
 
   /* 当前道路版本号 (供宿主做 tile 缓存新鲜度校验) */

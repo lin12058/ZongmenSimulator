@@ -30,12 +30,17 @@
 - 精灵 sprite=row*8+col 须在已绘制格；客户端读未下发字段不报错恒定空 → 对齐两侧字段清单。
 - ⚠ 新增图层/导出三处必挂：① JsEngineHost.cs 的 JsWorldVm.Call 是 switch 白名单(MapGenServer 新导出补 case)；② repeated 字段逐次 push 元素；③ WS 解码异常必须 reject pending。
 
-## 建筑与贴图（2026-09-13）
+## 建筑实时绘制（2026-09-13 改版：图集方案已废弃）
 - 建筑真源=mapgen.js `BUILDINGS`(地皮→建筑) + `CORE_KIND`(核心格)，去重共 **26 种**，实测全部会出现（0 种死定义）。
   盘点：`node verify/stats_buildings.mjs <seed...> --R=N`。稀有档(<150 次)：炼炉/官衙/焦炭窑/宗祠/祭坛/聚灵阵/灵枢殿。
-- **前端 26/26 无建筑贴图**：图集 ATLAS_ROWS=8、40~63 已满；预览只画 LANDUSE_COL 六边+方块芯；main.js 只有文字 chip。
-  设计稿+26 张代码生成的水墨图：`待办事项/前端建筑绘.md`，生成器 `tools/ink_buildings.mjs`（纯 Node 拼 SVG，无依赖不调 AI）+ `tools/shot_buildings.mjs`。
-- 建筑图集规划=**独立 build_atlas**（别扩 ATLAS_ROWS：renderer.js 有「宽高比必须推出 ATLAS_ROWS 行」构建期断言 + 着色器同源常量）。
+- **绘制真源 = `web/js/bldg_ink.js`**（1789 行，双后端 CanvasBk/SvgBk + 朝向投影 frameOf + 26 painter + `faceSolver` + `spriteOf` 缓存）。
+  ⚠ 原 `Engine/js/bldg_ink.js` 已删，只有这一份；`web/index.html` 挂载序须在 main.js 之前。
+  ~~独立 build_atlas~~ 已否决：朝向是连续维度(6 向×水/旱×8 变体)，且 renderer.js 的 ATLAS_ROWS=8 有构建期断言。
+- 接入=`main.js` 596~712 行 `drawBuildings()`，挂在 renderStaticInto 内、drawEntityList 之前；R_BUCKETS 换桶清缓存、深度序、图标让位、`?nobldg=1` 调试开关。
+- ⚠ 三条硬坑：① DIRS 必须 `Math.sqrt(3)/2`（0.866 近似→对拍 2.5e-5 偏差）② 区块归属禁 `round(q/chunkS)`，须枚举 4 候选+索引成员判定 ③ `S.p/S.d` 必须从 this.fx/fy 读，闭包捕获会让所有建筑塌成竖线。
+- 工具：`tools/bldg_sheet.mjs`(26 种一览) · `tools/bldg_town.mjs`(真实聚落贴格平面+朝向箭头+真实地类格底) · `verify/w6_bldg_face.mjs`(对拍 23/23) · `verify/live_cap.mjs`+`png_stats.mjs`(实机 A/B 差分)。
+- 设计稿(26 张 SVG/PNG, `tools/ink_buildings.mjs`+`shot_buildings.mjs`)降级为**风格参考**，不参与运行时。文档：`待办事项/前端建筑绘.md`。
+- 遗留：`灵脉预览.html` 仍是 LANDUSE_COL 六边+方块芯未接实时绘制；稀有 7 种缩远被 `hexR*z<5px` 一刀切隐藏。
 
 ## 面板定位
 - .panel 默认 position:relative；浮层显式 absolute(#info/#minimapBox)。
@@ -48,6 +53,15 @@
 - DI 重试队列（会话 FIFO，每次限 8）**不进 roadFail**（路复用路径依赖）；3 次仍败转终身不可达。maxNew=0 渲染调用跳过消化。
 - cartDist()=端点实际笛卡尔世界直线/HEX_W 取整（纯整数恒等式+isqrt）；A* h=minW×cartDist；hexDist 只余步数预算语义。ROAD_STEPS_MAX 复用模式自动放宽=COST_MAX÷ROAD_W_ROAD。
 - 必须先跑独立朴素 Dijkstra 对拍；整数几何与浮点真值≥10万点对拍。
+- ⚠ 已知病灶（2026-09-13 实测，未修）：**绕行闸拒边无终止条件 → 无限循环**。drain 里被 DI 闸拒的边
+  `bfsRoad` 总能找到路（骑路 2 费）但永远超 1.4×，于是原样回队；`roadFailTrials` 只在 `!qp` 时累加 →
+  永不转 roadFail、队列永不排空。冷建 986 次 drain A* 只建成 5 条(0.5%，757 次超闸回队)；
+  热态单次 `roadsNear(9999)` 仍烧 8 次 A*、100% 超闸回队、产出 0、32ms。drain 又排在主循环**之前**吃预算 →
+  小预算（预览页默认 1）下"当前视野这条路"被架空（排序由内向外是对的，但没变成工作量约束）。
+  次要：需求池 5x5 允许端点相距 ~70 格 > 预算可达的 40 步(复用 60 步) → 主循环 27% A* 直接失败。
+  剖析工具：`verify/bench_road_drain.mjs [seed] [半径]`（注入式计数 + 单次 A* 耗时分布 + 泵送复刻）。
+  ⚠ 注入计数的坑：必须整段替换插进**分支内部**，「签名后追加」会落到 if 块外→数成反面。
+  CPU 自耗：hexDist 46% / cacheSet 15% / search 15% / fields 8.5%（每格邻居 2 hexDist + 1 isqrt 牛顿迭代）。
 - 遗留 P1/P2：RoadNet 共享表示+干线加宽；line-of-sight 平滑；严格全局成网。
 
 ## 构建 / 运维
@@ -70,6 +84,11 @@
 - 灵脉/聚落标记=六角徽标，尺寸真源 markBase=clamp(REGION_M×HEX_W×scale×0.16,2,16)；禁止回退 rTiles×HEX_R×scale 或 blockPx>1.5；六芒星已否决。
 - 地形多级 LOD 阶梯[1,2,3,4,6,8,11,16,22,32,45,64,90,128,181,256]（×√2）；缓存判据必须含「当前需求级」。
 - ⚠ 生产前端 web/js/main.js 尚未在地图画 footprint。
+
+## 已核验 bug 唯一清单
+- **待办事项/review.md** = review_v1~v5 去重核验后的唯一清单（58 条：P0 3/P1 14/P2 25/P3 16）。
+  真 P0：DI 拒绝边无负缓存（饿死预览页 pumpRoads 预算）、tradeEdgesFor 窗口 ±1 而 reach=40 可跨 2 格、JsEngineHost LRU 淘汰不查在途引用。
+  改引擎前先读它，别重复挖已被判「已修复/误报」的项。
 
 ## 待办
 - 占地皮玩法筹划书：待办事项/六边形领地扩张（占地皮）实现筹划.md。只加 L2 领地层 + L3 世界时钟，不改 mapgen.js；核心=单一多源 Dijkstra 波前。
