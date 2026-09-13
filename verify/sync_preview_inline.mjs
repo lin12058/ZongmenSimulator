@@ -10,8 +10,12 @@
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = 'D:/codes/宗门模拟器demo';
+/* 仓库根 = 本脚本所在目录的上一级 (verify/ → 根)。禁止硬编码绝对路径:
+   目录更名 (宗门模拟器demo → ZongmenSimulator) 曾让本脚本 ENOENT 失效。 */
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
 const PREVIEW = path.join(ROOT, '灵脉预览.html');
 
 /* 标记注释 → 源文件。标记行必须唯一。

@@ -36,7 +36,10 @@ const TIME_BUDGET_MS = parseInt(process.argv[3] || '250', 10);   // 实测冷启
 
 const noiseSrc = fs.readFileSync(path.join(JSDIR, 'noise.js'), 'utf8');
 const cfgSrc = fs.readFileSync(path.join(JSDIR, 'mapgen-config.js'), 'utf8');
-const mapSrc = fs.readFileSync(path.join(JSDIR, 'mapgen.js'), 'utf8');
+/* ⚠ 归一化换行: 本仓库源码在 Windows(core.autocrlf) 下会被检成 CRLF,
+   而下面 PRUNE_H 正则写成 `...$\n` —— CRLF 时 `$` 落在 \r 之前, 紧跟的是 \r 而非 \n
+   ⇒ 匹配失败、「源码未找到剪枝语句」抛错 (2026-09-13 本机踩到)。统一成 LF 最稳。 */
+const mapSrc = fs.readFileSync(path.join(JSDIR, 'mapgen.js'), 'utf8').replace(/\r\n/g, '\n');
 
 let failures = 0;
 function check(name, cond, detail = '') {

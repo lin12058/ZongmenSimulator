@@ -33,3 +33,9 @@ verify/*.txt
 # .NET 构建产物 (源码已入库, 二进制运行时重建生成)
 Server/Zongmen/bin/
 Server/Zongmen/obj/
+
+# 临时 A/B 对拍探针 / 引擎快照 (下划线前缀, 排查过程产物不入库)
+verify/_*.mjs
+verify/_head_mapgen.js
+verify/_old_mapgen.js
+verify/_eng_head/

@@ -28,7 +28,9 @@ const C = {
   rngDominated: 0, scanDemandEdges: 0, skeletonEdgesFor: 0
 };
 
-let src = fs.readFileSync(path.join(JSDIR, 'mapgen.js'), 'utf8');
+/* ⚠ 工作区 core.autocrlf=true ⇒ 检出为 CRLF, 而下面的注入锚点是按 \n 拼接的多行字面量。
+   必须先归一化行尾 (只在内存副本上做), 否则多行锚点全部失配、报「注入点未找到」。 */
+let src = fs.readFileSync(path.join(JSDIR, 'mapgen.js'), 'utf8').replace(/\r\n/g, '\n');
 const raw = (a, b) => { if (!src.includes(a)) throw new Error('注入点未找到: ' + a); src = src.replace(a, b); };
 /* 进入即计数 (函数体首行) */
 const entry = (sig, key) => raw(sig, sig + ' C.' + key + '++;');
@@ -105,6 +107,7 @@ for (const [i, j] of q) MG.roadsNear(i, j, 9999);
 const msHot = performance.now() - t;
 d = delta(s, snap());
 console.log(`\n[热跑] ${msHot.toFixed(0)} ms → ${(msHot / q.length).toFixed(2)} ms/格, roadCache ${n0} → ${MG.roadCache.size}`);
+console.log(`  主循环 A* ${d.mainAstar + d.mainDirectRetry} (建成 ${d.mainBuilt}, 失败回队 ${d.mainFailPush}, 无折扣重寻 ${d.mainDirectRetry})`);
 console.log(`  ⚠ 零产出 A*: drain ${d.drainAstar} 次 (建成 ${d.drainBuilt}) — 其中绕行闸回队 ${d.drainDiRequeue} 次` +
             ` = ${(d.drainDiRequeue / Math.max(1, d.drainAstar) * 100).toFixed(0)}%`);
 const t2 = performance.now();

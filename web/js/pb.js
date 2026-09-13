@@ -6,7 +6,14 @@
 (function (g) {
   'use strict';
 
-  function Reader(u8) { this.b = u8; this.p = 0; this.end = u8.length; }
+  /* D7: DataView / TextDecoder 复用 —— 原实现「每读一个 f32 就 new DataView,
+     每读一个字符串就 new TextDecoder」, 单块响应里数百次分配。
+     DataView 按 Reader 各持一份 (视图与底层 buffer 绑定, 不可跨 Reader 共用)。 */
+  function Reader(u8) {
+    this.b = u8; this.p = 0; this.end = u8.length;
+    this.dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  }
+  var _TD = (typeof TextDecoder !== 'undefined') ? new TextDecoder() : null;
 
   Reader.prototype.vi = function () {          // varint (无符号)
     var r = 0, s = 0, b, n = this.b;
@@ -25,25 +32,32 @@
   };
   Reader.prototype.bin = function (len) {      // length-delimited
     var n = this.b, p = this.p;
-    if (p + len > this.end) throw new Error('bytes 越界');
+    if (len < 0 || p + len > this.end) throw new Error('bytes 越界');
     this.p = p + len;
     return n.subarray(p, p + len);
   };
   Reader.prototype.f32 = function () {         // fixed32 LE
-    var n = this.b, p = this.p;
+    var p = this.p;
     if (p + 4 > this.end) throw new Error('f32 越界');
     this.p = p + 4;
-    return new DataView(n.buffer, n.byteOffset, n.byteLength).getFloat32(p, true);
+    return this.dv.getFloat32(p, true);
   };
   Reader.prototype.tag = function () {
     var v = this.vi();
     return { field: v >>> 3, wire: v & 7 };
   };
+  /* D8: 未识别的字段也要做越界校验 —— 原实现直接 `this.p += 8/4/len`,
+     越界后 p 越过 end 会让外层的 `while (r.p < r.end)` 静默结束,
+     半截消息被当成「正常读完」的数据用 (不抛异常、数据静默缺失/错位)。 */
   Reader.prototype.skip = function (wire) {
     if (wire === 0) { this.vi(); return; }
-    if (wire === 1) { this.p += 8; return; }
-    if (wire === 5) { this.p += 4; return; }
-    if (wire === 2) { this.p += this.vi(); return; }
+    if (wire === 1) { if (this.p + 8 > this.end) throw new Error('skip 越界'); this.p += 8; return; }
+    if (wire === 5) { if (this.p + 4 > this.end) throw new Error('skip 越界'); this.p += 4; return; }
+    if (wire === 2) {
+      var len = this.vi();
+      if (this.p + len > this.end) throw new Error('skip 越界');
+      this.p += len; return;
+    }
     throw new Error('不支持的 wire=' + wire);
   };
 
@@ -133,6 +147,19 @@
   /* 还原为渲染器原语义 Float32Array (相对坐标 → 绝对像素, 公式与原 mapgen 一致) */
   function chunkToArrays(m, geo) {
     var n = m.count, i;
+    /* D8: 先自检字段长度 —— 半截/损坏消息若继续解, centers 里会出现成片 0 坐标,
+       表现为「莫名其妙的色块」且不报错 (静默数据缺失远比抛异常难查)。 */
+    if (!(m.cq && m.cr && m.tiles && m.elev && m.hash && m.neigh) ||
+        m.cq.length < n || m.cr.length < n || m.tiles.length < n ||
+        m.elev.length < n * 2 || m.hash.length < n * 2 || m.neigh.length < n * 4) {
+      throw new Error('chunk 地块段长度与 count 不符 (count=' + n + ')');
+    }
+    if (m.pn > 0 &&
+        (!(m.pdx && m.pdy && m.psp && m.ph && m.pe) ||
+         m.pdx.length < m.pn * 4 || m.pdy.length < m.pn * 4 ||
+         m.psp.length < m.pn || m.ph.length < m.pn * 2 || m.pe.length < m.pn * 2)) {
+      throw new Error('chunk 精灵段长度与 pn 不符 (pn=' + m.pn + ')');
+    }
     var centers = new Float32Array(n * 2);
     var tiles = new Float32Array(n), elevs = new Float32Array(n);
     var hashes = new Float32Array(n), neigh = new Float32Array(n);

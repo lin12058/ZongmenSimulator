@@ -17,8 +17,24 @@ public sealed class JsWorldVm : IDisposable
     /* P7: MapGenServer dynamic 句柄每 VM 只取一次缓存, 免每次 Call 重新
        访问 _engine.Script 属性 (高频 chunk/tile 调用的 DLR 属性解析开销) */
     private readonly dynamic _svc;
+    /* C1: 在途引用计数 — 宿主淘汰前先看它, 正在执行 JS 的 V8 引擎绝不会被 Dispose
+       (Dispose 一个正在跑 Call 的 V8ScriptEngine 会直接崩进程)。
+       宿主侧借出 (Enter) 时 +1, 用完 (Exit) 时 -1; 计数 >0 的 VM 不参与 LRU 淘汰。 */
+    private int _inFlight;
+    private int _disposed;
     public string Seed { get; }
     public long LastUsed { get; private set; }
+
+    /// <summary>C1: 当前借出未归还的次数 (0 = 可安全淘汰)。</summary>
+    public int InFlight => Volatile.Read(ref _inFlight);
+    public void Enter() => Interlocked.Increment(ref _inFlight);
+    public void Exit() => Interlocked.Decrement(ref _inFlight);
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+            throw new ObjectDisposedException(nameof(JsWorldVm), $"V8 实例已被淘汰 (seed={Seed})");
+    }
 
     public JsWorldVm(string seed, string bundle)
     {
@@ -36,10 +52,12 @@ public sealed class JsWorldVm : IDisposable
     /// 供 tile 缓存做新鲜度校验 — 只有真有新路落成才需要失效旧 onRoad 结果。</summary>
     public long RoadVersion()
     {
+        ThrowIfDisposed();
         Touch();
         _gate.Wait();
         try
         {
+            ThrowIfDisposed();      // C1: 排队期间可能已被淘汰
             return Convert.ToInt64((double)_svc.roadVersion());
         }
         finally
@@ -51,10 +69,12 @@ public sealed class JsWorldVm : IDisposable
     /// <summary>线程安全: 串行执行 JS 函数并返回其 JSON 字符串结果。</summary>
     public string Call(string fn, params object[] args)
     {
+        ThrowIfDisposed();
         Touch();
         _gate.Wait();
         try
         {
+            ThrowIfDisposed();      // C1: 排队期间可能已被淘汰
             return fn switch
             {
                 "init" => (string)_svc.init(args[0]),
@@ -76,7 +96,11 @@ public sealed class JsWorldVm : IDisposable
         }
     }
 
-    public void Dispose() => _engine.Dispose();
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;   // C1: 幂等
+        _engine.Dispose();
+    }
 }
 
 public sealed class JsEngineHost : IDisposable
@@ -85,10 +109,17 @@ public sealed class JsEngineHost : IDisposable
     private readonly Dictionary<string, JsWorldVm> _vms = new();
     private readonly int _maxSeeds;
     private readonly string _bundle;
+    /* C1: VM 被 LRU 淘汰时的回调 (宿主据此清掉「按 seed 前缀」派生的状态,
+       例如 tile 缓存的 roadVer 观测值) —— 否则新 VM 的 roadVer 从 0 重新计数,
+       旧观测值会让 tile 缓存命中判断失真。 */
+    private readonly Action<string>? _onEvicted;
 
-    public JsEngineHost(string jsDir, int maxSeeds)
+    public JsEngineHost(string jsDir, int maxSeeds, Action<string>? onEvicted = null)
     {
-        _maxSeeds = maxSeeds;
+        /* C1: MaxSeeds 配 0/负数时, 原实现 while (Count > MaxSeeds) 会把刚建好的
+           实例立刻淘汰 → 每次请求都「建了又杀」, 100% 拿到已 Dispose 的实例。 */
+        _maxSeeds = Math.Max(1, maxSeeds);
+        _onEvicted = onEvicted;
         var sb = new StringBuilder();
         sb.AppendLine("'use strict';");
         sb.AppendLine("var window = globalThis; var global = window; var self = window;");
@@ -102,6 +133,19 @@ public sealed class JsEngineHost : IDisposable
         _bundle = sb.ToString();
     }
 
+    /// <summary>C1: 一次「借出」。用 using 包住整个使用期 (含 VM.Call/多条调用),
+    /// 期间该 VM 不会被 LRU 淘汰 Dispose; 出口处归还计数。必须置 in-flight
+    /// 计数器对 — 漏归还只会让缓存容量短暂超标, 不会崩。</summary>
+    public readonly struct VmLease : IDisposable
+    {
+        public JsWorldVm Vm { get; }
+        internal VmLease(JsWorldVm vm) { Vm = vm; }
+        public void Dispose() => Vm.Exit();
+    }
+
+    /// <summary>C1: 借出世界 VM (与 using 配套)。</summary>
+    public VmLease Lease(string seed) => new(GetOrCreate(seed));
+
     public JsWorldVm GetOrCreate(string seed)
     {
         // 注意: 不可截断 seed 再作 key —— 此前 [..80] 会让「前 80 字符相同」的不同种子
@@ -109,16 +153,22 @@ public sealed class JsEngineHost : IDisposable
         // 两端口径不一致 → LRU 命中错世界, 破坏离线确定性。key 与 init(seed) 均用完整字符串。
         lock (_lock)
         {
-            if (_vms.TryGetValue(seed, out var vm)) { vm.Touch(); return vm; }
+            if (_vms.TryGetValue(seed, out var vm)) { vm.Touch(); vm.Enter(); return vm; }
         }
 
         /* 冷启 (new V8ScriptEngine + Evaluate(bundle) + init) 可能耗时数百 ms —
            放到锁外构建, 否则会阻塞其它 seed 的取用 (含已存在的 VM)。
            double-check: 并发同 seed 可能各建一个, 以「先入表者胜」收敛, 多余实例释放。 */
         var created = new JsWorldVm(seed, _bundle);
+        created.Enter();                     // C1: 借出计数在入表前就置位
         lock (_lock)
         {
-            if (_vms.TryGetValue(seed, out var existing)) { existing.Touch(); created.Dispose(); return existing; }
+            if (_vms.TryGetValue(seed, out var existing))
+            {
+                created.Exit(); created.Dispose();
+                existing.Touch(); existing.Enter();
+                return existing;
+            }
             _vms[seed] = created;
             EvictLocked();
             return created;
@@ -129,11 +179,14 @@ public sealed class JsEngineHost : IDisposable
     {
         while (_vms.Count > _maxSeeds)
         {
-            /* T12: MaxSeeds 很小, 直接线性扫最旧 (O(n)) — 原OrderBy整体排序 (O(n·logn)) 无必要 */
+            /* T12: MaxSeeds 很小, 直接线性扫最旧 (O(n)) — 原OrderBy整体排序 (O(n·logn)) 无必要。
+               C1: 在途 (InFlight > 0) 的实例跳过 —— 正在执行 JS 的引擎被 Dispose 会崩;
+                   若当前全部在途则本轮不淘汰 (容量短暂超标, 下次取用时再收)。 */
             string? oldestKey = null;
             long oldest = long.MaxValue;
             foreach (var kv in _vms)
             {
+                if (kv.Value.InFlight > 0) continue;
                 if (kv.Value.LastUsed < oldest)
                 {
                     oldest = kv.Value.LastUsed;
@@ -141,8 +194,9 @@ public sealed class JsEngineHost : IDisposable
                 }
             }
             if (oldestKey == null) break;
-            _vms[oldestKey].Dispose();
-            _vms.Remove(oldestKey);
+            _vms.Remove(oldestKey, out var victim);
+            _onEvicted?.Invoke(oldestKey);
+            victim?.Dispose();
         }
     }
 

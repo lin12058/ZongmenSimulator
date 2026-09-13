@@ -16,8 +16,12 @@
  * ============================================================ */
 import fs from 'node:fs';
 import vm from 'node:vm';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const JSDIR = 'D:/codes/宗门模拟器demo/Server/Zongmen/Engine/js';
+/* 按脚本自身位置推导, 不硬编码 (目录更名会让绝对路径失效) */
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const JSDIR = path.resolve(__dirname, '..', 'Server/Zongmen/Engine/js');
 const tag = process.argv[2] || '?';
 const SEED = process.argv[3] || 'seed-check';
 const SPAN = 14;

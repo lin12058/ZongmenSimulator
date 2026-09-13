@@ -129,8 +129,13 @@ public static class MapWsHandler
             const uint entityMask = (uint)(TileMask.Settle | TileMask.Poi | TileMask.Comm);
             uint allowedMask = session.Authed ? reqMask : reqMask & ~entityMask;
 
-            var resp = svc.GetTileBlock(req.Seed, req.I, req.J, allowedMask,
-                                        req.LastRevs.Count > 0 ? req.LastRevs : null);
+            /* C6: 块构建是「全同步」管线 (V8 门闩 + A* + gzip), 直接内联 await 会占着
+               ASP.NET 的请求线程池线程跑完 — 冷启/多 seed 并发时把池子吃干, 连
+               非地图请求也被拖住。放到线程池单独执行, 并允许客户端断开时提前放弃等待
+               (WaitAsync(ct): 不等同步体结束, 但也不去打断它 —— V8 调用本身无法取消)。 */
+            var resp = await Task.Run(() => svc.GetTileBlock(req.Seed, req.I, req.J, allowedMask,
+                                            req.LastRevs.Count > 0 ? req.LastRevs : null), ct)
+                                   .WaitAsync(ct);
             resp.Seq = req.Seq;
             if (!session.Authed)
             {

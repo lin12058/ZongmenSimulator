@@ -138,6 +138,47 @@
   /* 暴露给 main.js: 距下次可重连的毫秒数 (<0 = 立即可连) */
   function reconnectDue() { return Date.now() >= reconnectAt; }
 
+  /* D8: 容错扫描 —— 在 TileResponse 顶层找 field 6 (seq, varint)。
+     仅在「正常解码已失败」时调用, 用途是把失败精确归到某一条在途请求,
+     而不是把全部在途请求一起 reject (帧与帧互相独立, 一帧坏不该拖死整批)。
+     任何越界/非法 wire 立即返回 null, 由调用方退回「全拒」。 */
+  function scanSeq(u8) {
+    var p = 0, end = u8.length;
+    try {
+      while (p < end) {
+        var v = 0, s = 0, b;
+        do {
+          if (p >= end || s > 42) return null;
+          b = u8[p++]; v += (b & 0x7f) * Math.pow(2, s); s += 7;
+        } while (b & 0x80);
+        var field = v >>> 3, wire = v & 7;
+        if (wire === 0) {
+          var w = 0, s2 = 0, b2;
+          do {
+            if (p >= end || s2 > 42) return null;
+            b2 = u8[p++]; w += (b2 & 0x7f) * Math.pow(2, s2); s2 += 7;
+          } while (b2 & 0x80);
+          if (field === 6) return w;
+        } else if (wire === 1) {
+          if (p + 8 > end) return null;
+          p += 8;
+        } else if (wire === 5) {
+          if (p + 4 > end) return null;
+          p += 4;
+        } else if (wire === 2) {
+          var l = 0, s3 = 0, b3;
+          do {
+            if (p >= end || s3 > 42) return null;
+            b3 = u8[p++]; l += (b3 & 0x7f) * Math.pow(2, s3); s3 += 7;
+          } while (b3 & 0x80);
+          if (p + l > end) return null;
+          p += l;
+        } else return null;
+      }
+      return null;
+    } catch (e) { return null; }
+  }
+
   function onFrame(u8) {
     if (!u8.length) return;
     var type = u8[0], payload = u8.subarray(1);
@@ -156,7 +197,24 @@
     if (type === PB.FRAME.PING) return;         // 服务器不应主动 ping; 忽略
     if (type === PB.FRAME.TILE) {
       gunzip(payload).then(function (buf) {
-        var resp = PB.decodeTileResponse(buf);
+        var resp;
+        try {
+          resp = PB.decodeTileResponse(buf);
+        } catch (e) {
+          /* D8: 解码失败只拒绝「失败的那一条」—— 先容错扫出 seq 精确定位;
+             实在定位不出才退回全拒 (原实现无条件全拒, 一帧坏拖死整批在途请求)。 */
+          var badSeq = scanSeq(new Uint8Array(buf));
+          console.error('TileResponse 解码失败', badSeq != null ? ('seq=' + badSeq) : '', e);
+          if (badSeq != null && pending.has(badSeq)) {
+            var bp = pending.get(badSeq);
+            pending.delete(badSeq);
+            clearTimeout(bp.timer);
+            bp.reject(new Error('TileResponse 解码失败'));
+          } else {
+            failAllPending(new Error('TileResponse 解码失败'));
+          }
+          return;
+        }
         var p = pending.get(resp.seq);
         if (!p) return;                         // 重连前的迟到响应: 丢弃
         pending.delete(resp.seq);
@@ -177,10 +235,10 @@
         }
         p.resolve(resp);
       }, function (err) {
-        /* 解压/解码失败: 该帧不可恢复, 直接拒绝全部在途请求 (20s 超时兜底之外
-           的快速失败) → 上层 scheduleChunkRetry 指数退避重取, 避免块长时间悬挂。 */
-        console.error('TileResponse 解压/解码失败', err);
-        failAllPending(new Error('TileResponse 解压/解码失败'));
+        /* gunzip 失败: 载荷边界已不可知, 无法定位是哪条请求 → 只能全拒
+           (快速失败, 由上层 scheduleChunkRetry 指数退避重取, 避免块长时间悬挂)。 */
+        console.error('TileResponse 解压失败', err);
+        failAllPending(new Error('TileResponse 解压失败'));
       });
     }
   }
@@ -228,16 +286,30 @@
   function blockForgetAll() { revs.clear(); }
 
   /* ---------- 单格详情 / 字段网格 (保留 HTTP) ---------- */
-  function getProto(url) {
-    return fetch(base + url).then(function (r) {
+  function getProto(url, signal) {
+    return fetch(base + url, signal ? { signal: signal } : undefined).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + url);
       return r.arrayBuffer();     // Content-Encoding:gzip 由 fetch 透明解压
     });
   }
 
+  /* D6: 单格详情请求上限 —— 原实现无超时, 服务端慢/卡时面板会永久停在「参详中…」。
+     用 AbortController 主动放弃 (fetch 会被 abort, 走 catch 路径)。 */
+  var TILE_TIMEOUT_MS = 8000;
   function tile(seed, q, r) {
-    return getProto('/api/map/tile?seed=' + enc(seed) + '&q=' + q + '&r=' + r)
-      .then(function (buf) { return PB.decodeTileMsg(buf); });
+    var url = '/api/map/tile?seed=' + enc(seed) + '&q=' + q + '&r=' + r;
+    if (typeof AbortController === 'undefined') {
+      return getProto(url).then(function (buf) { return PB.decodeTileMsg(buf); });
+    }
+    var ctl = new AbortController();
+    var to = setTimeout(function () { ctl.abort(); }, TILE_TIMEOUT_MS);
+    return getProto(url, ctl.signal).then(function (buf) {
+      clearTimeout(to);
+      return PB.decodeTileMsg(buf);
+    }, function (e) {
+      clearTimeout(to);
+      throw e;
+    });
   }
 
   function fieldGrid(seed, q0, q1, r0, r1) {

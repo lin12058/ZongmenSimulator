@@ -78,30 +78,34 @@
     return JSON.stringify({ ca: ca, cb: cb, count: n, pn: pn, d: b64FromBytes(buf) });
   }
 
-  /* ---------- 区域包: 区域信息 + 聚落(含城镇足迹) + 道路(权威) ---------- */
+  /* ---------- 区域包: 区域信息 + 聚落(骨架) + 道路(权威) ----------
+     B5/D15: 区域包【不再】携带城镇足迹 (style/styleName/buildings/resources)。
+       足迹以 settle 包为唯一权威 (settleJson, 落 SQLite、可演化), 由 C# GetTileBlock
+       的 needSettle 分支合并; 前端 main.js 也只取 {region, roads}。
+       原实现对区域包内每个聚落都跑 growTownFootprint 并序列化下发 (且**无 type 过滤**,
+       秘境 poi 也被生成一整套祠堂/村口足迹 = B5), 结果被 C# 立刻用 settle 包覆盖、
+       被前端直接丢弃 —— 服务端算 + 序列化 + 传输后全部归零 (D15)。
+     这里只保留聚落骨架字段 (供 needSettle/needPoi 取实体列表; poi 本就无足迹)。 */
   function settlementJson(st) {
-    /* 城镇足迹 (§三 生长结果): 由纯函数按聚落 id 缓存, 与客户端各算各的必须一致 */
-    var plan = MG.growTownFootprint(st.id, st.type, st.q, st.r);
-    var bs = [];
-    for (var b = 0; b < plan.buildings.length; b++) {
-      var bd = plan.buildings[b];
-      bs.push({ q: bd.q, r: bd.r, kind: bd.kind, terrain: bd.terrain, tier: bd.tier });
-    }
-    var rs = [];
-    for (var r = 0; r < plan.resources.length; r++)
-      rs.push({ resource: plan.resources[r].resource, amount: plan.resources[r].amount });
     return { id: st.id, type: st.type, q: st.q, r: st.r,
              x: st.x, y: st.y, name: st.name, pop: st.pop,
              owner: st.owner || '', tier: st.tier || 0,
-             state: st.state || 0, expireTs: st.expireTs || 0,
-             style: plan.style, styleName: plan.styleName,
-             buildings: bs, resources: rs };
+             state: st.state || 0, expireTs: st.expireTs || 0 };
   }
+
+  /* 区域包道路预算: 服务端权威快照要求「一次算全」本区域全部道路, 与前端渐进修路
+     (小 maxNew 预算) 语义不同 —— 这里等于「无上限」。
+     ⚠ A5 (P1, 未在本次安全范围内闭环): 该调用在 V8 门闩内同步跑完整区域 A*, 实测首请求
+     ~195.8ms, 阻塞同 VM 的其它请求。要真正降低阻塞必须配合「region rev 随道路增量前进 +
+     渐进补算」设计 (review.md §5 第 7 条): 单纯调小本预算会让区域包永久少路 —— 因为
+     BlockRevs.Region 只在显式 BumpBlockRev 时变化, 不随 roadVer 前进, 客户端不会自动重拉。
+     属跨 C#/前端契约改动, 需实测收敛性后再落。 */
+  var REGION_ROAD_BUDGET = 9999;        // 语义 = 无上限 (勿单方面改小, 见上)
 
   function regionJson(i, j) {
     var ri = MG.regionInfo(i, j);
     var sts = MG.settlementsFor(i, j);
-    var roads = MG.roadsNear(i, j, 9999);     // 服务端权威: 预算充足, 一次算全
+    var roads = MG.roadsNear(i, j, REGION_ROAD_BUDGET);   // 服务端权威: 预算充足, 一次算全
     var stArr = [], rdArr = [];
     for (var s = 0; s < sts.length; s++) stArr.push(settlementJson(sts[s]));
     for (var m = 0; m < roads.length; m++) {

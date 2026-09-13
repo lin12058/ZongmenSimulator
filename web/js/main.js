@@ -58,9 +58,10 @@
 
   var timeSec = 0, lastT = 0;
   var frameCount = 0;              // 渲染帧计数 (capture=1 截图须等「数据到达后至少渲染过一帧」)
-  var minimapDirty = true, minimapTimer = 0;
+  var minimapDirty = true, minimapTimer = 0, mmDrawTimer = 0, mmBoxDirty = true;
   var mmReq = null, mmData = null;      // 小地图网格请求/数据
   var mmInFlight = false;               // 同窗口去重, 避免狂发同窗口请求
+  var mmCam = { x: NaN, y: NaN };       // 上次真正绘制小地图位图时的相机位置 (D3/D16)
 
   /* ---------- 静态覆盖层缓存 ---------- */
   var staticLayer = null;
@@ -480,31 +481,78 @@
         if (mmData && t.q >= mmData.q0 && t.q <= mq1 && t.r >= mmData.r0 && t.r <= mr1) {
           disp = mmData.data[(t.r - mmData.r0) * mmData.nq + (t.q - mmData.q0)];
         }
-        var col = colCache[disp] || (colCache[disp] = disp < 0 ? '#b9ad92'
-          : (geo.biomeMeta[disp] || { color: '#b9ad92' }).color);
+        /* D3: 色值预解析成 [r,g,b] —— 原实现每像素 3 次 parseInt(col.slice(...)),
+           单次刷新 132×88×3 ≈ 3.5 万次字符串切片 + 解析。 */
+        var rgb = colCache[disp];
+        if (!rgb) {
+          if (disp < 0) {
+            rgb = colCache[disp] = [185, 173, 146];          // 窗口外兜底色 #b9ad92
+          } else {
+            var col = (geo.biomeMeta[disp] || { color: '#b9ad92' }).color;
+            rgb = colCache[disp] = [parseInt(col.slice(1, 3), 16),
+                                    parseInt(col.slice(3, 5), 16),
+                                    parseInt(col.slice(5, 7), 16)];
+          }
+        }
         var i = (py * W + px) * 4;
-        img.data[i] = parseInt(col.slice(1, 3), 16);
-        img.data[i + 1] = parseInt(col.slice(3, 5), 16);
-        img.data[i + 2] = parseInt(col.slice(5, 7), 16);
+        img.data[i] = rgb[0];
+        img.data[i + 1] = rgb[1];
+        img.data[i + 2] = rgb[2];
         img.data[i + 3] = 255;
       }
     }
     ctx.putImageData(img, 0, 0);
+    mmCam.x = cam.x; mmCam.y = cam.y;      // 记录本次绘制所用相机 → mmCamMoved 判据
+    mmBoxDirty = true;                     // 位图变了 → 外层画布需重绘一次
   }
+  /* D16: 小地图数据窗口是否已不覆盖当前相机窗口 (平移久了必须重采样, 否则大片兜底色) */
+  function minimapWindowStale() {
+    var W = 132, H = 88, SCALE = 6;
+    if (!mmData) return true;
+    var x0 = cam.x - W / 2 * SCALE, y0 = cam.y - H / 2 * SCALE;
+    var x1 = cam.x + W / 2 * SCALE, y1 = cam.y + H / 2 * SCALE;
+    var a = MC.pxToTile(x0, y0), b = MC.pxToTile(x1, y1);
+    var c = MC.pxToTile(x0, y1), d = MC.pxToTile(x1, y0);
+    var q0 = Math.min(a.q, b.q, c.q, d.q), q1 = Math.max(a.q, b.q, c.q, d.q);
+    var r0 = Math.min(a.r, b.r, c.r, d.r), r1 = Math.max(a.r, b.r, c.r, d.r);
+    return q0 < mmData.q0 || r0 < mmData.r0 ||
+           q1 > mmData.q0 + mmData.nq - 1 || r1 > mmData.r0 + mmData.nr - 1;
+  }
+  /* mmBase 是「以相机为中心」的窗口 ⇒ 相机没动、也没新数据时位图内容不变 */
+  function mmCamMoved() {
+    return !(Math.abs(cam.x - mmCam.x) <= 1.5 && Math.abs(cam.y - mmCam.y) <= 1.5);
+  }
+  /* D4: 小地图画布按 dpr 对齐 —— 原先 width/height 写死 432×282 (= CSS 216×141 × 固定 2),
+     在 dpr=1 屏幕上等于每次 blit 都做 2× 降采样, dpr=3 又糊。 */
+  function syncMinimapSize() {
+    var box = els.minimap;
+    if (!box) return;
+    var cw = box.clientWidth || 216, chh = box.clientHeight || 141;
+    var w = Math.max(1, Math.round(cw * dpr)), h = Math.max(1, Math.round(chh * dpr));
+    if (box.width !== w || box.height !== h) {
+      box.width = w; box.height = h;
+      mmBoxDirty = true;
+    }
+  }
+  /* D4: 外层小地图画布只在位图/尺寸变化时重绘 (原先每帧 blit + 描边 + 文字) */
   function drawMinimap() {
+    if (!mmBoxDirty) return;
     var box = els.minimap, bctx = box.getContext('2d');
     var mw = box.width, mh = box.height;
+    mmBoxDirty = false;
     bctx.imageSmoothingEnabled = false;
     bctx.clearRect(0, 0, mw, mh);
     if (!mmBase) return;
     bctx.drawImage(mmBase, 0, 0, mw, mh);
+    /* 覆盖标记按画布比例缩放 (原写死 2 线宽 / 6×6 方块 / 10px 字, 换画布尺寸即失真) */
+    var k = mw / 132;
     bctx.strokeStyle = 'rgba(166,58,44,0.95)';
-    bctx.lineWidth = 2;
-    bctx.strokeRect(mw / 2 - 3, mh / 2 - 3, 6, 6);
+    bctx.lineWidth = Math.max(1, 2 * k);
+    bctx.strokeRect(mw / 2 - 3 * k, mh / 2 - 3 * k, 6 * k, 6 * k);
     bctx.fillStyle = 'rgba(50,42,34,0.7)';
-    bctx.font = '10px "KaiTi","STKaiti",serif';
+    bctx.font = Math.round(10 * k) + 'px "KaiTi","STKaiti",serif';
     bctx.textAlign = 'left';
-    bctx.fillText('方圆百里', 6, mh - 6);
+    bctx.fillText('方圆百里', 6 * k, mh - 6 * k);
   }
 
   /* ---------- 标注层: 全部基于后端数据绘制 ---------- */
@@ -738,8 +786,11 @@
       }
       var drawn = {};
       regionCells.forEach(function (pack) {
-        for (var rr = 0; rr < pack.roads.length; rr++) {
-          var road = pack.roads[rr];
+        /* D2: 区域包降级/半截时 roads/region 可能缺省 —— 直接取属性会抛异常,
+           异常从 renderStaticInto 冒到主循环 → showFatal 整页不可用。 */
+        var roads = pack.roads || [];
+        for (var rr = 0; rr < roads.length; rr++) {
+          var road = roads[rr];
           if (drawn[road.key]) continue;
           drawn[road.key] = true;
           /* 不做逐路视野裁剪: regionCells 本身随视野窗口卸载, 集合有界;
@@ -792,6 +843,7 @@
       ctx.textBaseline = 'middle';
       regionCells.forEach(function (pack) {
         var rg = pack.region;
+        if (!rg) return;                        // D2: 缺 region 的降级包直接跳过
         var ps = w2s(rg.x, rg.y);
         if (ps.x < -200 || ps.y < -100 || ps.x > vw + 200 || ps.y > vh + 100) return;
         var fs = Math.max(Math.sqrt(geo.regionM * geo.regionM) * 0.75, 12) * z;
@@ -945,7 +997,11 @@
   }
 
   /* ---------- 信息面板 (后端单格详情) ---------- */
-  var panelBusy = false;
+  /* D6: 原实现用单一 panelBusy 布尔早退 —— 连点时新请求被静默丢弃 (面板停在旧格);
+     且 MC.tile 无超时, 请求挂住则「参详中…」可能永久滞留。
+     现改为「请求序号 + 最新者胜」: 每次请求带自增 rid, 回调里 rid != 最新则丢弃;
+     超时由 mapclient 侧的 AbortController 兜底 (8s)。 */
+  var infoSeq = 0;
   /* R5: tile 详情请求 150ms 防抖 —— 连点多个格子时只发最后一次的请求 */
   var infoTimer = null, infoPending = null;
   function showInfo(tile) {
@@ -959,32 +1015,35 @@
     }, 150);
   }
   function requestTileInfo(tile) {
-    if (!tile || panelBusy) return;
-    panelBusy = true;
+    if (!tile) return;
+    var rid = ++infoSeq;
     els.infoBody.innerHTML = '<div class="row"><span class="k">山川志</span><span class="v">参详中…</span></div>';
     els.info.classList.remove('hidden');
     var gen = worldSeed, q = tile.q, r = tile.r;
     MC.tile(gen, q, r).then(function (m) {
-      panelBusy = false;
+      if (rid !== infoSeq) return;                 // 已被更晚的点击取代 → 静默丢弃
       if (gen !== worldSeed) return;
       var rows = [];
+      /* D13: 服务端字符串一律过 esc() (与宗门录面板一致) —— 原实现直接拼进
+         innerHTML, 名称里含 < & 等字符就会破坏结构/注入。 */
       if (m.placeType) {
-        rows.push('<div class="row"><span class="k">所在</span><span class="v">' + TYPE_NAME[m.placeType] + '</span></div>');
-        rows.push('<div class="row"><span class="k">名号</span><span class="v big">' + m.placeName + '</span></div>');
+        rows.push('<div class="row"><span class="k">所在</span><span class="v">' +
+          esc(TYPE_NAME[m.placeType] || m.placeType) + '</span></div>');
+        rows.push('<div class="row"><span class="k">名号</span><span class="v big">' + esc(m.placeName) + '</span></div>');
         if (m.placeType !== 'poi') rows.push('<div class="row"><span class="k">生民</span><span class="v">约 ' + m.placePop.toLocaleString() + ' 口</span></div>');
         else rows.push('<div class="row"><span class="k">气数</span><span class="v">机缘未至, 探之莫测</span></div>');
         rows.push('<div class="sep"></div>');
       }
-      rows.push('<div class="row"><span class="k">地界</span><span class="v">' + m.regionName + '</span></div>');
-      rows.push('<div class="row"><span class="k">地貌</span><span class="v">' + (geo.biomeMeta[m.disp] || {}).name + '</span></div>');
+      rows.push('<div class="row"><span class="k">地界</span><span class="v">' + esc(m.regionName) + '</span></div>');
+      rows.push('<div class="row"><span class="k">地貌</span><span class="v">' + esc((geo.biomeMeta[m.disp] || {}).name || '未名') + '</span></div>');
       rows.push('<div class="row"><span class="k">位次</span><span class="v">' +
         (q < 0 ? '西 ' + (-q) : '东 ' + q) + ' · ' + (r < 0 ? '北 ' + (-r) : '南 ' + r) + '</span></div>');
       if (m.hasVein) {
         rows.push('<div class="sep"></div>');
-        rows.push('<div class="row"><span class="k">灵脉</span><span class="v big">' + m.veinName + '</span></div>');
+        rows.push('<div class="row"><span class="k">灵脉</span><span class="v big">' + esc(m.veinName) + '</span></div>');
         rows.push('<div class="row"><span class="k">灵根</span><span class="v">' +
-          (m.veinVariant ? m.veinVariant + '灵根 · 派自' + VEIN_EL[m.veinElement]
-                         : VEIN_EL[m.veinElement] + '灵根') + '</span></div>');
+          (m.veinVariant ? esc(m.veinVariant) + '灵根 · 派自' + (VEIN_EL[m.veinElement] || '?')
+                         : (VEIN_EL[m.veinElement] || '?') + '灵根') + '</span></div>');
         rows.push('<div class="row"><span class="k">位份</span><span class="v">' +
           (m.veinLevel === 0 ? '大灵脉·七星' : m.veinLevel === 1 ? '中灵脉·七星' : '独立小灵脉') + '</span></div>');
       }
@@ -996,7 +1055,7 @@
       if (m.onRoad) rows.push('<div class="row"><span class="k">道路</span><span class="v">有墨路经此</span></div>');
       els.infoBody.innerHTML = rows.join('');
     }).catch(function (err) {
-      panelBusy = false;
+      if (rid !== infoSeq) return;                 // 过期请求的失败不再覆盖面板
       console.error('格详情失败', err);
       els.infoBody.innerHTML = '<div class="row"><span class="k">山川志</span><span class="v">未察明</span></div>';
     });
@@ -1052,6 +1111,7 @@
     updateSectPanel(true);
     hideInfo();
     minimapDirty = true;
+    mmCam.x = NaN; mmCam.y = NaN; mmDrawTimer = 1;   // D3/D16: 新世界 → 小地图窗口与位图都要重做
     forceStaticDirty();               // R1: 重铸需立即全量重绘 (清节流定时器)
   }
 
@@ -1059,7 +1119,7 @@
     var st = 0, rd = 0, veins = 0;
     settleCells.forEach(function (list) { st += list.length; });
     poiCells.forEach(function (list) { st += list.length; });
-    regionCells.forEach(function (pack) { rd += pack.roads.length; });
+    regionCells.forEach(function (pack) { rd += (pack.roads ? pack.roads.length : 0); });
     commCells.forEach(function (cm) { if (cm.exists) veins += cm.veins.length; });
     els.stats.textContent = '已探明 宗门村镇 ' + st + ' · 墨路 ' + rd + ' · 灵脉 ' + veins;
   }
@@ -1211,12 +1271,47 @@
   function layerFingerprint() {
     return settleCells.size + '|' + regionCells.size + '|' + commCells.size;
   }
+  /* D14: 单遍 O(n) 扫描 (不排序、不建数组) —— 层指纹未变时用它回答
+     「选中的宗门会不会变」: 随行模式看最近宗门是否换人, 指定模式看所择宗门是否还在视野。
+     只有结论确实要变时才落到全量 collectSects()+sort+innerHTML 重建。 */
+  function scanSects() {
+    var ct = MC.pxToTile(cam.x, cam.y);
+    var best = null, bd = Infinity, pin = null, seen = {};
+    settleCells.forEach(function (list) {
+      for (var i = 0; i < list.length; i++) {
+        var ent = list[i];
+        if (ent.type !== 'sect' || ent.state === 1) continue;
+        if (seen[ent.id]) continue;
+        seen[ent.id] = true;
+        var d = hexDist(ct.q, ct.r, ent.q, ent.r);
+        if (sect.pinId && ent.id === sect.pinId) pin = { id: ent.id, d: Math.round(d), ent: ent };
+        if (d < bd) { bd = d; best = { id: ent.id, d: Math.round(d), ent: ent }; }
+      }
+    });
+    return { best: best, pin: pin };
+  }
   function updateSectPanel(force) {
     if (!metaReady || !geo) return;
+    var fp = layerFingerprint();
+    /* D14: 原实现每次都先跑 collectSects() (全量收集 + 排序), 之后才比指纹 ——
+       1.5s 一次的固定开销里, 九成以上的调用结论完全没变。 */
+    if (!force && fp === sect.curFp) {
+      var sc = scanSects();
+      var want = sect.auto ? sc.best : (sc.pin || null);
+      var wantId = want ? want.id : '';
+      if (wantId === sect.curId) {
+        if (want) {
+          sect.cur = want.ent;               // 刷新实体引用 (同 id 的新对象)
+          var dEl0 = els.sectBody.querySelector('.sec-dist');
+          if (dEl0) dEl0.textContent = want.d;
+        }
+        return;
+      }
+      /* 结论要变 → 落到下面的全量重建路径 */
+    }
     var pick = pickSect();
     var ent = pick ? pick.ent : null;
     var id = ent ? ent.id : '';
-    var fp = layerFingerprint();
     if (id !== sect.curId || fp !== sect.curFp || force) {
       sect.curFp = fp;
       sect.curId = id; sect.cur = ent;
@@ -1254,7 +1349,16 @@
         var w = s2w(mx, my);
         hoverTile = MC.pxToTile(w.x, w.y);
         app.style.cursor = 'pointer';
+      } else {
+        /* D9: 鼠标移出画布时清掉悬停格与指针样式 —— 原实现只在「画布内」分支赋值,
+           走出画布后 hover 高亮与 cursor:pointer 一直残留。 */
+        hoverTile = null;
+        app.style.cursor = '';
       }
+    });
+    app.addEventListener('mouseleave', function () {
+      hoverTile = null;
+      app.style.cursor = '';
     });
     window.addEventListener('mouseup', function (e) {
       if (!drag) return;
@@ -1273,7 +1377,10 @@
       var rect = app.getBoundingClientRect();
       var mx = e.clientX - rect.left, my = e.clientY - rect.top;
       var before = s2w(mx, my);
-      cam.tzoom = MC.clamp(cam.tzoom * Math.exp(-e.deltaY * 0.0012), minZoom, maxZoom);
+      /* D12: 归一化 deltaMode —— Firefox 滚轮 deltaMode=1 (行), 直接乘 deltaY 会让
+         缩放几乎不动 (deltaY 只有 ±3)。行 16px / 页 100px 折成像素当量。 */
+      var unit = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? 100 : 1);
+      cam.tzoom = MC.clamp(cam.tzoom * Math.exp(-e.deltaY * unit * 0.0012), minZoom, maxZoom);
       cam.zoom = cam.tzoom;
       var after = s2w(mx, my);
       cam.tx += before.x - after.x;
@@ -1301,19 +1408,46 @@
           cam.x = cam.tx; cam.y = cam.ty;
         }
       } else if (e.touches.length === 2) {
+        /* D11: 双指捏合加锚点补偿 —— 以两指中点为不动点缩放 (与滚轮同口径),
+           原实现只改 zoom 不补平移, 捏合时地图中心会「跑」。 */
+        var rect = app.getBoundingClientRect();
+        var px = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+        var py = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+        var before = s2w(px, py);
         var d = Math.hypot(
           e.touches[0].clientX - e.touches[1].clientX,
           e.touches[0].clientY - e.touches[1].clientY);
         cam.tzoom = MC.clamp(cam.tzoom * d / (this._pinch || d), minZoom, maxZoom);
         this._pinch = d;
         cam.zoom = cam.tzoom;
+        var after = s2w(px, py);
+        cam.tx += before.x - after.x;
+        cam.ty += before.y - after.y;
+        cam.x = cam.tx; cam.y = cam.ty;
       }
     }, { passive: false });
-    app.addEventListener('touchend', function () { drag = null; });
+    app.addEventListener('touchend', function (e) {
+      /* D11: 抬起一指后剩下那指要能继续拖动 —— 原实现无条件 drag=null,
+         必须松手重按才能再拖 (多点触控下的常见挫败点)。 */
+      if (e.touches && e.touches.length === 1) {
+        this._pinch = 0;
+        drag = { sx: e.touches[0].clientX, sy: e.touches[0].clientY,
+                 cx: cam.tx, cy: cam.ty, moved: false };
+        return;
+      }
+      drag = null;
+      this._pinch = 0;
+    });
 
     var keys = {};
     window.addEventListener('keydown', function (e) { keys[e.key] = true; });
     window.addEventListener('keyup', function (e) { keys[e.key] = false; });
+    /* D10: 失焦时清空按键状态 —— 原实现只靠 keyup, Alt+Tab 切走再回来时
+       「按下的方向键」永远收不到 keyup → 相机持续漂移。 */
+    window.addEventListener('blur', function () { keys = {}; });
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) keys = {};
+    });
     setInterval(function () {
       var sp = 480 / cam.zoom;
       if (keys.ArrowLeft || keys.a || keys.A) cam.tx -= sp;
@@ -1384,6 +1518,7 @@
     els.overlay.height = Math.round(vh * dpr);
     els.overlay.style.width = vw + 'px';
     els.overlay.style.height = vh + 'px';
+    syncMinimapSize();          // D4: 小地图画布按 CSS 尺寸 × dpr 对齐
   }
 
   /* ---------- 主循环 ---------- */
@@ -1400,17 +1535,38 @@
       if (Math.abs(cam.ty - cam.y) < 0.1) cam.y = cam.ty;
       clampCam();
 
+      /* D5: 静止降帧 —— 相机已收敛 + 无脏图层 + 无在途加载 + 无拖拽时, 每两帧才渲染一帧
+         (动画继续, 约 30fps), 把「静止时仍每帧全跑 3-pass WebGL + 全屏后处理 + 覆盖层」
+         的功耗砍半。任何交互 (拖拽/滚轮/点击)、数据到达、脏标记都会立刻恢复满帧。 */
+      var settled = Math.abs(cam.tx - cam.x) < 0.5 && Math.abs(cam.ty - cam.y) < 0.5 &&
+                    Math.abs(cam.tzoom - cam.zoom) < 0.004;
+      if (settled && !staticDirty && !minimapDirty && !drag && chunkBusy.size === 0 &&
+          (frameCount & 1)) {
+        requestAnimationFrame(loop);
+        return;
+      }
+
       if (metaReady) updateStreaming();
       renderer.render(cam, timeSec);
       drawOverlay();
       frameCount++;
       minimapTimer += dt;
-      if ((minimapDirty && minimapTimer > 0.4) || minimapTimer > 1.5) {
+      mmDrawTimer += dt;
+      if (minimapTimer > 1.5) {
         minimapTimer = 0;
         updateStats();
         updateSectPanel(false);     // 「距此」随相机移动, 与统计同节拍刷新
-        if (minimapDirty && !mmInFlight) requestMinimap();
-        if (mmData) { refreshMinimap(); minimapDirty = false; }
+      }
+      /* D3/D16: 小地图不再 1.5s 无条件全量重建 (132×88 逐像素 + parseInt×3):
+         · 数据窗口只在「相机窗口越出已采样范围」时重采 —— 原先从不按相机重采,
+           长时间平移后位图大片落回兜底色;
+         · 位图只在「有新数据 或 相机真的移动了」时重绘, 相机静止即完全跳过。 */
+      if (!mmInFlight && ((minimapDirty && minimapTimer > 0.4) ||
+                          (minimapTimer === 0 && minimapWindowStale()))) requestMinimap();
+      if (mmData && mmDrawTimer > 0.4 && (minimapDirty || mmCamMoved())) {
+        mmDrawTimer = 0;
+        refreshMinimap();
+        minimapDirty = false;
       }
       drawMinimap();
     } catch (err) {

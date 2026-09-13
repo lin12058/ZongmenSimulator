@@ -46,18 +46,28 @@ public sealed class MapWorldService : IDisposable
     private const int RegionHotCap = 512;
     private const int RawCacheCap = 2048;      // chunk/comm 解压后 protobuf (免每块重复 GzUnwrap)
     private const int BlockLayersCap = 1024;   // blockLayersJson 结果 (块归属映射, 内容确定)
+    private const int PackCacheCap = 512;      // C4: 解压+反序列化后的 region/settle 包
     private readonly LruCache<TileEntry> _tileCache = new(TileCacheCap);
     private readonly LruCache<string> _gridCache = new(GridCacheCap);
     private readonly LruCache<byte[]> _regionHot = new(RegionHotCap);
     private readonly LruCache<byte[]> _rawCache = new(RawCacheCap);
     private readonly LruCache<(int, int)[][]> _blockLayersCache = new(BlockLayersCap);
+    /* C4: 每块请求都要按区域解 region/settle 包 (gzip→protobuf→对象), 同一区域在
+       邻块/多次请求中反复出现 → 反序列化结果按 world key 加 LRU, 免重复解。
+       包对象只读 (response 组装只搬运引用, 序列化后即丢) ⇒ 可安全共享。 */
+    private readonly LruCache<RegionPack> _regionPackCache = new(PackCacheCap);
+    private readonly LruCache<SettlePack> _settlePackCache = new(PackCacheCap);
 
     /// <summary>tile 缓存条目: 值 + 生成时的 VM 道路版本号 (T4)。</summary>
     private sealed record TileEntry(byte[] Gz, long RoadVer);
 
     /// <summary>service 层最近观测到的 roadVer (按 seed 前缀)。
-    /// roadVer 只在区域包生成(内含 A*)时前进, 故 tile 缓存命中时比对这里即可免抢 V8 门闩。</summary>
+    /// roadVer 只在区域包生成(内含 A*)时前进, 故 tile 缓存命中时比对这里即可免抢 V8 门闩。
+    /// C2: 读→写整段加 _roadVerLock, 且单调取大 —— 并发下「旧采样值覆盖新值」会让
+    /// tile 缓存误判新鲜。roadVer 在单个 VM 内只前进; VM 被 LRU 淘汰时由回调清掉本前缀
+    /// (新 VM 从 0 重新计数), 故取大不会跨实例留下虚假高版本。</summary>
     private readonly ConcurrentDictionary<string, long> _roadVerCache = new();
+    private readonly object _roadVerLock = new();
 
     /// <summary>本会话出现过的 seed 前缀 (World() 时登记) — 维护任务据此判定
     /// 「是否有已淘汰世界留下无主行」。必须在「取用/建立」时登记, 否则某个世界
@@ -76,17 +86,32 @@ public sealed class MapWorldService : IDisposable
     {
         _opt = opt;
         var jsDir = ZongmenPaths.ResolveEngineJsDir(opt, contentRoot);
-        _host = new JsEngineHost(jsDir, opt.MaxSeeds);
+        /* C1: 传淘汰回调 —— VM 被 LRU 淘汰时清掉「按 seed 前缀」的 roadVer 观测值,
+           否则新 VM 的 roadVer 从 0 重新计数会与旧观测值冲突 (tile 缓存判新鲜失准)。 */
+        _host = new JsEngineHost(jsDir, opt.MaxSeeds,
+            seed => { _roadVerCache.TryRemove(WorldKeys.SeedPrefix(seed), out _); });
         _mem = new MemoryVirtualContext();
         if (opt.PersistEnabled)
             _sql = new SqliteVirtualContext(ZongmenPaths.ResolveDbPath(opt, contentRoot));
         _maintTask = Task.Run(MaintenanceLoopAsync);
     }
 
-    private JsWorldVm World(string seed)
+    /// <summary>C2: 观测到 roadVer 后写入 (单调取大, 不覆盖更新的值)。</summary>
+    private void ObserveRoadVer(string prefix, long ver)
+    {
+        lock (_roadVerLock)
+        {
+            if (_roadVerCache.TryGetValue(prefix, out var cur) && cur >= ver) return;
+            _roadVerCache[prefix] = ver;
+        }
+    }
+
+    /// <summary>C1: 借出世界 VM (借出期内在途计数 >0, LRU 不会 Dispose 它)。
+    /// ⚠ 调用方必须用 using 包住整个使用期, 否则容量会短暂超标。</summary>
+    private JsEngineHost.VmLease World(string seed)
     {
         _seenSeedPrefixes.TryAdd(WorldKeys.SeedPrefix(seed), 0);   // P3: 登记已用过的世界
-        return _host.GetOrCreate(seed);
+        return _host.Lease(seed);
     }
 
     /* ---------------- 区块 ---------------- */
@@ -99,8 +124,8 @@ public sealed class MapWorldService : IDisposable
         /* R9: 同 key 并发 miss 合并 — 只 build 一次 */
         return BuildOnce(key, () =>
         {
-            var vm = World(seed);
-            var gz = BuildChunk(vm, ca, cb);
+            using var lease = World(seed);
+            var gz = BuildChunk(lease.Vm, ca, cb);
             Store(key, gz);
             return gz;
         });
@@ -157,15 +182,15 @@ public sealed class MapWorldService : IDisposable
 
         var gz = BuildOnce(key, () =>
         {
-            var vm = World(seed);
-            var g = BuildRegion(vm, i, j);
+            using var lease = World(seed);
+            var g = BuildRegion(lease.Vm, i, j);
             _regionHot.Set(key, g);
             _mem.SetData(key, g);
             return g;
         });
         /* 区域包含 A*(roadsNear) → 可能使 roadCache 前进; 刷新 service 层 roadVer,
            使后续 tile 缓存命中无需再进 V8 门闩 (T4 语义不变: 版本变则旧 tile 失效)。 */
-        _roadVerCache[WorldKeys.SeedPrefix(seed)] = World(seed).RoadVersion();
+        using (var lease = World(seed)) ObserveRoadVer(WorldKeys.SeedPrefix(seed), lease.Vm.RoadVersion());
         return gz;
     }
 
@@ -205,7 +230,10 @@ public sealed class MapWorldService : IDisposable
                 Tier = s.TryGetProperty("tier", out var tr) ? tr.GetInt32() : 0,
                 State = s.TryGetProperty("state", out var stt) ? stt.GetInt32() : 0,
                 ExpireTs = s.TryGetProperty("expireTs", out var ex) ? ex.GetInt64() : 0,
-                /* 城镇足迹 (§三): 区域包内冗余一份, 使单块路径不必再取 settle 包 */
+                /* B5/D15: 区域包已不再携带城镇足迹 (mapgen-server.settlementJson 只发骨架)。
+                   这里保留 TryGetProperty 读取仅为兼容旧持久化区域包 (_mem/SQLite 里可能仍有);
+                   新包读出即空 —— 真正的足迹由 GetTileBlock 的 needSettle 分支用 settle 包
+                   覆盖 (settle 包是唯一权威, 落库且可演化), 故区域包携带足迹纯属冗余。 */
                 Style = s.TryGetProperty("style", out var sy) && sy.ValueKind == JsonValueKind.String
                     ? sy.GetString() ?? "" : "",
                 StyleName = s.TryGetProperty("styleName", out var sn) && sn.ValueKind == JsonValueKind.String
@@ -246,8 +274,8 @@ public sealed class MapWorldService : IDisposable
 
         return BuildOnce(key, () =>
         {
-            var vm = World(seed);
-            var gz = BuildComm(vm, ci, cj);
+            using var lease = World(seed);
+            var gz = BuildComm(lease.Vm, ci, cj);
             Store(key, gz);
             return gz;
         });
@@ -302,8 +330,8 @@ public sealed class MapWorldService : IDisposable
 
         return BuildOnce(key, () =>
         {
-            var vm = World(seed);
-            var gz = BuildSettle(vm, i, j);
+            using var lease = World(seed);
+            var gz = BuildSettle(lease.Vm, i, j);
             Store(key, gz);
             return gz;
         });
@@ -339,11 +367,15 @@ public sealed class MapWorldService : IDisposable
         if (!e.TryGetProperty(name, out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
         foreach (var b in arr.EnumerateArray())
         {
+            /* C12: 逐字段 TryGetProperty —— 原 GetProperty 在缺字段时抛 JsonException,
+               且异常会中断整个 TileRequest (一个坏元素废掉整块响应)。
+               同文件其它可选字段早已用 TryGetProperty, 这里属漏改。 */
             list.Add(new BuildingDto
             {
-                Q = b.GetProperty("q").GetInt32(),
-                R = b.GetProperty("r").GetInt32(),
-                Kind = b.GetProperty("kind").GetString() ?? "",
+                Q = b.TryGetProperty("q", out var bq) ? bq.GetInt32() : 0,
+                R = b.TryGetProperty("r", out var br) ? br.GetInt32() : 0,
+                Kind = b.TryGetProperty("kind", out var bk) && bk.ValueKind == JsonValueKind.String
+                    ? bk.GetString() ?? "" : "",
                 Terrain = b.TryGetProperty("terrain", out var te) && te.ValueKind == JsonValueKind.String
                     ? te.GetString() ?? "" : "",
                 Tier = b.TryGetProperty("tier", out var ti) ? ti.GetInt32() : 0,
@@ -358,10 +390,11 @@ public sealed class MapWorldService : IDisposable
         if (!e.TryGetProperty(name, out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
         foreach (var r in arr.EnumerateArray())
         {
-            list.Add(new ResourceQuantDto
+            list.Add(new ResourceQuantDto       // C12: 同上, 缺字段不再抛异常
             {
-                Resource = r.GetProperty("resource").GetString() ?? "",
-                Amount = r.GetProperty("amount").GetInt32(),
+                Resource = r.TryGetProperty("resource", out var rr) && rr.ValueKind == JsonValueKind.String
+                    ? rr.GetString() ?? "" : "",
+                Amount = r.TryGetProperty("amount", out var am) ? am.GetInt32() : 0,
             });
         }
         return list;
@@ -403,17 +436,27 @@ public sealed class MapWorldService : IDisposable
         };
         public void Bump(uint mask)
         {
-            if ((mask & (uint)TileMask.Chunk) != 0) Chunk++;
-            if ((mask & (uint)TileMask.Region) != 0) Region++;
-            if ((mask & (uint)TileMask.Settle) != 0) Settle++;
-            if ((mask & (uint)TileMask.Poi) != 0) Poi++;
-            if ((mask & (uint)TileMask.Comm) != 0) Comm++;
+            /* C5: 原子自增 —— 原 int++ 在多线程并发 Bump 时会丢计数,
+               客户端带旧 rev 重拉时可能被判「未变化」而收不到新数据。 */
+            if ((mask & (uint)TileMask.Chunk) != 0) System.Threading.Interlocked.Increment(ref Chunk);
+            if ((mask & (uint)TileMask.Region) != 0) System.Threading.Interlocked.Increment(ref Region);
+            if ((mask & (uint)TileMask.Settle) != 0) System.Threading.Interlocked.Increment(ref Settle);
+            if ((mask & (uint)TileMask.Poi) != 0) System.Threading.Interlocked.Increment(ref Poi);
+            if ((mask & (uint)TileMask.Comm) != 0) System.Threading.Interlocked.Increment(ref Comm);
         }
     }
 
+    /* C5 显式契约 (勿删): 块级 rev 是「客户端缓存有效性」的唯一凭据。
+       任何会让某块某图层内容发生变化的服务端改动 (改足迹 / 建筑演化 / 实体状态迁移 /
+       道路版本前进 …) **必须** 调用 BumpBlockRev(seed, i, j, 图层位), 否则:
+         · 客户端带着旧 lastRevs 重拉 → Need(bit) 判 false → 服务端缺省下发该层
+         → 永久陈旧 (不报错、不抛异常, 只在画面上「改了没反应」)。
+       当前实现只在服务端「按需计算」时前进 (世界确定性无事件态), 故尚无调用者 —— 
+       接入事件/演化系统时, 这是第一处必须挂上的钩子。 */
     private readonly ConcurrentDictionary<string, BlockRevs> _blockRev = new();
 
-    /// <summary>事件钩子 (预留): 置某块某图层脏, 客户端下次带旧 rev 重拉时才会收到该层数据。</summary>
+    /// <summary>事件钩子: 置某块某图层脏, 客户端下次带旧 rev 重拉时才会收到该层数据。
+    /// 调用约束见上方「C5 显式契约」。键内含 seed 前缀, 由维护任务按活跃世界裁剪。</summary>
     public void BumpBlockRev(string seed, int i, int j, TileMask layers)
     {
         var revs = _blockRev.GetOrAdd("blk:" + WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j,
@@ -450,13 +493,15 @@ public sealed class MapWorldService : IDisposable
         if (!needChunk && !needRegion && !needSettle && !needPoi && !needComm)
             return resp;   // 全层 rev 未变: 最小响应 (验收 §8.6)
 
-        var vm = World(seed);
+        /* C1: 借出覆盖整个块构建期 (期间本 VM 不会被 LRU 淘汰; 内层各 GetXxxBytes
+           再各借一次, 计数嵌套累加, 各自归还)。 */
+        using var vm = World(seed);
         if (needChunk)
             resp.Chunk = UnwrapCached(WorldKeys.Chunk(seed, i, j), GetChunkBytes(seed, i, j));
 
         /* 块归属映射: 仅在需要 region/settle/poi/comm 层时向 JS 取一次 (结果走 LRU) */
         ((int, int)[] regions, (int, int)[] comms)? layers =
-            (needRegion || needSettle || needPoi || needComm) ? GetBlockLayers(vm, seed, i, j) : null;
+            (needRegion || needSettle || needPoi || needComm) ? GetBlockLayers(vm.Vm, seed, i, j) : null;
 
         /* 图层1/2/3 共用区域包: 聚落实体从 RegionPack.settlements 拆出 */
         if (needRegion || needSettle || needPoi)
@@ -470,13 +515,13 @@ public sealed class MapWorldService : IDisposable
             {
                 foreach (var (ri, rj) in layers!.Value.regions)
                 {
-                    var sp = DesFromGz<SettlePack>(GetSettleBytes(seed, ri, rj));
+                    var sp = SettlePackOf(seed, ri, rj);
                     foreach (var t in sp.Towns) plans[t.Id] = t;
                 }
             }
             foreach (var (ri, rj) in layers!.Value.regions)
             {
-                var pack = DesFromGz<RegionPack>(GetRegionBytes(seed, ri, rj));
+                var pack = RegionPackOf(seed, ri, rj);
                 if (needRegion)
                 {
                     resp.Regions.Add(new RegionData
@@ -580,6 +625,30 @@ public sealed class MapWorldService : IDisposable
 
     private static T DesFromGz<T>(byte[] gz) => ProtoCodec.DesFromByte<T>(GzUnwrap(gz));
 
+    /* C4: region/settle 包的「解压 + 反序列化」结果按 world key 缓存。
+       每块请求都要按 4~6 个区域解包, 同一区域在邻块/反复视野里重复出现;
+       旧实现是「解压结果只缓存字节级 raw, protobuf 反序列化每次都重做」。
+       包对象此后只被读取 (response 只搬引用, 序列化完即弃) ⇒ 共享安全。 */
+    private RegionPack RegionPackOf(string seed, int i, int j)
+    {
+        var key = WorldKeys.Region(seed, i, j);
+        var p = _regionPackCache.Get(key);
+        if (p != null) return p;
+        p = DesFromGz<RegionPack>(GetRegionBytes(seed, i, j));
+        _regionPackCache.Set(key, p);
+        return p;
+    }
+
+    private SettlePack SettlePackOf(string seed, int i, int j)
+    {
+        var key = WorldKeys.Settle(seed, i, j);
+        var p = _settlePackCache.Get(key);
+        if (p != null) return p;
+        p = DesFromGz<SettlePack>(GetSettleBytes(seed, i, j));
+        _settlePackCache.Set(key, p);
+        return p;
+    }
+
     /* T8: SQLite 命中后回填 _mem, 同一 key 后续读取不再走库 */
     private byte[]? ReadSqlBackfill(string key)
     {
@@ -612,16 +681,21 @@ public sealed class MapWorldService : IDisposable
             }
             else
             {
-                var v0 = World(seed).RoadVersion();
-                _roadVerCache[prefix] = v0;
+                using var l0 = World(seed);
+                var v0 = l0.Vm.RoadVersion();
+                ObserveRoadVer(prefix, v0);
                 if (cached.RoadVer == v0) return cached.Gz;
             }
         }
 
-        var vm = World(seed);
-        var json = vm.Call("tileJson", q, r);
-        var ver = vm.RoadVersion();     // 取生成后版本: 若生成途中恰好新路落成, 下次请求会按新版本重算
-        _roadVerCache[WorldKeys.SeedPrefix(seed)] = ver;
+        string json;
+        long ver;
+        using (var lease = World(seed))
+        {
+            json = lease.Vm.Call("tileJson", q, r);
+            ver = lease.Vm.RoadVersion();  // 取生成后版本: 若生成途中恰好新路落成, 下次请求会按新版本重算
+        }
+        ObserveRoadVer(WorldKeys.SeedPrefix(seed), ver);
         using var d = JsonDocument.Parse(json);
         var rt = d.RootElement;
         var f = rt.GetProperty("f");
@@ -672,8 +746,8 @@ public sealed class MapWorldService : IDisposable
         var hit = _gridCache.Get(cacheKey);
         if (hit != null) return hit;
 
-        var vm = World(seed);
-        var json = vm.Call("fieldGridJson", q0, q1, r0, r1);
+        string json;
+        using (var lease = World(seed)) json = lease.Vm.Call("fieldGridJson", q0, q1, r0, r1);
         _gridCache.Set(cacheKey, json);
         return json;
     }
@@ -684,8 +758,8 @@ public sealed class MapWorldService : IDisposable
         {
             if (_metaCache != null) return _metaCache;
         }
-        var vm = World(seed);
-        var json = vm.Call("metaJson");
+        string json;
+        using (var lease = World(seed)) json = lease.Vm.Call("metaJson");
         lock (_metaLock)
         {
             _metaCache ??= json;
@@ -737,6 +811,21 @@ public sealed class MapWorldService : IDisposable
                             _seenSeedPrefixes.Clear();      // 已淘汰者的行已删, 记忆重置为当前活跃集
                         }
                         foreach (var p in prefixes) _seenSeedPrefixes.TryAdd(p, 0);
+                    }
+                    /* C5: _blockRev 无别的淘汰路径 (每块一条 key), 长期漫游不同 seed 会线性增长
+                       → 按活跃 seed 前缀裁剪。被裁掉的只是「脏标记」, 通知客户端下一次
+                       全量拉取即可自愈, 不影响正确性。 */
+                    if (_host.LiveSeeds > 0)
+                    {
+                        var live = new List<string>();
+                        foreach (var seed in _host.Seeds) live.Add("blk:" + WorldKeys.SeedPrefix(seed) + ":");
+                        foreach (var k in _blockRev.Keys)
+                        {
+                            var keep = false;
+                            for (var li = 0; li < live.Count; li++)
+                                if (k.StartsWith(live[li], StringComparison.Ordinal)) { keep = true; break; }
+                            if (!keep) _blockRev.TryRemove(k, out _);
+                        }
                     }
                 }
                 catch (Exception ex)

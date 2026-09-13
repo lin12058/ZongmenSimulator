@@ -254,3 +254,67 @@ grep -n "function demandEdgesFor\|function roadsNear" verify/_test_center.html  
 grep -n "settlements" web/js/main.js web/js/pb.js      # D15
 grep -n "_regionHot\|GetRegionBytes" Server/Zongmen/Services/MapWorldService.cs  # C10
 ```
+
+---
+
+## 7. 处理进展（2026-09-13 晚 · 执行记录）
+
+> §5 的落地情况。⚠ 同一 worktree 当时有**两个会话并行**改 `Engine/js/mapgen.js`（见 `.workbuddy/memory/2026-09-13.md`
+> 的并发事故记录）；本节只记录可归因的改动。工作区**尚未提交** —— 避免把并行会话的半成品一并提交。
+
+### 已落地
+
+| 编号 | 内容 | 关键文件 |
+|---|---|---|
+| A1 | DI 拒绝边负缓存 + drain 让位（并行会话完成） | mapgen.js |
+| B1 | 贸易扫描窗口 ±1 → ±2（与 `demandEdgesFor` 对齐） | mapgen.js `tradeEdgesFor` |
+| C1 | V8 在途引用计数（`VmLease`）+ `_maxSeeds = Math.Max(1,·)` + 淘汰跳过 `InFlight>0` | JsEngineHost.cs |
+| A2 | `skeletonEdgesFor` 按 (i,j) 缓存（`skeletonCache`，随 init/configure 清） | mapgen.js |
+| A3 | `trialBump`/`trialClear` + `ROADFAILTRIALS_CAP`（有界 + 转正即删） | mapgen.js |
+| A4 | `roadSet()` 引用计数（`roadTileRef`），随 ROAD_CAP 淘汰回收 `roadTileIdx`（消幽灵路廊） | mapgen.js |
+| A13 | 三处「3x3 池」注释改 5x5（`rngDominated` 池实际 ±2） | mapgen.js |
+| A10 | 兜底 CFG 与 `mapgen-config.js` 逐项对齐 + 键集一致性 warn + 修 `:48-50` 矛盾注释 | mapgen.js |
+| B2 | 同格双聚落中心去重（`usedCenters` / `pickCenterExcluding`） | mapgen.js |
+| B3 | 同格双聚落 `pop`/`tier` 的 hash salt 含 k | mapgen.js |
+| B5/D15/C11 | 区域包不再携带城镇足迹（只发骨架）；足迹唯一权威 = settle 包 | mapgen-server.js + MapWorldService.cs |
+| C2 | `_roadVerCache` 加锁 + `ObserveRoadVer` 单调 max（防旧值回写） | MapWorldService.cs |
+| C4 | `_regionPackCache` / `_settlePackCache`，免每请求重复 gzip 解压 | MapWorldService.cs |
+| C5 | `BlockRevs.Bump` 用 `Interlocked.Increment` + 显式契约注释；维护循环按 live prefix 修剪 `_blockRev` | MapWorldService.cs |
+| C6 | `Task.Run(() => GetTileBlock(...), ct).WaitAsync(ct)` | MapWsHandler.cs |
+| C12 | `ReadBuildings`/`ReadResources` 改 `TryGetProperty`（缺字段不再中断整个 TileRequest） | MapWorldService.cs |
+| D2~D16 | 前端：静态层脏门控 / 小地图窗口+尺寸 / AbortController 超时 / pb 越界校验 / 输入健壮性（blur·deltaMode·捏合锚点·mouseleave）/ 面板转义等 | web/js/* |
+| E1 | 导出 `MapGen.resetRoads()`；预览页清空按钮改调它（内联副本已 sync） | mapgen.js + 灵脉预览.html |
+
+### 有意未闭环 / 无需处理
+
+- **A5**（region 首请求在 V8 门闩内阻塞 ~195.8ms）：`regionJson` 预算抽为常量 `REGION_ROAD_BUDGET = 9999`（仍 = 无上限）。
+  单纯调小预算会让区域包**永久少路** —— `BlockRevs.Region` 只在显式 `BumpBlockRev` 时变化、**不随 roadVer 前进**，
+  客户端不会自动重拉。要真正降阻塞必须配套「region rev 随道路增量前进 + 渐进补算」的跨 C#/前端契约改动，
+  实测收敛后再落（本次不做，避免静默丢路）。
+- **C10**（区域包不落库）：代码注释明示「区域行历史上只写不读，落库纯写放大」，属**设计取舍**，未改。
+- **D1**（`verify/_test_center.html` 旧版副本）：该文件在当前磁盘上**不存在**（gitignored，早前已移除）⇒ 无需处理。
+- **F2**（verify 残留脚本）：review 点名的 `_cdp_shot.mjs` / `_scratch_diag.mjs` 已不在未跟踪列表；
+  现存 `_*.mjs` / `_old_mapgen.js` 等是**并行会话的在用工作文件**，未擅自删除。
+
+### 验证结果（本机无 .NET SDK）
+
+| 项 | 结果 |
+|---|---|
+| `node --check`（web/js 全部 + mapgen.js + mapgen-server.js） | ✔ |
+| `verify/w5_sprite_range.mjs` | ✔ 全部通过 |
+| `verify/w6_bldg_face.mjs` | ✔ 23/23 |
+| `verify/sync_preview_inline.mjs --check` | ✔ 全部同步 |
+| 预览页 4 段内联脚本 `vm.Script` 解析 | ✔ |
+| `verify/w3_bfs_road.mjs` | 12/13；⑦（最慢单 region < 250ms 墙钟）FAIL |
+| `verify_map` / `w1` / `w2` / `w4` / `frontend_smoke` | 未跑（需 `dotnet build` + 起服务） |
+
+- **w3 ⑦ 说明**：本次 1190.4ms 与**并行会话改动前的独立记录（1138.9ms / 冷启合计 99358ms）同量级**，
+  且墙钟受两会话并发占 CPU 影响 ⇒ **不是本轮改动的回归**；建议在安静工作树上重测并重标定 `TIME_BUDGET_MS`。
+  其余 12 项（权重表 / 双预算上界 / 权重自洽 / 邻域剪枝 / 剪枝不改路径 / 确定性 / 建路率 97.9%）全 PASS，
+  建成路 739 条与并行会话基线**逐一致** ⇒ 引擎语义未变。
+
+### 提交前必做
+
+1. `dotnet build Server/Zongmen/Zongmen.csproj -v q` 编译 C#（本机缺 SDK，未编译）。
+2. 改了世界内容（B1/B2/B3/A10）⇒ **停服后把 `db/zongmen.sqlite*` 移出仓库再重启**，否则旧包优先回读、参数不生效。
+3. 起服务跑 `verify_map.mjs` + `w1/w2/w4` + `frontend_smoke.mjs` 三层回归。

@@ -16,11 +16,15 @@
  * ============================================================ */
 import fs from 'fs';
 import zlib from 'node:zlib';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const QUICK_GRID = process.argv.includes('--no-grid');
 const DO_ROADS = !process.argv.includes('--no-roads');
 
-const ROOT = 'D:/codes/宗门模拟器demo';
+/* 按脚本自身位置推导, 不硬编码 (目录更名会让绝对路径失效) */
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
 const load = (p) => fs.readFileSync(`${ROOT}/Server/Zongmen/Engine/js/${p}`, 'utf8');
 
 globalThis.window = globalThis;
