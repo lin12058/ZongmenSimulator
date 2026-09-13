@@ -19,9 +19,6 @@ Desktop.ini
 !.workbuddy/skills/
 !.workbuddy/skills/**
 
-# 个人待办/排查记录（非项目交付物）
-待办事项/
-
 # ======== 运行时产物 (不入库) ========
 
 # SQLite 运行数据库 (世界数据 KV 表实时落盘, 21MB+)
