@@ -119,6 +119,11 @@
   var regionCache = new Map();   // "i,j" -> 区域信息
   var settleCache = new Map();   // "i,j" -> 聚落数组
   var roadCache = new Map();     // "a|b" -> 道路
+  var roadTileIdx = new Set();   // 会话内已建路格 "q,r" 索引 (寻路复用: 通行权重 ROAD_W_ROAD)
+  /* ⚠ 只增不清 (缓存淘汰不回收): 路是既成事实, 被淘汰的路的格子仍按「已铺路」计价。
+     resetWorld/configure 时随 roadCache 一并清空。⚠ 引入建路顺序依赖: A* 对「已建路」
+     的代价=2 < 任何地形, 新路会主动并线到既有路廊; 建路顺序 = roadsNear 规范序
+     (hubBefore × 距离升序), 会话内确定, 不同访问序的会话在批边界路形可能略异。 */
   var commCache = new Map();     // "i,j" -> 群落 | null
   var veinNearCache = new Map(); // "q,r" -> 灵脉近邻 {d, v} | null
   var siteScoreCache = new Map();// "q,r" -> 选址打分 (纯函数, 只依赖地形/灵脉)
@@ -201,7 +206,7 @@
     nDetail = new NL.SimplexNoise(rng);
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); commCache.clear(); veinNearCache.clear();
+    roadCache.clear(); roadTileIdx.clear(); commCache.clear(); veinNearCache.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadFail.clear();
     roadVer = 0;
@@ -1021,13 +1026,34 @@
   }
 
   /* A* 寻路 (f = g + h, Dial 桶优先队列): 返回 [[q,r], ...] 或 null (超预算/不可达)
-     函数名保留 bfsRoad: 语义为「道路段寻路」, 且 verify/w3_bfs_road.mjs 以此名调用 */
-  function bfsRoad(sq, sr, tq, tr) {
+     roadTiles (可选): 会话内已建路格索引 (Set "q,r")。传入后, 落在「起点→终点
+     直线走廊」(垂直距离 ≤ ROAD_REUSE_CORRIDOR 格, 见 inCorridor) 内的已铺路格
+     每格只算 ROAD_W_ROAD(2) —— 新路顺路并线到既有路廊; 走廊外的旧路按正常地形
+     计价, 不会被远处干道拽离直线。此时 h 的下界系数同步降为
+     min(地形最小权重, ROAD_W_ROAD) = 2, 保证可采纳。不传 = 纯地形寻路
+     (回归测试/跨实例确定性用), 函数名保留 bfsRoad: verify/w3_bfs_road.mjs 以此名调用 */
+  function bfsRoad(sq, sr, tq, tr, roadTiles) {
     var maxCost = CFG.ROAD_COST_MAX | 0;
     var maxSteps = CFG.ROAD_STEPS_MAX | 0;
+    var roadW = CFG.ROAD_W_ROAD | 0;
+    var corrD = (CFG.ROAD_REUSE_CORRIDOR | 0);
     var minW = roadMinWeight();
+    var hMin = (roadTiles && roadW < minW) ? roadW : minW;   // 启发下界系数: 已铺路格更便宜
+    if (roadTiles) maxSteps = Math.floor(maxCost / Math.max(1, hMin));
+    /* ⚠ 复用模式下步数上限自动放宽: ROAD_STEPS_MAX(40) 是「每格最低 3 费」时代的
+       隐含总长上限 (40×3=120=预算), 路格 2 费后骑路长径最多 120÷2=60 步,
+       仍按 40 剪会把「沿旧路骑很远」的便宜路径误杀 (假不可达/次优, 独立
+       Dijkstra 对拍实测 4/148 例)。代价预算才是真约束, 步数只是搜索限界。 */
     var d0 = hexDist(sq, sr, tq, tr);
-    if (d0 > maxSteps || d0 * minW > maxCost) return null;   // 直线下界即超预算, 直接放弃
+    if (d0 > maxSteps || d0 * hMin > maxCost) return null;   // 直线下界即超预算, 直接放弃 (hMin=实际最低单格价)
+
+    /* 走廊判定预计算: v = 终点−起点; Qv = Q(v) (见 cartDist 二次型) */
+    var vdq = tq - sq, vdr = tr - sr;
+    var Qv = roadTiles ? (vdq * vdq + vdq * vdr + vdr * vdr) : 0;
+    /* 格 t 是否在 s→g 直线走廊内 (点到线段垂距 ≤ corrD, 全整数):
+       u = t−s; Q(x)=dq²+dq·dr+dr² (=|x|²/HEX_W²); B = 2·u.dq·v.dq + u.dq·v.dr + u.dr·v.dq + 2·u.dr·v.dr (=2u·v)。
+       垂距² = Q(u) − (B/2)²/Qv ≤ corrD²  ⟺  4·Q(u)·Qv − B² ≤ 4·corrD²·Qv;
+       垂足在线段上 ⟺ 0 ≤ B ≤ 2·Qv。 */
 
     var buckets = [];
     for (var b = 0; b <= maxCost; b++) buckets.push([]);
@@ -1061,16 +1087,34 @@
           /* 步数透镜: 前缀 ≥ ds 步 + 后缀 ≥ dn 步 > 预算 ⇒ 该格不可能在预算内完成
              (两侧都是下界, 故为可采纳剪枝, 不改变可行路径集合) */
           if (ds + dn > maxSteps) continue;
-          /* h = 最小权重 × ⌊笛卡尔欧氏距离⌋ (cartDist: 两端点世界坐标的实际
-             直线距离, 以格间距为单位取整 —— 恒等式见 cartDist 注释, 非六边格
-             步数)。欧氏启发优于 hexDist: 平地上 hexDist 会让所有单调格 f 相同
-             (整片同桶, 路形随扩展序锯齿), 欧氏则让直线走廊的格 f 最低、最先
-             展开 ⇒ 等代价路径向直线收敛。向下取整 ⇒ h 仍是可采纳下界 */
-          var h = minW * cartDist(nx, ny, tq, tr);             // 剩余代价可采纳下界 (实际笛卡尔欧氏距离)
+          /* h = hMin × ⌊笛卡尔欧氏距离⌋ (cartDist: 两端点世界坐标的实际直线距离,
+             以格间距为单位取整 —— 恒等式见 cartDist 注释, 非六边格步数)。欧氏启发
+             优于 hexDist 分层: 平地上全部单调格同 f (整片同桶, 路形随扩展序锯齿),
+             欧氏让直线走廊的格 f 最低、最先展开 ⇒ 等代价路径向直线收敛。
+             向下取整 + hMin ≤ 任何单格实际权重 ⇒ h 仍是可采纳下界 */
+          var h = hMin * cartDist(nx, ny, tq, tr);             // 剩余代价可采纳下界 (实际笛卡尔欧氏距离)
           if (g + h > maxCost) continue;                       // 下界剪枝: 该分支必超预算 (省一次 fields)
           var nk = nx + ',' + ny;
           if (closed.has(nk)) continue;
-          var ng = g + roadWeight(fields(nx, ny));
+          var ng;
+          if (roadTiles && roadTiles.has(nk)) {
+            /* 已铺路格: 仅直线走廊(胶囊体)内享受复用价 2, 走廊外按地形计价 (不绕远路)。
+               垂足越出线段时按到较近端点的距离计 (与「点到线段距离」语义一致) */
+            var udq = nx - sq, udr = ny - sr;
+            var Qu = udq * udq + udq * udr + udr * udr;
+            var Bl = 2 * udq * vdq + udq * vdr + udr * vdq + 2 * udr * vdr;
+            var inCorr;
+            if (Bl < 0) inCorr = Qu <= corrD * corrD;                       // 垂足越过起点 → 到起点距离
+            else if (Bl > 2 * Qv) {                                         // 垂足越过终点 → 到终点距离
+              var gdq = nx - tq, gdr = ny - tr;
+              inCorr = (gdq * gdq + gdq * gdr + gdr * gdr) <= corrD * corrD;
+            } else {
+              inCorr = 4 * Qu * Qv - Bl * Bl <= 4 * corrD * corrD * Qv;     // 垂距² ≤ D²
+            }
+            ng = g + (inCorr ? roadW : roadWeight(fields(nx, ny)));
+          } else {
+            ng = g + roadWeight(fields(nx, ny));
+          }
           if (ng + h > maxCost) continue;                      // 权重剪枝 (实际权重 ≥ 下界)
           var old = dist.has(nk) ? dist.get(nk) : 1e18;
           if (ng < old) {
@@ -1158,7 +1202,7 @@
              会得到同一路径的相反点列, 破坏跨会话一致性。 */
           var pA = a, pB = b;
           if (b.id < a.id) { pA = b; pB = a; }
-          var path = bfsRoad(pA.q, pA.r, pB.q, pB.r);
+          var path = bfsRoad(pA.q, pA.r, pB.q, pB.r, roadTileIdx);   // 已建路格代价 2: 新路并线旧路廊
           if (!path) { setAdd(roadFail, rkey, ROADFAIL_CAP); continue; }
           var pts = [], tset = new Set();
           for (var pj = 0; pj < path.length; pj++) {
@@ -1171,6 +1215,7 @@
                    x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x),
                    y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
           cacheSet(roadCache, rkey, road, ROAD_CAP);
+          tset.forEach(function (t) { roadTileIdx.add(t); });      // 路格并入复用索引 (add-only)
           roadVer++;                               // 新道路落成 → tile onRoad 缓存整体失效
         }
         out.push(road);
@@ -1342,7 +1387,7 @@
     commCache.clear(); veinNearCache.clear();
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); roadFail.clear();
+    roadCache.clear(); roadTileIdx.clear(); roadFail.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     roadVer = 0;
   }

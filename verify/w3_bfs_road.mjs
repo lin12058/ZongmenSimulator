@@ -12,7 +12,7 @@
  *   故本回归改为直接断言 BFS 的语义契约。
  *
  * 本回归锁七件事:
- *   ① 权重表与文档 §二 一致 (水4 / 平地3 / 林5 / 山8, 8 个 biome 全覆盖)
+ *   ① 权重表与文档 §二 一致 (深海8/浅海6/沙岸4/草地3/林地4/沙漠5/山地8/雪峰8, 8 个 biome 全覆盖)
  *   ② 双预算上界: 任何成功路径 Σ权重 ≤ COST_MAX 且 步数 ≤ STEPS_MAX
  *   ③ 权重累加自洽: Σ权重 ∈ [minW×hexDist, COST_MAX] (下界=最便宜地形直连)
  *   ④ 邻域剪枝: 直线下界即超预算的对必须返回 null (不再跨大陆找路)
@@ -79,18 +79,18 @@ const REF = makeEngine(REF_SRC);
 
 console.log(`== 道路 A* 寻路回归 (COST_MAX=${COST_MAX}, STEPS_MAX=${STEPS_MAX}, ROAD_W=[${W}]) ==\n`);
 
-/* ---- ① 权重表契约 (文档 §二) ---- */
+/* ---- ① 权重表契约 (文档 §二, 2026-09-13 用户拍板新表) ---- */
 {
   const BIOME = MG.BIOME;
   const expect = {};
-  expect[BIOME.DEEP] = 4; expect[BIOME.OCEAN] = 4; expect[BIOME.BEACH] = 4;
-  expect[BIOME.GRASS] = 3; expect[BIOME.DESERT] = 3;
-  expect[BIOME.FOREST] = 5;
+  expect[BIOME.DEEP] = 8; expect[BIOME.OCEAN] = 6; expect[BIOME.BEACH] = 4;
+  expect[BIOME.GRASS] = 3; expect[BIOME.DESERT] = 5;
+  expect[BIOME.FOREST] = 4;
   expect[BIOME.MOUNTAIN] = 8; expect[BIOME.SNOW] = 8;
   let ok = Array.isArray(W) && W.length === 8;
   const bad = [];
   for (const k of Object.keys(expect)) if (W[k] !== expect[k]) { ok = false; bad.push(`${k}:${W[k]}≠${expect[k]}`); }
-  check('权重表 = 文档 §二 (水4/平地3/林5/山8, 8 个 biome 全覆盖)', ok, bad.join(' '));
+  check('权重表 = 文档 §二 (深海8/浅海6/沙岸4/草3/林4/沙漠5/山8/雪8, 8 个 biome 全覆盖)', ok, bad.join(' '));
   const minW = Math.min(...W);
   check('roadMinWeight() = 权重表最小值 (下界剪枝用)', MG.roadWeight({ biome: BIOME.GRASS }) === 3 && minW === 3, String(minW));
 }
