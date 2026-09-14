@@ -73,6 +73,7 @@ node --check web/js/*.js          # 前端语法
   位级一致，纯视觉、不需同步，非隐患）；`web/server.js` 是已标注的「旧版预览备用」静态服务（8137），无害。
 - 全绿标准：`结果: 全部通过 ✔`，退出码 0。
 - 改 `web/js/mapclient.js`（revs/连接状态机）务必跑 `w1_client_revs.mjs` —— `verify_map.mjs` 只覆盖服务端契约，**覆盖不到客户端记账**。
+- ⚠ **`w3_bfs_road.mjs` ⑦ 的两条「墙钟阈值」是机器绝对速度门槛，跨机必红，别当回归**：第 3 慢单 region < 400ms / 最慢 < 500ms。实测接手机 i7-6700HQ（2.6GHz 移动四核 / 15.8G / Win10 1903）第 3 慢 **550ms** / 最慢 **936ms** ⇒ 2 项失败，而**功能类 8 项 + 建路率 95.6% 全过**。换机器复验时先看「功能断言是否全过」，再按本机基线解释 ⑦；要让它真能跨机，应改成「先跑一段固定 CPU 基准，再按倍率缩放阈值」的相对校准。
 - 改缓存/并发（`blockLayersJson`/`roadVer`/`BuildOnce`/VM 池）跑 `w2_concurrency.mjs`。
 - 改 `Engine/js/mapgen.js`（尤其 road/城镇/贸易）必须跑 `w3_bfs_road.mjs` + `check_preview_settle_road.mjs`。
 - 大范围排查空白块/毒块用 `scan_poison.mjs`（注意耗时：1681 块 ≈ 65s）。
@@ -123,6 +124,8 @@ node verify/shot.mjs "http://127.0.0.1:8140/index.html?seed=42&nofade=1&qt=-51&r
 - **`--screenshot=` 的路径要先 `path.resolve()` 成绝对路径**：Chrome 对相对路径的解析基准与本进程不一致，
   用相对路径会「exit=0 但没落盘」。
 - **CDP 方案（`verify/cdp_screenshot.mjs`）在本机会被 SIGTERM**（长驻 spawn），只能作为兜底尝试。
+- ⚠ **CDP 的「取数」通道对本页会永久挂起**（`Runtime.evaluate` 与 `Page.captureScreenshot` 均复现，连 `verify/cdp_feat.mjs` 也挂 >100s）⇒ 别在 CDP 上耗时间。可靠替代 = **探针页 + 像素差分**：页面内注入脚本驱动点击/平移，事实用 `window.__probe()` 暴露的**整数/坐标**读出，面积/位移类量用 `live_cap.mjs` 截两态图做逐像素差分 + 连通域统计。
+- ⚠ **量「已渲染的目标」别把期望屏幕坐标硬编码进探针**：实测偏 >60px 全废（相机取整 + 视差 + 精灵底边偏移三者叠加）。正解 = **从新旧两态差分自证位置**（有标记态 vs 无标记态逐像素差分 → 连通域质心），或直接读 `__probe()` 里已暴露的事实字段。
 - `?capture=1` 页内合成路径已修复（见 §9 的 frameCount 门槛）：产出 `verify/capture.png`，可作交叉验证，
   但色彩偏白（drawImage 读回色彩空间差异），**渲染判据仍以 shot.mjs 的 `--screenshot` 为准**。
 - **预览页（`灵脉预览.html`）可复现视觉断言三件套**（改预览页渲染后用它做定点比对）：
@@ -256,4 +259,9 @@ tasklist | grep -i zongmen || echo "无进程"
 4. 验完 **只 kill 自己的 PID**，再删 `_vmsrv/` 与临时库。
 > 注：build 会用项目内的 `appsettings.json` 覆盖输出目录 → **写完临时配置后不要再 build**。
 > 另：`verify/ws_size_fullmap.mjs` 注释里的「8141 独立实例」是历史遗留，别当成约定端口（本次就撞上 8141 被占用）。
+
+## 12. 两个跨机 / 打包类经验（2026-09-14 九版收尾）
+- **u16 精灵通道可以「复合打包」装两个量，别为此加通道或改 protobuf**：灵脉峰的海拔通道是 u16 量化（值域 [0,1]），要同时传「灵脉等级 0~2」+「该格真实海拔 0~1」时，写入端压成 `iElev = (等级 + 海拔) / 3`，shader 端 `vz = clamp(iElev,0,1)*3` → `等级 = floor(vz)` / `海拔 = frac(vz)`。**除数取 3 是因为上界 (2+1)/3 = 1.0 恰好不溢出** —— 换量纲时先算上界再定除数。⚠ 副作用：大世界山仍直传海拔（走 else-if 分支），**同一通道两种语义**，必须在 shader 注释里钉死。
+- **对 CRLF 文本文件做「定点替换 / 追写」脚本前先 normalize 成 LF，最后统一写回 CRLF**：本仓库的 `.md`（`.workbuddy/memory/`、`待办事项/`、skill）**全是 CRLF**，用编辑器类工具追写会混入裸 LF ⇒ 行尾不一致、`git diff` 变整文件重写（历史上踩过一次）。做法：`readFileSync(f,'utf8').replace(/\r\n/g,'\n')` → 替换/拼接 → `replace(/\n/g,'\r\n')` 写回；收尾断言「裸 LF 残留 = 0」。
+- **定点替换脚本要逐条断言「恰好命中 1 次」**：`m.split(old).length - 1 !== 1` 立即抛错终止，避免规则静默命中 0 处或误命中多处（比事后 grep 复核更早暴露问题）。
 

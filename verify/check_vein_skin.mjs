@@ -29,6 +29,10 @@
  *   C. 山地底座契约 (2026-09-14 九版, 用户: "灵脉在山地要在原来的山的基础上加上高度")
  *    14. shape.terrainBase 有效 (0<=tb<=2); 引擎 LIFT_CORE 三档 >= 0.70 (⇒ 灵脉格必在山地档
  *        以上, 底座不为 0); 大档底座 >= 3 uR, 且大档上屏总高 (底座 + 灵脉峰) <= 11 uR
+ *    15. shape.terrainBaseW 有效 (0 <= tbw <= 1.2) —— 底座**宽度**倍率 (十版默认 0)
+ *    16. **又高又瘦** (2026-09-15 十版, 用户: "我的目标是又高又瘦的"): 大档上屏
+ *        **总高 > 总宽** (W/H < 1, 含底座) —— 九版把底座宽度也叠上 ⇒ W 9.9 > H 8.0,
+ *        整座灵峰读起来"变宽了"; 本条把这个退化钉死
  *
  * 用法: node verify/check_vein_skin.mjs
  * ============================================================ */
@@ -173,7 +177,8 @@ const h2 = 0.5;
 const W = 3.4641016 * (1.55 + 0.65 * h2) * (0.82 + 0.22 * sh.hScale) * sh.wScale;
 const H = (3.3 + 1.2 * 0.5) * sh.hScale;
 console.log(`  屏幕方框 (大档, hash 中位): W/H = ${(W / H).toFixed(3)} (1.00 = 正方, 山形不被横向拉宽)` +
-            ' —— sizeScale 同乘 W/H, 不改此比值');
+            ' —— 仅**灵脉峰自身** (不含山地底座); sizeScale 同乘 W/H, 不改此比值。' +
+            ' 含底座的上屏总框见下面 §C (十版起只加高不加宽 ⇒ 总框 W/H < 1)');
 
 /* 14. **山地底座** (2026-09-14 九版) —— 用户: "灵脉的高度如果在山地要在原来的山的基础上加上
        高度, 避免看不见"。灵脉中心格的海拔由引擎 §八「灵脉地形迁就」抬到 LIFT_CORE, 故该格
@@ -182,6 +187,9 @@ console.log(`  屏幕方框 (大档, hash 中位): W/H = ${(W / H).toFixed(3)} (
 console.log('\n== 灵脉契约 C: 山地底座 (shape.terrainBase ↔ 引擎灵脉抬升) ==');
 const TB = sh.terrainBase;
 check('shape.terrainBase 有效 (0 <= tb <= 2)', Number.isFinite(TB) && TB >= 0 && TB <= 2, String(TB));
+const TBW = sh.terrainBaseW;
+check('shape.terrainBaseW 有效 (0 <= tbw <= 1.2, 底座宽度倍率; 0 = 只加高不加宽)',
+  Number.isFinite(TBW) && TBW >= 0 && TBW <= 1.2, String(TBW));
 const LC = MG.CFG && MG.CFG.LIFT_CORE;
 check('引擎 LIFT_CORE 三档均 >= 0.70 (⇒ 灵脉格必在山地档以上, 底座不为 0)',
   Array.isArray(LC) && LC.length === 3 && LC.every((v) => v >= 0.70), JSON.stringify(LC));
@@ -200,6 +208,26 @@ if (Array.isArray(LC)) {
               ' | 上限 (雪峰顶) ' + baseHi.toFixed(2));
   console.log('  ⇒ 大档上屏总高 ' + (baseLo + E[0][0]).toFixed(2) + '~' + totHi.toFixed(2) + ' uR' +
               ' (底座 + 峰: 与周围大世界山同高再冒出一个峰头 ⇒ 不再"看不见")');
+  /* 16. **又高又瘦** (2026-09-15 十版) —— 用户: "我的目标是又高又瘦的"。
+     PROP_VS: W = 3.4641*uR*(1.55+0.65*h2)*(0.82+0.22*hs)*ss*ws + [底座宽 ×terrainBaseW]
+              H = uR*(3.3+1.2*hrand)*[hs*ss + 底座倍率]                 (h2/hrand 取中位)
+     九版 terrainBaseW 等价 1.0 ⇒ 大档 W ≈ 9.9 > H ≈ 8.0 (W/H 1.24) ⇒ 灵峰"变宽" ⇒ 本条钉死。 */
+  const mtW = (e) => 3.4641016 * (1.55 + 0.65 * 0.5) * (0.82 + 0.22 * e);
+  const wPeak = mtW(sh.hScale) * SS * sh.wScale;
+  const wBase = TBW * mtW(LC[0]);
+  const wAll = wPeak + wBase;
+  const hAllLo = baseLo + E[0][0], hAllHi = totHi;
+  check('大档"又高又瘦": 上屏总高 > 总宽 (W/H < 1, 含底座)',
+    hAllLo > wAll && hAllHi > wAll,
+    `宽 ${wAll.toFixed(2)} (峰 ${wPeak.toFixed(2)} + 底座 ${wBase.toFixed(2)}) vs 高 ${hAllLo.toFixed(2)}~${hAllHi.toFixed(2)} uR` +
+    ` ⇒ W/H ${(wAll / hAllLo).toFixed(2)}~${(wAll / hAllHi).toFixed(2)}`);
+  console.log('  上屏总框 (大档, 抬升下限 e=' + LC[0] + '): 宽 ' + wAll.toFixed(2) +
+              ' × 高 ' + hAllLo.toFixed(2) + '~' + hAllHi.toFixed(2) + ' uR' +
+              ' ⇒ W/H ' + (wAll / hAllLo).toFixed(2) + ' ｜ 宽构成 = 峰 ' + wPeak.toFixed(2) +
+              ' + 底座 ' + wBase.toFixed(2) + ' (terrainBaseW=' + TBW + ')');
+  const mtnW = mtW(LC[0]), mtnH = (3.3 + 1.2 * 0.5) * mtnHs(LC[0]);
+  console.log('  对照·同海拔大世界山: ' + mtnW.toFixed(2) + ' × ' + mtnH.toFixed(2) +
+              ' uR ⇒ W/H ' + (mtnW / mtnH).toFixed(2) + ' (灵峰要明显比它瘦)');
 }
 
 console.log('\n========== 结果: ' + (failures ? failures + ' 项失败' : '全部通过 ✔') + ' ==========');

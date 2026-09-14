@@ -20,7 +20,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const OUT_HTML = path.join(ROOT, 'verify', '_bldg_sheet.html');
 const OUT_PNG = path.join(ROOT, 'verify', '_bldg_sheet.png');
-const CHROME = 'C:/Users/Administrator/AppData/Local/Google/Chrome/Application/chrome.exe';
+/* ⚠ 不要硬编码用户目录: 旧版写死 C:/Users/Administrator (A 机) ⇒ 换机静默 ENOENT 渲染失败。
+   与 verify/live_cap.mjs / tools/prop_sheet.mjs 同口径走 homedir(); 可用 CHROME_PATH 覆盖。 */
+const CHROME = process.env.CHROME_PATH ||
+  path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe');
+if (!fs.existsSync(CHROME)) { console.error('未找到 Chrome: ' + CHROME + ' (可用 CHROME_PATH 指定)'); process.exit(2); }
 
 /* ---------- 载入绘制核心 (浏览器/Node 双后端同一份真源) ---------- */
 const src = fs.readFileSync(path.join(ROOT, 'web', 'js', 'bldg_ink.js'), 'utf8');

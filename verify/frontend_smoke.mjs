@@ -217,7 +217,7 @@ async function checkPalettes() {
    —— 这正是 N11 当时的 bug 类别 (小地图读 `mmData.q1/r1`, 而 `/api/map/fields` 从未下发
    q1/r1 → 恒 undefined → 越界判断恒假 → 小地图自上线起一直是空框)。
    只扫「变量名无歧义」的 4 类 (resp/cm/st/lr), 歧义名 (m/g/rg/v 会被当作 meta/字段网格/
-   内层对象等复用) 跳过以免误报; cm.elementRGB 是客户端本地 memo 字段, 白名单放行。 */
+   内层对象等复用) 跳过以免误报; cm.elementRGB 与 st._anc 是客户端本地 memo 字段, 白名单放行。 */
 function checkDecodedFieldAccess() {
   const pb = fs.readFileSync(path.join(ROOT, 'web', 'js', 'pb.js'), 'utf8');
   /* 抽出一个 decode/parse 函数的产出字段集: 既含对象字面量初值, 也含 m.xxx = 赋值 */
@@ -243,7 +243,9 @@ function checkDecodedFieldAccess() {
     Object.values(shapes).every((s) => s && s.size >= 3),
     Object.entries(shapes).map(([k, v]) => `${k}=${v ? v.size : 'null'}`).join(' '));
 
-  const whitelist = { cm: new Set(['elementRGB']), resp: new Set(), st: new Set(), lr: new Set() };
+  /* st._anc = 聚落匾额水平锚点的**客户端 memo** (main.js 在首次绘制时按地块算好并缓存,
+     见 `if (!st._anc) { ... st._anc = {x,y} }`), 与 cm.elementRGB 同类: 非服务端下发字段。 */
+  const whitelist = { cm: new Set(['elementRGB']), resp: new Set(), st: new Set(['_anc']), lr: new Set() };
   const bad = [];
   let used = 0;
   for (const f of ['main.js', 'mapclient.js']) {

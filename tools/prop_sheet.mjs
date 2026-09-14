@@ -9,9 +9,12 @@
  *      所以画面里是「横向拉宽」的。只看原图会把比例判错 —— 这一条正是
  *      「灵脉山体样子不对」最容易踩的坑。尺寸条含**灵脉 大/中/小 三档** (同一 hash
  *      并排) ⇒ 等级之间的高度差可直接比对; 高度倍率真源 web/js/vein-skin.js levels[]。
+ *      ⚠ 灵脉行已含**山地底座** (vein-skin.js terrainBase 加高 / terrainBaseW 加宽,
+ *        默认只加高 ⇒ 又高又瘦), 海拔取 --e (默认 0.80 = 引擎 LIFT_CORE[0])。
  * 用法:
  *   node tools/prop_sheet.mjs                 # 全部
  *   node tools/prop_sheet.mjs --R=8           # 换格半径 (默认 8 = 线上 hexR)
+ *   node tools/prop_sheet.mjs --e=0.95        # 换灵脉格海拔 (看底座随海拔长高)
  * 产出: verify/_prop_sheet.html + verify/_prop_sheet.png
  * 注意: 本机 Chrome 必须用旧版 --headless (--headless=new 忽略 --window-size)
  * ============================================================ */
@@ -25,8 +28,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const OUT_HTML = path.join(ROOT, 'verify', '_prop_sheet.html');
 const OUT_PNG = path.join(ROOT, 'verify', '_prop_sheet.png');
-const CHROME = 'C:/Users/Administrator/AppData/Local/Google/Chrome/Application/chrome.exe';
+/* ⚠ 不要硬编码用户目录: 旧版写死 C:/Users/Administrator (A 机) ⇒ 换机静默 ENOENT 渲染失败。
+   与 verify/live_cap.mjs 同口径走 homedir(); 需要时用环境变量 CHROME_PATH 覆盖。 */
+const CHROME = process.env.CHROME_PATH ||
+  path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe');
+if (!fs.existsSync(CHROME)) { console.error('未找到 Chrome: ' + CHROME + ' (可用 CHROME_PATH 指定)'); process.exit(2); }
 const R = Number((process.argv.find((a) => /^--R=/.test(a)) || '').split('=')[1]) || 8;
+/* 灵脉格的海拔 —— 灵脉中心格被引擎 §八抬到 LIFT_CORE = [0.80,0.75,0.70], 取大档 0.80;
+   底座高度由它决定 (与 renderer.js 同公式)。换海拔看效果: --e=0.95 */
+const E_BASE = Number((process.argv.find((a) => /^--e=/.test(a)) || '').split('=')[1]) || 0.80;
 const MODE = process.argv.includes('--hero') ? 'hero' : 'all';
 
 /* 精灵清单: [spriteId, 名称] —— spriteId = row*8+col */
@@ -71,6 +81,7 @@ var VS = globalThis.VeinSkin || window.VeinSkin;
 var AT = IT.buildAtlas();
 var PX = IT.PX, TILE = IT.TILE;
 var R = ${R};
+var E_BASE = ${E_BASE};   // 灵脉格海拔 (= 引擎 LIFT_CORE[0]; 决定底座高)
 var MODE = '${MODE}';
 var ZS = [0.8, 1.4, 2.2, 3.0];
 /* 灵脉峰: 五行 50..54 与 异灵根 32..35 —— 与 renderer.js PROP_VS 的分支同口径 */
@@ -104,9 +115,21 @@ function boxOf(id, z, hashSeed, level) {
   else if (id > 61.5 && id < 63.5) hs = 0.72 + 0.30 * h5;
   else hs = 1.05;
   var ss = (id > 59.5 && id < 61.5) ? 0.30 : (isVein(id) ? (VS.shape.sizeScale || 1.0) : 1.0);
-  var W = 3.4641016 * R * (1.55 + 0.65 * h2) * (0.82 + 0.22 * hs) * ss * ws;
-  var H = R * (3.3 + 1.2 * h5) * hs * ss;
-  return { W: W * z, H: H * z, W0: W, H0: H, hs: hs };
+  /* ⚠ 九/十版: 灵脉格要叠「山地底座」—— 与 renderer.js PROP_VS 灵脉分支同口径:
+     高度 ×terrainBase (**只加高**), 宽度 ×terrainBaseW (十版默认 **0 = 不加宽**);
+     底座高按「大世界山同档公式」由**该格真实海拔** E_BASE 决定 (默认 0.80 = 引擎 LIFT_CORE[0])。
+     不叠底座会把灵脉在实机里的比例判错 —— 实机灵峰 = 峰 + 底座。 */
+  var tb = 0, tbw = 0, bhs = 0;
+  if (isVein(id)) {
+    tb = (VS.shape.terrainBase != null) ? VS.shape.terrainBase : 1.0;
+    tbw = (VS.shape.terrainBaseW != null) ? VS.shape.terrainBaseW : 0;
+    bhs = E_BASE > 0.84 ? 0.95 + 0.60 * Math.min(1, (E_BASE - 0.84) / 0.12)
+        : (E_BASE > 0.70 ? 0.55 + 0.75 * Math.min(1, (E_BASE - 0.70) / 0.14) : 0);
+  }
+  var W = 3.4641016 * R * (1.55 + 0.65 * h2) * (0.82 + 0.22 * hs) * ss * ws
+        + tbw * 3.4641016 * R * (1.55 + 0.65 * h2) * (0.82 + 0.22 * bhs);
+  var H = R * (3.3 + 1.2 * h5) * hs * ss + tb * R * (3.3 + 1.2 * h5) * bhs;
+  return { W: W * z, H: H * z, W0: W, H0: H, hs: hs, bhs: bhs };
 }
 
 var root = document.getElementById('root');
@@ -130,7 +153,8 @@ function sizeRow(z) {
       cx.drawImage(cellOf(gr[1]), 0, 0, PX, PX, (cw - b.W) / 2, top, b.W, b.H);
       var d = document.createElement('div'); d.className = 'zi';
       d.appendChild(cv);
-      d.insertAdjacentHTML('beforeend', '<span>' + gr[0] + '<br>' + pad(b.W0, 1) + '×' + pad(b.H0, 1) + '</span>');
+      d.insertAdjacentHTML('beforeend', '<span>' + gr[0] + '<br>' + pad(b.W0, 1) + '×' + pad(b.H0, 1) +
+        (b.bhs ? ' <b style="color:#8a7f6b">+底座</b>' : '') + '</span>');
       wrap.appendChild(d);
     });
     line.appendChild(wrap);

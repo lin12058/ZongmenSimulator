@@ -115,7 +115,8 @@
     var s = (vs && vs.shape) || null;
     var out = { h: (s && s.hScale) || 1.55, w: (s && s.wScale) || 0.80,
                 sc: (s && s.sizeScale) || 1.0,
-                tb: (s && s.terrainBase != null) ? s.terrainBase : 1.0, lv: [] };
+                tb: (s && s.terrainBase != null) ? s.terrainBase : 1.0,
+                tbw: (s && s.terrainBaseW != null) ? s.terrainBaseW : 0, lv: [] };
     /* 三档 (大/中/小) 的高度倍率与收窄包络; 缺配置 → 三档一律退回 shape.hScale
        ⚠ 顺序即 mapgen.js veins[].level (0大 / 1中 / 2小), 契约见 verify/check_vein_skin.mjs */
     var EPS = 1.0 / 1024.0;                       // 浮点字面量精度 (避免 GLSL 里出现 0.7200001)
@@ -143,6 +144,10 @@
   /* 灵脉格「山地底座」倍率 (vein-skin.js shape.terrainBase): 见 PROP_VS 灵脉分支 ——
      把该格真实海拔对应的**那层山**垫在灵脉峰之下 (平原格自动为 0)。 */
   var VBASE = VEIN_SHAPE.tb.toFixed(3);
+  /* 灵脉格「山地底座」的**宽度**倍率 (vein-skin.js shape.terrainBaseW): 十版起默认 0
+     —— 底座只加高、不加宽。九版宽度也叠加 ⇒ 上屏总宽 ≈ 9.9 uR > 总高 8.0 uR,
+     整座灵峰读起来"变宽了" (用户 2026-09-15: "你这个怎么变成宽度了? 我要又高又瘦的")。 */
+  var VBASEW = VEIN_SHAPE.tbw.toFixed(3);
   /* 大世界山/雪峰的高度倍率档位 —— 山地底座与地形分支**共用同一组常量**,
      避免"灵脉底座用的山高"与"旁边真山"两套数字各自漂移。 */
   var MTN_LO = (0.55).toFixed(3), MTN_HI = (1.30).toFixed(3);
@@ -180,7 +185,11 @@
          不改这套相对高矮; 但缩小后灵脉不再恒高于雪峰, 识别改由晕圈/名牌承担。
        ⚠ 九版: 灵脉格再垫一层「**山地底座**」(vein-skin.js shape.terrainBase) —— 该格真实
          海拔对应的那层山 (与大世界山同档公式), 不乘 sizeScale; 峰体叠在它之上。
-         平原/水面格 (海拔 < 0.70) 底座为 0 ⇒ 只影响山地, 不影响水中孤峰。 */
+         平原/水面格 (海拔 < 0.70) 底座为 0 ⇒ 只影响山地, 不影响水中孤峰。
+       ⚠ 十版: 底座**只加高、不加宽** (shape.terrainBaseW, 默认 0) —— 九版把底座宽度
+         一并叠加 ⇒ 上屏总宽 ≈9.9 uR > 总高 ≈8.0 uR, 灵峰读起来"变宽了" (用户 2026-09-15:
+         "我的目标是又高又瘦的")。现在 W 只剩灵脉峰自身 (≈3.1 uR, 见 vbw=0), 总高不变
+         ⇒ **W/H ≈ 0.4 的瘦高峰**; 要更瘦收 wScale, 要更高抬 terrainBase (只乘高度)。 */
     '  float hs; float ws = 1.0; float hrand = fract(iHash*5.17);',
     '  float vbaseH = 0.0; float vbaseW = 0.0;',      // 山地底座 (仅灵脉格非 0)
     '  if ((iSprite > 31.5 && iSprite < 35.5) || (iSprite > 49.5 && iSprite < 54.5)) {',
@@ -198,7 +207,7 @@
     '    else if (ve > 0.70) bhs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((ve-0.70)/0.14, 0.0, 1.0));',
     '    bhs *= ' + VBASE + ';',
     '    vbaseH = uR*(3.3+1.2*hrand) * bhs;',
-    '    vbaseW = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*bhs);',
+    '    vbaseW = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*bhs) * ' + VBASEW + ';',
     '  }',
     '  else if (iSprite < 41.5 || (iSprite > 55.5 && iSprite < 57.5))',
     '    hs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((iElev-0.70)/0.14, 0.0, 1.0));',
@@ -212,8 +221,10 @@
     '  if (iSprite > 59.5 && iSprite < 61.5) ss = 0.30;',   // 小山包整体缩至 30%
     '  else if ((iSprite > 31.5 && iSprite < 35.5) || (iSprite > 49.5 && iSprite < 54.5))',
     '    ss = ' + VSIZE + ';',   // 灵脉峰整体尺寸倍率 (vein-skin.js shape.sizeScale)
+    /* ⚠ 十版: vbaseW 由 shape.terrainBaseW 乘出来 (默认 0 ⇒ **底座只加高不加宽**):
+       W 只剩灵脉峰自身, H 仍含底座 ⇒ 又高又瘦 (九版宽度也叠加 ⇒ 反被读成"变宽了")。 */
     '  float W = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*hs) * ss * ws + vbaseW;',
-    '  float H = uR*(3.3+1.2*hrand) * hs * ss + vbaseH;',  // 底座山 (不缩) + 灵脉峰 (乘 sizeScale)
+    '  float H = uR*(3.3+1.2*hrand) * hs * ss + vbaseH;',  // 底座山 (不缩, 只贡献高度) + 灵脉峰 (乘 sizeScale)
     '  float jx = (fract(iHash*3.77)-0.5)*uR*1.8;',
     '  float flip = step(0.5, fract(iHash*7.31));',
     '  float u0 = aPos.x*0.5+0.5;',
