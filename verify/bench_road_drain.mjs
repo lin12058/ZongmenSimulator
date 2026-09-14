@@ -37,8 +37,11 @@ const entry = (sig, key) => raw(sig, sig + ' C.' + key + '++;');
 /* 分支内部计数 (整段替换, 别追加) */
 raw('        } else if ((qp.length - 1) * 10 > roadDI * hexDist(qa.q, qa.r, qb.q, qb.r)) {',
     '        } else if ((qp.length - 1) * 10 > roadDI * hexDist(qa.q, qa.r, qb.q, qb.r)) { C.drainDiRequeue++;');  // 绕行闸拒绝
-raw('          cacheSet(roadCache, dq.rkey, droad, ROAD_CAP);', '          C.drainBuilt++; cacheSet(roadCache, dq.rkey, droad, ROAD_CAP);');
-raw('        cacheSet(roadCache, rkey, road, ROAD_CAP);', '        C.mainBuilt++; cacheSet(roadCache, rkey, road, ROAD_CAP);');
+/* ⚠ 入库点已由 cacheSet(roadCache,…) 改为 roadSet(…)（A4 引用计数）——
+   锚点必须跟着改，否则报「注入点未找到」。三处建成点: 主循环 / DI 延迟重试轮 / drain。 */
+raw('roadSet(dq.rkey, droad);', 'C.drainBuilt++; roadSet(dq.rkey, droad);');
+raw('roadSet(de.rkey, road2);', 'C.mainBuilt++; roadSet(de.rkey, road2);');
+raw('roadSet(rkey, road);', 'C.mainBuilt++; roadSet(rkey, road);');
 
 entry('function bfsRoad(sq, sr, tq, tr, roadTiles) {', 'bfsRoad');
 /* 单次 A* 耗时分布: 重命名后套计时 wrapper (只记录, 不影响返回值) */
