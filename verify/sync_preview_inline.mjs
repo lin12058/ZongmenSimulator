@@ -22,18 +22,24 @@ const PREVIEW = path.join(ROOT, '灵脉预览.html');
    ⚠ 源文件是 CRLF, 匹配一律用 indexOf 的子串, 不要拼整块多行字面量。 */
 const MAP = [
   { marker: '/*======== 引擎 mapgen-config.js 内联副本', src: 'Server/Zongmen/Engine/js/mapgen-config.js' },
-  { marker: '/*======== 引擎 mapgen.js 内联副本',        src: 'Server/Zongmen/Engine/js/mapgen.js' }
+  { marker: '/*======== 引擎 mapgen.js 内联副本',        src: 'Server/Zongmen/Engine/js/mapgen.js' },
+  /* 绘制核心内联在【渲染脚本块内部】—— 故意不新增<script>块: 一批回归脚本按
+     「块数=4 / 块4=渲染」写死 (check_preview_draw/settle_road/terrain/vein_marker),
+     新增块要连带改它们。故用 START/END 标记对界定同步范围 (end 字段)。 */
+  { marker: '/*======== 绘制核心 bldg_ink.js 内联副本（来源', src: 'web/js/bldg_ink.js',
+    end:    '/*======== 绘制核心 bldg_ink.js 内联副本 END' }
 ];
 
 const CHECK = process.argv.includes('--check');
 let html = fs.readFileSync(PREVIEW, 'utf8');
 let changed = 0;
 
-for (const { marker, src } of MAP) {
+for (const { marker, src, end } of MAP) {
   const m0 = html.indexOf(marker);
   if (m0 < 0) { console.log(`✘ 未找到标记: ${marker}`); process.exit(1); }
   const headerEnd = html.indexOf('*/', m0) + 2;          // 标记注释块结束
-  const blockEnd = html.indexOf('</script>', headerEnd); // 该 script 块结束
+  /* 有 end ⇒ 标记对 (可内联进已有脚本块内部); 无 end ⇒ 到本块 </script> 为止 */
+  const blockEnd = end ? html.indexOf(end, headerEnd) : html.indexOf('</script>', headerEnd);
   if (headerEnd < 2 || blockEnd < 0) { console.log(`✘ 块边界异常: ${marker}`); process.exit(1); }
 
   const engineSrc = fs.readFileSync(path.join(ROOT, src), 'utf8').replace(/\r\n/g, '\n');

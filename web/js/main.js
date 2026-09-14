@@ -706,17 +706,25 @@
     for (var i = 0; i < R_BUCKETS.length; i++) if (rDev <= R_BUCKETS[i]) return i;
     return R_BUCKETS.length - 1;
   }
-  /* 屏幕空间 (dpr 变换下) 逐格贴图。六边格半径 <5px 时不画, 交给聚落图标。 */
+  /* 稀有「地标」建筑 (全图出现 <150): 缩远时若与常规建筑一起砍掉, 这几座等于白画
+     —— 战略视图下正是要找它们。名单与 `tools/stats_buildings.mjs` 的稀有档一致。 */
+  var RARE_KINDS = { '炼炉': 1, '官衙': 1, '焦炭窑': 1, '宗祠': 1, '祭坛': 1, '聚灵阵': 1, '灵枢殿': 1 };
+  /* 屏幕空间 (dpr 变换下) 逐格贴图。
+     六边格半径 <5px (tiny) 时: 常规建筑交给聚落图标, 只保留稀有地标 (抬最小尺寸),
+     否则「全图没几座」的建筑在战略视图里等于白画。
+     ⚠ tiny 模式**不置 bldgShown** —— 它是「本帧建筑层已覆盖」的信号, 实体图标据此让位;
+       若置真, 所有聚落图标都会让位, 而实际只画了极少数地标 (整体反而更空)。 */
   function drawBuildings(ctx, vw, vh, z) {
     bldgShown = false;
     if (NO_BLDG) return;                       // headless A/B 验证开关 (见顶部 NO_BLDG)
     var solver = solverFor();
     if (!BI || !BI.spriteOf || !geo || !solver) return;
-    if (geo.hexR * z < 5) return;
+    var tiny = geo.hexR * z < 5;
     var tgt = geo.hexR * z * dpr;                 // 目标半径 (设备像素)
     var bkt = bucketOf(tgt);
+    if (tiny) bkt = 0;                            // tiny: 强制最小档 (R=8)
     if (bkt !== lastRBucket) { BI.spriteClear(); lastRBucket = bkt; }
-    var R = R_BUCKETS[bkt], scale = tgt / R;
+    var R = R_BUCKETS[bkt], scale = tiny ? 1 : tgt / R;
     var detail = z >= 1.35 ? 3 : (z >= 0.9 ? 2 : 1);
     var list = bldgPlan;
     list.length = 0;
@@ -726,6 +734,7 @@
         if (st.state === 1 || !st.buildings || !st.buildings.length) continue;
         for (var j = 0; j < st.buildings.length; j++) {
           var b = st.buildings[j];
+          if (tiny && !RARE_KINDS[b.kind]) continue;   // tiny: 只留稀有地标
           var w = MC.tileToWorld(b.q, b.r);
           var ps = w2s(w.x, w.y);
           /* 留足余量: 栈桥/树冠/幡可越出本格 (SPR_BOX 上界 2.4R) */
@@ -751,7 +760,7 @@
                     rec.w * scale, rec.h * scale);
     }
     ctx.restore();
-    bldgShown = true;
+    bldgShown = !tiny;                         // tiny 只画了少数地标 ⇒ 不遮挡聚落图标
   }
 
   function renderStaticInto() {

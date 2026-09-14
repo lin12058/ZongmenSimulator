@@ -89,9 +89,16 @@ for (let i = ci - RC; i <= ci + RC; i++) for (let j = cj - RC; j <= cj + RC; j++
 }
 console.log('\n道路队列: ±%d 区域格 → 全 %d 格, 有可建路聚落 %d 格, 跳过空格 %d 格',
   RC, (RC * 2 + 1) * (RC * 2 + 1), q.length, skipped);
-let cur = 0, built = 0, rounds = 0, tMax = 0, tSum = 0, worst = 0;
+/* ⚠ 与页面 pumpRoads 同步为「多圈 + 整圈零产出收敛」(B2)：
+   游标单向前进时预算饥饿格被永久跳过 ⇒ budget=1 只能建出约 29% 的路。
+   现在走完一圈若本圈有产出就再来一圈，直到整圈零产出。 */
+let cur = 0, built = 0, rounds = 0, tMax = 0, tSum = 0, lap = 0, passBuilt = 0;
 t0 = Date.now();
-while (cur < q.length) {
+while (true) {
+  if (cur >= q.length) {
+    if (passBuilt > 0) { cur = 0; passBuilt = 0; lap++; }   // 本圈有产出 ⇒ 再来一圈
+    else break;                                             // 整圈零产出 ⇒ 收敛
+  }
   const a = Date.now();
   let b = 0, scanned = 0;
   while (cur < q.length && b < BUDGET && scanned < 40) {
@@ -99,12 +106,12 @@ while (cur < q.length) {
     const before = M.roadCache.size;
     M.roadsNear(c[0], c[1], BUDGET - b);
     const add = M.roadCache.size - before;
-    if (add > 0) { b += add; built += add; }
+    if (add > 0) { b += add; built += add; passBuilt += add; }
   }
   const dt = Date.now() - a; tMax = Math.max(tMax, dt); tSum += dt; rounds++;
 }
-console.log('道路泵送: %d 轮, 共建 %d 条, 总 %d ms, 单轮 max %d ms / avg %s ms',
-  rounds, built, Date.now() - t0, tMax, (tSum / rounds).toFixed(1));
+console.log('道路泵送(多圈收敛): %d 轮 / %d 圈, 共建 %d 条, 总 %d ms, 单轮 max %d ms / avg %s ms',
+  rounds, lap + 1, built, Date.now() - t0, tMax, (tSum / rounds).toFixed(1));
 console.log('roadCache.size =', M.roadCache.size);
 
 /* 抽一条路看结构（绘制层依赖 pts/x0/x1/y0/y1） */

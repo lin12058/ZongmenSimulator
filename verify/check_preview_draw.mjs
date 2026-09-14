@@ -244,13 +244,14 @@ ok(fillOn > fillOff, `默认视野下画出足迹底框 (fill ${fillOn} > ${fill
 ok(rectOn === rectOff,
   `默认视野(1 格 ≈ ${tilePxWant.toFixed(1)}px)只留足迹、不画建筑芯（避免 2px 噪点）`,
   `rect ${rectOn} vs ${rectOff}`);
-/* 放大到 1 格 ≈ 7px：建筑芯必须出现 */
+/* 放大到 1 格 ≈ 7px：C1 起改画**真实建筑精灵**（bldg_ink.spriteOf → drawImage），
+   不再是「六边格 + 方块芯」的示意图；tilePx ≥ SPRITE_MIN_PX(5) 触发。 */
 api.setView(0.9, 0, 0);
 resetCtx(cvCtx);
 try { api.draw(); } catch (e) { eZoom = e; }
-const rectZoom = nCalls(cvCtx, 'rect');
+const imgZoom = nCalls(cvCtx, 'drawImage');
 ok(!eZoom, '放大后 draw() 不抛异常', eZoom && (eZoom.name + ': ' + eZoom.message));
-ok(rectZoom > 200, `放大到 1 格 ≈ ${(HEX_R * 0.9).toFixed(1)}px 时画出建筑芯 (rect ${rectZoom})`);
+ok(imgZoom > 0, `放大到 1 格 ≈ ${(HEX_R * 0.9).toFixed(1)}px 时绘制真实建筑精灵 (drawImage ${imgZoom})`);
 ok(api.townN > 0, `城镇足迹已生成 (townLocal = ${api.townN} 个)`);
 
 console.log('\n== 5) 分帧泵抗异常（地形「只显示一半」的根因防线）==');

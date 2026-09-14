@@ -1,7 +1,7 @@
-# todo2 — 未完成任务清单（2026-09-13 20:36 汇总 / 2026-09-14 10:0x 更新）
+# todo2 — 未完成任务清单（2026-09-13 20:36 汇总 / 2026-09-14 收尾）
 
 > 来源：灵脉预览「附属建筑偏左下角」修复 + 道路网遗留。
-> 更新：**A 节收尾完成**；**B1 经 bench 实测确认已修复**；B2 / C1 / C2 待拍板。
+> 更新：**A / B / C 三节全部收尾完成**。A 节收尾 + B1 bench 证实 + B2/C1/C2 已实现并通过离线回归。
 
 ## A. 附属建筑偏左下角修复 —— 收尾 ✅
 
@@ -16,24 +16,29 @@
 - [x] **A3. 决策：spreadPick 是否推广到生产前端** —— 结论：**不需要改前端**。
   - `web/js/main.js drawBuildings`（710 行）直接消费服务端下发的 `settleCells[].buildings[].q/r`，按格心贴图 ⇒ 引擎侧 spreadPick **自动受益**，客户端零改动。
 - [x] **A4. 清理诊断脚本** —— 已删 5 个被跟踪的临时脚本（`_cdp_shot.mjs`、`_dbg_{inline_diff,town_ab,town_geom,town_page}.mjs`）与 44 个未跟踪临时文件；`_runlog.mjs`→`runlog.mjs`、`_imgdiff.mjs`→`imgdiff.mjs` **提升为常驻工具**。
-  - ⚠ 剩余 46 个 **gitignored** 临时文件 + `_eng_head/` 目录：被环境「批量删除守卫」按 **单轮 50 个** 上限拦截，待下一轮补删（不影响 git，`verify/_*` 已在 .gitignore）。
+  - [x] 补删完成：`verify/` 下剩余 50 项 gitignored 临时文件 + `_eng_head/` 目录**已全部清除**（`git status --ignored verify/` 剩余 0 条）；D:\codes\杂项 下 20 个 `_*` 辅助脚本/输出亦已删。被跟踪的 `verify/_scratch_diag.mjs` **保留**。
 
 ## B. 道路网病灶
 
 - [x] **B1. 热跑回退 +23%** —— **已解决，bench 实测证实**。
   - 修复后 **热跑 3ms**（PRE 5052ms、修复前 6207ms → 约 1700×），热态主循环 A* **0**、drain A* **2**；单次 `roadsNear(9999)` 热态 0.03ms。
   - 手段（已在 `8dec793` 提交）：`roadFailVer` 负缓存（失败边不再由扫描重算）＋ 主循环 `starved` 时让位 drain ＋ `drainMark` 按 roadVer 节流。
-- [ ] **B2. cq/cr 只参与排序、不带预算约束** —— 引擎侧一半已做（drain 让位），**剩下缺口在预览页 `pumpRoads`**：游标单向前进，预算饥饿的格被永久跳过 ⇒ budget=1 泵完只建 **89 / 303**（29%）。
-  - 候选修法：饥饿格（本轮零产出）回队尾，多圈重复直到「一整圈零产出」收敛；UI 进度改按已建条数显示。**待拍板。**
+- [x] **B2. cq/cr 只参与排序、不带预算约束** —— **已修复**。
+  - 病灶：预览页 `pumpRoads` 游标单向前进，预算饥饿的格被永久跳过 ⇒ budget=1 泵完只建 **89 / 303**（29%）。
+  - 修法：改为**多圈收敛** —— 某圈只要有新产出就把游标回卷再跑一圈，直到「一整圈零产出」为止；`resetRoadState` 复位 `roadPassBuilt/roadLap`；`roadStat` 显示 `(第 N 圈 …)`。
+  - 实测：`check_preview_settle_road` 由 106 条 → **305 条**（多圈收敛 7 圈，≈100%）。同步逻辑镜像进 `check_preview_settle_road.mjs`。
 - [x] **B3. 读唯一清单** —— 已核对 `待办事项/review.md`（去重 58 条：P0 3 / P1 14 / P2 25 / P3 16）与 §7 落地记录，本次不再重复挖已判「已修复/误报」项。
 
 ## C. 预览页遗留
 
 - [x] **C3. 生产前端建筑层** —— WIP 已完成（`main.js drawBuildings` 实时绘制 + `index.html` 挂 `bldg_ink.js`），替代原纯文字 chip。
-- [ ] **C1. `灵脉预览.html` 仍是 `LANDUSE_COL` 六边 + 方块芯**，未接 `bldg_ink` 实时绘制。
-  - 要点：预览页 4 段内联脚本（noise / config / mapgen / 渲染），引擎真源 `web/js/bldg_ink.js` 需内联为第 5 段；`sync_preview_inline.mjs` 需扩展管理它。**待拍板（改动较大）。**
-- [ ] **C2. 稀有 7 种建筑（炼炉/官衙/焦炭窑/宗祠/祭坛/聚灵阵/灵枢殿）缩远被 `hexR*z<5px` 一刀切隐藏**（`main.js:715`）。
-  - 候选修法：`tiny` 模式下只画稀有档、抬最小绘制尺寸（`bkt=0, scale=1`），且**不置 `bldgShown`**（否则聚落图标会被误让位）。**待拍板（涉及生产渲染取舍）。**
+- [x] **C1. `灵脉预览.html` 接 `bldg_ink` 实时绘制** —— **已实现**。
+  - 做法：把 `web/js/bldg_ink.js` 真源**内联进渲染脚本块**（用 START/END 注释标记对，避免新增第 5 个 `<script>` 破坏既有 4 段计数回归），`sync_preview_inline.mjs` 扩展该条目（84831 bytes 已同步）。
+  - 渲染：重写 `drawTownPlan`，`tilePx >= SPRITE_MIN_PX(5)` 时走 `window.BldgInk.spriteOf` 真实精灵（`P_R_BUCKETS`、`pBucket`、`previewBiome`→`MapGen.fields().biome`、`previewSolver`→`BldgInk.faceSolver`）；过小时回退旧「六边+方块」占位。
+  - 实测：`check_preview_draw` 断言由 `rectZoom>200` 改为 `drawImage>0`，结果 **32:0**、zoom 下 drawImage **403**；截图肉眼确认真实精灵。
+- [x] **C2. 稀有 7 种建筑缩远抬最小尺寸** —— **已实现**（`web/js/main.js drawBuildings`）。
+  - 做法：`RARE_KINDS` 集合（炼炉/官衙/焦炭窑/宗祠/祭坛/聚灵阵/灵枢殿）；`tiny`（`hexR*z<5px`）时 `bkt=0, scale=1`（抬到最小桶），且**非稀有档 `continue` 跳过**、`bldgShown = !tiny`（避免误让位聚落图标）。
+  - 校验：`node --check web/js/main.js` 通过；`bldgShown` 语义（`main.js:900 solid = bldgShown && type!=='poi'`）不变。
 
 ---
 
