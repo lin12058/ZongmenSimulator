@@ -24,18 +24,51 @@
   var DEBUG = new URLSearchParams(location.search).get('debug') === '1' ||
               new URLSearchParams(location.search).get('capture') === '1';
   var hoverTile = null, selectedTile = null;
+  /* 「点选」标记 (2026-09-14 九版): 玩家点击哪一格, 哪一格就落一枚朱砂圈 (取代原先
+     「黑色加粗六边框」+ 「本宗自动择宗」两套东西)。null = 未点选 (开局图上没有任何标记)。 */
+  var selMark = null;
   var showVeins = true, showLabels = true;
   /* 建筑层开关 (headless 视觉验证用, 与 nofade/capture 同族):
      nobldg=1 → 不画建筑层, 同机位可与开启态做逐像素 A/B, 判定
      「建筑确实画上去了 / 画在哪里」。日常游玩不传此参数。 */
   var NO_BLDG = new URLSearchParams(location.search).get('nobldg') === '1';
+  /* 地名匾额 / 云气层 —— 独立开关, 各自带 headless 调试参数 (nobanner=1 / nocloud=1),
+     便于同机位 A/B 差分确认「确实画上去了」。 */
+  var showBanners = new URLSearchParams(location.search).get('nobanner') !== '1';
+  var showClouds = new URLSearchParams(location.search).get('nocloud') !== '1';
+  var BANNER_MAX = 90;          // 单帧匾额上限 (战略视图下防刷屏)
+  /* 地表让位开关 (headless A/B 用): noyield=1 → 不做「覆盖格抹平」, 同机位可
+     逐像素对照「路/建筑处的树·山确实被抹掉了」。日常游玩不传。 */
+  var NO_YIELD = new URLSearchParams(location.search).get('noyield') === '1';
+  /* 云气不漂移 (headless A/B 用): 云毯默认随时间东移 ⇒ 两张图相隔数秒即天然有别,
+     云气开关的差分会被"云自己移动"污染。加此参数把漂移钉死, 使 A/B 只反映云的有无。 */
+  var NO_CLOUD_DRIFT = new URLSearchParams(location.search).get('noclouddrift') === '1';
+  /* 云影关断 (headless A/B 用): noshadow=1 → 只画云不画影。云影是"软压暗",
+     与云体自身的墨线压暗混在一起无法分辨 ⇒ A/B 时用它把"影"单独差出来。 */
+  var NO_CLOUD_SHADOW = new URLSearchParams(location.search).get('noshadow') === '1';
+  var cloudSprites = null;      // 云团变体 (boot 时由 InkTextures.buildClouds 产出)
+  var cloudShadows = null;      // 云影 (同源轮廓的墨色软影, buildCloudShadows 产出)
+  /* 灵脉皮肤配置 (web/js/vein-skin.js, index.html 里必须在本文件之前加载)。
+     本文件只用它两处: ① 灵脉签的垂直锚点 (峰体高度 = 山地底座 + 灵脉峰);
+     ② 山地底座倍率 shape.terrainBase (详见 PROP_VS 灵脉分支)。 */
+  var VS = (typeof window !== 'undefined' && window.VeinSkin) || null;
+  /* 匾额锚点调试层 (headless 定位「牌匾 vs 地物」用): plaqdbg=1
+     绿=聚落中心 st.x/y · 黄=聚落格 tileToWorld(q,r) · 青=建筑包围盒锚点 ·
+     橙点=每个建筑格 · 品红=灵脉 v.x/y。日常游玩不传此参数。 */
+  var PLAQ_DBG = new URLSearchParams(location.search).get('plaqdbg') === '1';
+  /* 聚落牌匾锚点退回「建筑包围盒中心」(headless A/B 用): ancgeo=1。
+     默认用聚落中心 st.x —— 包围盒会被农田/码头等离群地皮拉偏。日常不传。 */
+  var ANC_GEO = new URLSearchParams(location.search).get('ancgeo') === '1';
 
   /* ---------- 宗门录 (左上角水墨面板) ----------
      数据源: 地图实体层 settleCells 中 type==='sect' 的实体 (id/name/pop/tier/
      styleName/buildings/resources), 不新增任何后端契约。
      「掌门」一栏: 后端 mapgen 尚无归属系统 (owner 恒为空串, 见 mapgen.js 注释),
-     故由 seed+sect.id 确定性派生一个道号作演示 —— 事件系统接入后改为直接读 owner。 */
-  var sect = { auto: true, pinId: '', curId: '', cur: null, items: [] };
+     故由 seed+sect.id 确定性派生一个道号作演示 —— 事件系统接入后改为直接读 owner。
+     ⚠ 九版: **删除「随行·就近择宗」自动选择** —— 开局不再自动认领最近的一座宗门
+     (以前朱砂标记会随相机漂到最近的宗门上)。选中宗门只由玩家**主动**决定:
+     点击图上某一格 (若该格属某座宗门) 或从「择宗」菜单里点选。pinId 空 = 未择。 */
+  var sect = { pinId: '', pinEnt: null, curId: '', cur: null, items: [] };
 
   var chunkData = new Map();        // 'ca,cb' -> {arrays, bbox}
   var regionCells = new Map();      // 'i,j'  -> {region, roads}   (图层1: 区域名+道路)
@@ -45,6 +78,13 @@
   var settleCells = new Map();      // 'i,j' -> [PlaceEntity]  聚落实体
   var poiCells = new Map();         // 'i,j' -> [PlaceEntity]  景点实体
   var chunkQueue = [], chunkBusy = new Map();
+  /* 道路/建筑覆盖格 → 该格上的树·山精灵让位 (变平地)。
+     · propBlock   : "q,r" 集合 (建筑占地格 + 道路沿线格);
+     · blockedVer  : 集合版本号, 数据到达即 +1;
+     · propBuilt   : chunkKey -> 已按哪个版本过滤过精灵 (版本相同不重算, 平移缩放零开销)。 */
+  var propBlock = new Set();
+  var blockedVer = 0, syncedVer = -1;
+  var propBuilt = new Map();
   var chunkRetry = new Map();   // key -> { attempt, at }: 可重试失败(网络/超时)的退避计划, at 为下次可入队时间
   /* R12: 并发/重试等网络常数收敛到单一配置对象, 不再散落魔法数字 */
   var NET_CFG = {
@@ -214,6 +254,7 @@
       if (!need[key]) {
         renderer.dropChunk(key);
         chunkData.delete(key);
+        propBuilt.delete(key);               // 精灵过滤记录随块卸载 (重进视野重算)
         MC.blockForget(key);                 // rev 缓存同步失效: 重进视野须全量重取
         forceStaticDirty();                  // 内容移除: 尽快重绘清除残影 (R1)
       }
@@ -295,6 +336,7 @@
       }
       renderer.uploadChunk(job.key, arrays, bb);   // R7: bbox 供渲染粗剔除
       chunkData.set(job.key, { arrays: arrays, bbox: bb });
+      refreshChunkProps(job.key);        // 新块: 立即按最新覆盖格过滤树·山 (让位)
       minimapDirty = true;
       markStaticDirty();                   // R1: 连续 N 个块合并 200ms 重绘一次
     }
@@ -314,7 +356,7 @@
        若只置 roadsDirty 而不置 staticDirty, 当「相机静止 + 本块 chunk 未变化」
        (如重试时该块 chunkData 已存在 → 上面的 chunk 分支整个跳过) 时,
        renderStaticInto 不会被调用 → 道路几何与区域名一直不刷新。 */
-    if (regionsApplied) markStaticDirty();
+    if (regionsApplied) { rebuildPropBlock(); markStaticDirty(); }   // 路网变 → 覆盖格重算
 
     /* 图层2/3 实体 (按区域格键覆盖, 天然去重邻块重复携带) */
     if (resp.settle) {
@@ -324,6 +366,7 @@
         if (keepR.has(gk)) settleCells.set(gk, g.items);
       }
       markStaticDirty();
+      rebuildPropBlock();       // 建筑占地格变 → 覆盖格重算 (聚落内的树/山让位)
       updateSectPanel(false);   // 实体层更新即刷新宗门录 (id 未变时内部直接返回)
     }
     if (resp.poi) {
@@ -439,6 +482,101 @@
   var ICON_FN = { sect: drawSect, city: drawCity, town: drawTown, village: drawVillage, poi: drawPoi };
   var TYPE_NAME = { sect: '宗门', city: '仙城', town: '坊市', village: '村落', poi: '秘境' };
   var VEIN_EL = ['金', '木', '水', '火', '土'];
+
+  /* ---------- 地名纸签 (山海经式竖排匾额) ----------
+     古图经卷的地名签: 米黄纸底 + 细墨框 + 焦墨竖排楷体, 一签一名, 一律**立在对应
+     地物上方**, 签底引一线连到地物落点。签面倾角由名字 hash 决定 —— 同名恒定,
+     平移/缩放重绘不会闪。名字一律竖排: 逐字居中排成单列。 */
+  function bannerTilt(name) {
+    return ((hash32(String(name)) % 1000) / 1000 - 0.5) * 0.055;    // ±1.6°
+  }
+  /* 签位占用表 (每帧清空) —— 地名密处两签会叠在一起 (灵脉签 7 字很长, 最容易
+     和旁边的村签撞)。绘制顺序 = 优先级: 聚落/景点在前, 灵脉在后; 后到的先往上
+     让一档, 让不开就不画 (宁缺勿叠)。 */
+  var bannerBoxes = [];
+  function bannerHit(bb) {
+    for (var i = 0; i < bannerBoxes.length; i++) {
+      var o = bannerBoxes[i];
+      if (bb.x0 < o.x1 && bb.x1 > o.x0 && bb.y0 < o.y1 && bb.y1 > o.y0) return o;
+    }
+    return null;
+  }
+  function drawNameBanner(ctx, x, anchorY, text, opt) {
+    opt = opt || {};
+    var chars = String(text == null ? '' : text).split('');
+    if (!chars.length) return;
+    var fs = opt.fs || 11.5;
+    var padX = fs * 0.34, padT = fs * 0.48, padB = fs * 0.38;
+    var lineH = fs * 1.04;
+    var bw = fs * 1.02 + padX * 2;                   // 签宽
+    var bh = chars.length * lineH + padT + padB;     // 签高
+    var lead = Math.max(5, fs * 0.62);               // 引绳长 (签子贴近地物)
+    var bottomY = anchorY - lead;                    // 签底 y
+    var topY = bottomY - bh;
+    if (bottomY < -24 || topY > opt.vh + 24) return; // 整签出视野 → 不画
+    var bb = { x0: x - bw * 0.5 - 2, x1: x + bw * 0.5 + 2, y0: topY - 2, y1: bottomY + 2 };
+    var hitB = bannerHit(bb);
+    if (hitB) {
+      if (!opt.avoid) return;                        // 后到者让位; 让不开就不画
+      bottomY = hitB.y0 - 4;                         // 只让到被压那张签之上 (最小位移)
+      topY = bottomY - bh;
+      bb = { x0: bb.x0, x1: bb.x1, y0: topY - 2, y1: bottomY + 2 };
+      if (topY < -24 || bottomY > opt.vh + 24) return;   // 让出视野 → 不画
+      if (bannerHit(bb)) return;
+    }
+    bannerBoxes.push(bb);
+    statBanner++;                                    // 验数: 本帧真正画出的匾额数
+    var tilt = bannerTilt(text);
+    ctx.save();
+    /* 引绳 + 落点 (在签之下先画) */
+    ctx.strokeStyle = 'rgba(58,48,36,0.42)';
+    ctx.lineWidth = Math.max(0.8, fs * 0.07);
+    ctx.beginPath(); ctx.moveTo(x, bottomY); ctx.lineTo(x, anchorY); ctx.stroke();
+    ctx.fillStyle = 'rgba(58,48,36,0.5)';
+    ctx.beginPath(); ctx.arc(x, anchorY, Math.max(1, fs * 0.10), 0, Math.PI * 2); ctx.fill();
+    /* 签面 (手撕纸边: 四角轻微不齐) */
+    ctx.translate(x, bottomY);
+    ctx.rotate(tilt);
+    ctx.beginPath();
+    ctx.moveTo(-bw * 0.5 + bw * 0.02, -bh * 0.995);
+    ctx.lineTo(bw * 0.5 - bw * 0.015, -bh);
+    ctx.lineTo(bw * 0.5, -bh * 0.03);
+    ctx.lineTo(bw * 0.5 - bw * 0.025, 0);
+    ctx.lineTo(-bw * 0.5, -bh * 0.015);
+    ctx.closePath();
+    ctx.shadowColor = 'rgba(52,40,24,0.36)';
+    ctx.shadowBlur = Math.max(2, fs * 0.45);
+    ctx.shadowOffsetY = Math.max(1, fs * 0.16);
+    ctx.fillStyle = 'rgba(247,239,219,0.95)';
+    ctx.fill();
+    ctx.shadowColor = 'rgba(0,0,0,0)'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    /* 灵脉签: 纸面薄敷一层灵根本色 (既分五行, 又不与聚落的白签混同) */
+    if (opt.tint) {
+      ctx.fillStyle = 'rgba(' + opt.tint[0] + ',' + opt.tint[1] + ',' + opt.tint[2] + ',0.17)';
+      ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(72,58,40,0.60)';
+    ctx.lineWidth = Math.max(1, fs * 0.085);
+    ctx.stroke();
+    /* 内框细线 (与面板同族的"双线画框") */
+    ctx.strokeStyle = 'rgba(120,98,66,0.28)';
+    ctx.lineWidth = Math.max(0.6, fs * 0.05);
+    ctx.strokeRect(-bw * 0.5 + fs * 0.20, -bh + fs * 0.20, bw - fs * 0.40, bh - fs * 0.40);
+    /* 灵脉签脚: 一枚灵根色小印 */
+    if (opt.tint) {
+      ctx.fillStyle = 'rgba(' + opt.tint[0] + ',' + opt.tint[1] + ',' + opt.tint[2] + ',0.82)';
+      ctx.fillRect(-bw * 0.5 + fs * 0.30, -fs * 0.56, bw - fs * 0.60, fs * 0.16);
+    }
+    /* 竖排字 */
+    ctx.fillStyle = opt.poi ? 'rgba(140,48,34,0.95)' : 'rgba(36,29,21,0.96)';
+    ctx.font = fs + 'px "KaiTi","STKaiti","KaiTi_GB2312",serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (var i = 0; i < chars.length; i++) {
+      ctx.fillText(chars[i], 0, -bh + padT + lineH * (i + 0.5));
+    }
+    ctx.restore();
+  }
 
   /* ---------- 小地图 (字段网格由后端采样) ---------- */
   var mmBase = null;
@@ -651,6 +789,12 @@
   var lastRBucket = -1;
   var bldgShown = false;           // 本帧建筑层是否已绘制 (供实体图标让位)
   var bldgPlan = [];               // 复用的绘制计划数组
+  /* 表现升级的验数指标 (2026-09-14): headless 无法"看"图, 改由 window.__feat()
+     取这些运行期事实 —— 桥数/签数/虚线段数/让位裁掉多少精灵/灵脉峰与大世界峰各几座。
+     只在 DEBUG 下读取, 计数开销可忽略 (整数自增)。 */
+  var statBridge = 0;              // 本帧压水建筑 → 画了几座栈桥
+  var statBanner = 0;              // 本帧竖排匾额画了几块
+  var statWaterQuads = 0;          // 上次重建道路时水上虚线段的四边形数
   /* 格 → 地类 (biome)。数据来自已加载区块; 未加载返回 -1 (探针自动放弃)。
      ⚠ 区块归属**不能**用 round(q/chunkS): 引擎 chunkOfTile 是「区块格心四候选
        取六边距最近 + 固定平局序」, 与四舍五入不等价 (chunkS=21 时 (32,32) 归
@@ -687,6 +831,154 @@
     }
     return -1;
   }
+  /* 格 → 海拔 (九版新增, 灵脉「山地底座」用)。查法与 biomeAt 同一套
+     (四候选区块 + 服务端权威索引); 未加载 → -1 (调用方按"平原"处理, 只是不垫底座)。 */
+  function elevAtTile(q, r) {
+    if (!geo) return -1;
+    var S = geo.chunkS;
+    var qb = Math.floor(q / S) * S, rb = Math.floor(r / S) * S;
+    for (var a = 0; a < 4; a++) {
+      var ca = (qb + (a % 2) * S) / S, cb = (rb + (a >> 1) * S) / S;
+      var info = chunkData.get(chunkKey(ca, cb));
+      if (!info) continue;
+      if (!info.tileIdx) buildTileIdx(info, ca, cb);
+      var cq = q - ca * S + CS_OFF, cr = r - cb * S + CS_OFF;
+      if (cq < 0 || cq >= CS_SPAN || cr < 0 || cr >= CS_SPAN) continue;
+      var i = info.tileIdx[cr * CS_SPAN + cq];
+      if (i >= 0) return info.arrays.elevs[i];
+    }
+    return -1;
+  }
+  /* 单个区块的「格键 → 海拔」小表 (建一次挂在 info 上; arrays 不可变 ⇒ 无需失效)。
+     比逐格 elevAtTile 少一次四候选搜索 —— 供 refreshChunkProps 逐精灵取海拔。 */
+  function tileElevMap(info) {
+    if (info.tileElev) return info.tileElev;
+    var a = info.arrays, m = new Map();
+    for (var i = 0; i < a.count; i++) {
+      var t = worldToTileI(a.centers[i * 2], a.centers[i * 2 + 1]);
+      m.set(t.q + ',' + t.r, a.elevs[i]);
+    }
+    info.tileElev = m;
+    return m;
+  }
+
+  /* 灵脉峰「格心 → 峰尖」的上屏高度 (uR 倍数) —— 灵脉签的垂直锚点。
+     九版: 峰体已叠上「山地底座」(该格海拔对应的那层山), 签位必须跟着抬高, 否则签子
+     会被埋进峰体里。底座口径与 renderer.js PROP_VS 完全一致 (与大世界山同档公式);
+     随机抖动项取包络中值 (hrand=0.86) —— 签位只需 ≈峰尖高度, 不必逐格精确到 hash。 */
+  function veinTopU(v) {
+    var tb = (VS && VS.shape && VS.shape.terrainBase != null) ? VS.shape.terrainBase : 1.0;
+    var e = elevAtTile(v.q, v.r);
+    var bhs = 0;
+    if (e > 0.84) bhs = 0.95 + 0.60 * Math.min(1, (e - 0.84) / 0.12);        // 雪峰档
+    else if (e > 0.70) bhs = 0.55 + 0.75 * Math.min(1, (e - 0.70) / 0.14);   // 山地档
+    var baseU = (3.3 + 1.2 * 0.86) * bhs * tb;
+    var lv = (VS && VS.levelInfo) ? VS.levelInfo(v.level) : null;
+    var peakU = lv ? (3.3 + 1.2 * (lv.hRand[0] + lv.hRand[1]) * 0.5) * lv.hScale * VS.shape.sizeScale
+                   : 3.2;
+    return baseU + peakU + 0.35;      // +0.35 uR 余量: 签底不贴着峰尖
+  }
+
+  /* ---------- 地表让位: 道路/建筑覆盖格上的树·山一律抹平 ----------
+     规则 (2026-09-14): 凡被墨路或建筑占地之处, 地面不再起树、不再起山 —— 呈平地;
+     压水的情形另由「栈桥 / 虚线航道」承担 (见 drawBuildings 与道路段分流)。
+     建筑格来自 settleCells, 路格来自 regionCells 折线沿采样 —— 前端全都有,
+     但区块数据里的 propSprites 是服务端一次算好的 ⇒ 必须在传 GPU 前过滤掉。 */
+  function worldToTileI(x, y) {
+    var ra = Math.round(y / (1.5 * geo.hexR));
+    return { q: Math.round(x / geo.hexW - ra / 2), r: ra };
+  }
+  function rebuildPropBlock() {
+    propBlock.clear();
+    settleCells.forEach(function (ents) {
+      for (var i = 0; i < ents.length; i++) {
+        var st = ents[i];
+        if (st.state === 1 || !st.buildings) continue;
+        for (var j = 0; j < st.buildings.length; j++)
+          propBlock.add(st.buildings[j].q + ',' + st.buildings[j].r);
+      }
+    });
+    regionCells.forEach(function (pack) {
+      var roads = pack.roads || [];
+      for (var r = 0; r < roads.length; r++) {
+        var pts = roads[r].pts;
+        /* 折线按 ~1/3 格步长采点: 采到的是「路真正压过的格」, 不是只压端点 */
+        for (var p = 0; p + 3 < pts.length; p += 2) {
+          var ax = pts[p], ay = pts[p + 1], bx = pts[p + 2], by = pts[p + 3];
+          var dx = bx - ax, dy = by - ay, len = Math.sqrt(dx * dx + dy * dy) || 1;
+          var n = Math.max(1, Math.ceil(len / (geo.hexW * 0.34)));
+          for (var s = 0; s <= n; s++) {
+            var t = s / n;
+            var wt = worldToTileI(ax + dx * t, ay + dy * t);
+            propBlock.add(wt.q + ',' + wt.r);
+          }
+        }
+      }
+    });
+    blockedVer++;
+  }
+  /* 逐块过滤精灵。只在 blockedVer 变化 (或该块新到) 时算一次 —— 平移/缩放零开销。
+     ⚠ 区块**可以一个精灵都没有** (纯海区块 pn=0): 此时 pb.chunkToArrays 给的是
+       null 而不是空数组 (实测 chunk (1,-3) 即如此) —— 直接读 .length 会在渲染
+       循环里抛异常 → showFatal 整页不可用。取值前必须判空。 */
+  function refreshChunkProps(key) {
+    var info = chunkData.get(key);
+    if (!info) return;
+    if (propBuilt.get(key) === blockedVer) return;
+    propBuilt.set(key, blockedVer);
+    var a = info.arrays;
+    var n = a.propSprites && a.propCenters ? a.propSprites.length : 0;
+    info.propOrig = n;                          // 验数: 服务端给的精灵总数
+    info.propKept = n; info.keptVein = 0; info.keptMtn = 0; info.keptOther = 0;
+    if (!n) return;
+    /* A/B 调试: noyield=1 → 不抹平 (精灵全留), 用于证明让位确实生效 */
+    if (NO_YIELD) return;
+    var c = new Float32Array(n * 2), sp = new Float32Array(n),
+        hs = new Float32Array(n), el = new Float32Array(n);
+    var m = 0, hv = 0, hm = 0;
+    /* 本块的「格键 → 海拔」表 (惰性建): 只给灵脉峰查"该格海拔"用 (见下方 el[m]) */
+    var elevOf = null;
+    for (var i = 0; i < n; i++) {
+      var x = a.propCenters[i * 2], y = a.propCenters[i * 2 + 1];
+      var t = worldToTileI(x, y);
+      if (propBlock.has(t.q + ',' + t.r)) continue;      // 被路/建筑压住 → 抹平
+      var sid = a.propSprites[i];
+      /* 验数: 灵脉峰 = 五行峰 50..54 (第 6 行 2~6 列) + 异灵根峰 32..35 (第 4 行 0..3 列);
+         大世界岩峰/雪峰 = 40/41/56/57/42/43/58/59 */
+      var isVein = (sid >= 50 && sid <= 54) || (sid >= 32 && sid <= 35);
+      if (isVein) hv++;
+      else if (sid === 40 || sid === 41 || sid === 56 || sid === 57 ||
+               sid === 42 || sid === 43 || sid === 58 || sid === 59) hm++;
+      c[m * 2] = x; c[m * 2 + 1] = y;
+      sp[m] = sid; hs[m] = a.propHashes[i];
+      /* ⚠ 灵脉峰的第 4 通道要**复合等级与海拔**: 服务端给的 propElevs[i] 是灵脉等级
+         (0大/1中/2小), 而"在原来的山之上再加峰高"还需**该格真实海拔** —— 它只在地块段
+         (arrays.elevs) 里。合成 (等级 + 海拔)/3 后上传, 由 renderer.js PROP_VS 还原
+         (精灵段的海拔通道是 u16 量化、值域 [0,1], 装不下两个量, 故先归一化压进去)。 */
+      if (isVein) {
+        if (!elevOf) elevOf = tileElevMap(info);
+        el[m] = (a.propElevs[i] + (elevOf.get(t.q + ',' + t.r) || 0)) / 3;
+      } else {
+        el[m] = a.propElevs[i];
+      }
+      m++;
+    }
+    info.propKept = m; info.keptVein = hv; info.keptMtn = hm; info.keptOther = m - hv - hm;
+    /* 一个都没裁且 GPU 上本来就是全量 → 不重传 (首次上传已含全部精灵)。
+       若上一轮裁过而本轮全保留 (覆盖格移出视野), 必须重传回全量。 */
+    if (m === n && !info.propCut) return;
+    info.propCut = m !== n;
+    renderer.updateProps(key, {
+      propCenters: c.subarray(0, m * 2), propSprites: sp.subarray(0, m),
+      propHashes: hs.subarray(0, m), propElevs: el.subarray(0, m)
+    });
+  }
+  function syncPropBlock() {
+    if (syncedVer === blockedVer) return;
+    syncedVer = blockedVer;
+    chunkData.forEach(function (_info, key) { refreshChunkProps(key); });
+  }
+
   /* 朝向求解器来自绘制核心 (web/js/bldg_ink.js 的 faceSolver):
      朝向规则表/回退逻辑/环枚举与离线预览页、对拍脚本共用同一份实现,
      本文件只负责把「浏览器侧的 biomeAt」注入进去。geo 就绪后建一次即可。 */
@@ -716,6 +1008,7 @@
        若置真, 所有聚落图标都会让位, 而实际只画了极少数地标 (整体反而更空)。 */
   function drawBuildings(ctx, vw, vh, z) {
     bldgShown = false;
+    statBridge = 0;
     if (NO_BLDG) return;                       // headless A/B 验证开关 (见顶部 NO_BLDG)
     var solver = solverFor();
     if (!BI || !BI.spriteOf || !geo || !solver) return;
@@ -739,7 +1032,7 @@
           var ps = w2s(w.x, w.y);
           /* 留足余量: 栈桥/树冠/幡可越出本格 (SPR_BOX 上界 2.4R) */
           if (ps.x < -70 || ps.y < -100 || ps.x > vw + 70 || ps.y > vh + 100) continue;
-          list.push({ b: b, st: st, x: ps.x * dpr, y: ps.y * dpr, d: w.y });
+          list.push({ b: b, st: st, x: ps.x * dpr, y: ps.y * dpr, d: w.y, bio: biomeAt(b.q, b.r) });
         }
       }
     });
@@ -751,11 +1044,16 @@
     for (var k = 0; k < list.length; k++) {
       var it = list[k], b = it.b;
       var fi = solver.faceInfo(b, it.st);
+      /* 建筑压水 (本格是水) → 不画房子, 改画栈桥 —— 即「水变成桥」。
+         面向水的码头/渔船坞/渔亭本就自己画栈桥伸进水里, 不在此列 (它们在沙岸陆格上)。 */
+      var onWater = it.bio === 0 || it.bio === 1;
       var rec = BI.spriteOf({
-        kind: b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
-        face: fi.face, water: fi.water, R: R, detail: detail, plateA: 0.16
+        kind: onWater ? '栈桥' : b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
+        face: fi.face, water: fi.water, R: R, detail: detail,
+        plateA: 0.40, plate: !onWater            // 场地不透明度 (七版: 0.16→0.40, 浅色建筑不再糊进底纹)
       });
       if (!rec) continue;
+      if (onWater) statBridge++;                 // 验数: 本帧画了几座栈桥 (水→桥)
       ctx.drawImage(rec.cv, it.x + rec.ox * scale, it.y + rec.oy * scale,
                     rec.w * scale, rec.h * scale);
     }
@@ -765,6 +1063,8 @@
 
   function renderStaticInto() {
     var cw = els.overlay.width, ch = els.overlay.height;
+    statBanner = 0;                            // 验数: 本帧匾额计数归零
+    bannerBoxes.length = 0;                     // 签位占用表同步清空 (避让用)
     if (!staticLayer) staticLayer = document.createElement('canvas');
     if (staticLayer.width !== cw || staticLayer.height !== ch) {
       staticLayer.width = cw; staticLayer.height = ch;
@@ -779,19 +1079,81 @@
       dpr * (els.app.clientHeight / 2 - cam.y * cam.zoom));
     var z = cam.zoom;
 
+    /* 匾额锚点调试层 (plaqdbg=1): 把「牌匾锚点 vs 真实地物」一次标全 ——
+       绿=聚落中心 st.x/y · 黄=聚落格 tileToWorld(q,r) · 青=建筑包围盒锚点 ·
+       橙点=每个建筑格 · 品红=灵脉 v.x/y。只为 headless 定位偏差, 不进产品路径。 */
+    function drawPlaqueDbg(dctx) {
+      function mk(sx, sy, col, label, dy) {
+        dctx.strokeStyle = col; dctx.lineWidth = 1.4;
+        dctx.beginPath();
+        dctx.moveTo(sx - 8, sy); dctx.lineTo(sx + 8, sy);
+        dctx.moveTo(sx, sy - 8); dctx.lineTo(sx, sy + 8);
+        dctx.stroke();
+        if (!label) return;
+        dctx.font = 'bold 11px monospace';
+        dctx.textAlign = 'left'; dctx.textBaseline = 'middle';
+        var tw = dctx.measureText(label).width, ty = sy + (dy || 0);
+        dctx.fillStyle = 'rgba(8,8,8,0.78)';
+        dctx.fillRect(sx + 9, ty - 7, tw + 5, 14);
+        dctx.fillStyle = col;
+        dctx.fillText(label, sx + 11, ty);
+      }
+      settleCells.forEach(function (ents) {
+        ents.forEach(function (st) {
+          if (st.state === 1) return;
+          if (!st.buildings || !st.buildings.length) return;
+          for (var i = 0; i < st.buildings.length; i++) {
+            var w = MC.tileToWorld(st.buildings[i].q, st.buildings[i].r);
+            var s = w2s(w.x, w.y);
+            dctx.fillStyle = 'rgba(255,132,0,0.95)';
+            dctx.fillRect(s.x - 2.5, s.y - 2.5, 5, 5);
+          }
+          var pc = w2s(st.x, st.y);
+          mk(pc.x, pc.y, 'rgba(30,230,90,1)', st.name + '·中心', -30);
+          var tw2 = MC.tileToWorld(st.q, st.r);
+          var tc = w2s(tw2.x, tw2.y);
+          mk(tc.x, tc.y, 'rgba(255,226,0,1)', st.name + '·格', -14);
+          var an = bldgAnchor(st), as = w2s(an.x, an.y);
+          mk(as.x, as.y, 'rgba(0,226,255,1)', st.name + '·型箱', 2);
+        });
+      });
+      for (var q = 0; q < veinLabels.length; q++) {
+        var sp = w2s(veinLabels[q].x, veinLabels[q].y);
+        mk(sp.x, sp.y, 'rgba(255,40,210,1)', '脉·' + veinLabels[q].name, 16);
+      }
+    }
+
     /* 浪线 (基于区块数据, 无动画) */
     drawChunkWaves(ctx, b);
 
-    /* 道路 (后端 A* 路径点) — T7: 仅路网数据变化时重建几何并重传 GPU */
+    /* 道路 (后端 A* 路径点) — T7: 仅路网数据变化时重建几何并重传 GPU
+       ★ 陆上/水上分流 (2026-09-14): 过水段不铺路面, 改画**虚线航道** ——
+         陆路是实体米色路面, 水上是断开的石青墨虚线, 一眼可辨"此段行船不走人"。 */
     if (roadsDirty) {
       roadsDirty = false;
-      var haloV = [], coreV = [];
+      var haloV = [], coreV = [], waterV = [];
       function pushSeg(arr, ax, ay, bx, by, w) {
         var dx = bx - ax, dy = by - ay;
         var len = Math.sqrt(dx * dx + dy * dy) || 1;
         var nx = -dy / len * w * 0.5, ny = dx / len * w * 0.5;
         arr.push(ax - nx, ay - ny, bx + nx, by + ny, ax + nx, ay + ny,
                  ax - nx, ay - ny, bx - nx, by - ny, bx + nx, by + ny);
+      }
+      /* 虚线: 沿线段按 dash/gap 切段, 每段仍用 pushSeg 展宽 */
+      function pushDash(arr, ax, ay, bx, by, w, dash, gap) {
+        var dx = bx - ax, dy = by - ay;
+        var len = Math.sqrt(dx * dx + dy * dy) || 1;
+        var ux = dx / len, uy = dy / len, s = 0;
+        while (s < len) {
+          var e = Math.min(len, s + dash);
+          pushSeg(arr, ax + ux * s, ay + uy * s, ax + ux * e, ay + uy * e, w);
+          s = e + gap;
+        }
+      }
+      function isWaterWorld(wx, wy) {
+        var wt = worldToTileI(wx, wy);
+        var bb = biomeAt(wt.q, wt.r);
+        return bb === 0 || bb === 1;
       }
       var drawn = {};
       regionCells.forEach(function (pack) {
@@ -812,12 +1174,21 @@
             var segH = Math.sin(p2 * 12.9898 + rh * 0.7853) * 43758.5453;
             var wob = segH - Math.floor(segH);
             var wm = wBase * (0.60 + 0.8 * wob);
-            pushSeg(haloV, pts[p2 * 2], pts[p2 * 2 + 1], pts[p2 * 2 + 2], pts[p2 * 2 + 3], wm * 2.4);
-            pushSeg(coreV, pts[p2 * 2], pts[p2 * 2 + 1], pts[p2 * 2 + 2], pts[p2 * 2 + 3], Math.max(1.0, wm));
+            var ax = pts[p2 * 2], ay = pts[p2 * 2 + 1], bx = pts[p2 * 2 + 2], by = pts[p2 * 2 + 3];
+            /* 端点任一在水里即判过水: 一格宽的河汊才能被两段虚线完整覆盖 */
+            if (isWaterWorld(ax, ay) || isWaterWorld(bx, by)) {
+              pushDash(waterV, ax, ay, bx, by, Math.max(1.3, wm * 1.15),
+                       geo.hexW * 0.42, geo.hexW * 0.36);
+            } else {
+              pushSeg(haloV, ax, ay, bx, by, wm * 2.4);
+              pushSeg(coreV, ax, ay, bx, by, Math.max(1.0, wm));
+            }
           }
         }
       });
-      renderer.setRoads(new Float32Array(haloV), new Float32Array(coreV));
+      statWaterQuads = waterV.length / 12;      // 验数: 水上一段虚线 = 一个四边形
+      renderer.setRoads(new Float32Array(haloV), new Float32Array(coreV),
+                        new Float32Array(waterV));
     }
 
     /* 灵脉: 七星花 + 群落灵气晕圈 (后端群落数据) */
@@ -838,7 +1209,8 @@
           var v = cm.veins[vv];
           var rgb = v.variant ? geoVariantColor(v.variant) : cRGB;
           IT.drawVeinFlower(ctx, v.x, v.y, null, rgb, { level: v.level });
-          veinLabels.push({ x: v.x, y: v.y, name: v.name + '灵脉（' + ['大', '中', '小'][v.level] + '）', rgb: rgb, level: v.level });
+          veinLabels.push({ x: v.x, y: v.y, name: v.name + '灵脉（' + ['大', '中', '小'][v.level] + '）',
+                            rgb: rgb, level: v.level, topU: veinTopU(v) });
         }
       });
     }
@@ -865,23 +1237,35 @@
     /* 建筑层 (地面实体 → 压在淡淡的区域名之上, 名牌/灵脉标之下) */
     drawBuildings(ctx, vw, vh, z);
 
-    /* 灵脉名牌 */
-    if (showLabels && z >= 1.0) {
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      for (var vl = 0; vl < veinLabels.length; vl++) {
-        var vb = veinLabels[vl];
-        var ps3 = w2s(vb.x, vb.y);
-        if (ps3.x < -80 || ps3.y < -40 || ps3.x > vw + 80 || ps3.y > vh + 40) continue;
-        var vfs = 12 * Math.max(z, 0.8);
-        ctx.font = vfs + 'px "KaiTi","STKaiti",serif';
-        var ty = ps3.y + (vb.level === 0 ? 14 : 12) * Math.max(z, 0.8);
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = 'rgba(240,232,214,0.85)';
-        ctx.strokeText(vb.name, ps3.x, ty);
-        ctx.fillStyle = 'rgba(' + vb.rgb[0] + ',' + vb.rgb[1] + ',' + vb.rgb[2] + ',0.95)';
-        ctx.fillText(vb.name, ps3.x, ty);
+    /* 聚落建筑群的「挂牌锚点」(缓存):
+       · 水平 = **聚落中心** st.x —— 与服务端下发的实体坐标同源, 也是建筑围绕的核心。
+         ⚠ 不可用「建筑世界包围盒中心」: 建筑地皮里含农田/林地/码头/水车, 分布
+           常不对称 (甚至有一两格远在 2 格外), 包围盒中心会被整体拉到一侧, 牌匾
+           看起来"挂歪了"。2026-09-14 用户第 2 次反馈"名字位置还是不对"即此回归。
+       · 垂直 = **建筑群最北格** y0 —— 签子贴住镇子上沿, 而不是悬在半空
+         (第 1 次反馈"位置超出正上方太远"改的就是这里)。
+       `?ancgeo=1` 可退回包围盒中心 (同机位 A/B 差分用)。 */
+    function bldgAnchor(st) {
+      if (!st._anc) {
+        var x0 = Infinity, x1 = -Infinity, rs = [];
+        for (var i = 0; i < st.buildings.length; i++) {
+          var w = MC.tileToWorld(st.buildings[i].q, st.buildings[i].r);
+          rs.push(w.y);
+          if (w.x < x0) x0 = w.x;
+          if (w.x > x1) x1 = w.x;
+        }
+        rs.sort(function (a, b) { return a - b; });
+        /* 垂直 = 建筑格 y 的 **25 百分位** —— **不是**最北格 (min)。
+           ⚠ 2026-09-14 用户第 3 次反馈"村落上偏高 4 格": 聚落地皮里常有一两格
+           离群地物 (农田/水磨/渔亭/码头) 伸到主体以北 **2~3 档** (离线实测 277 个聚落:
+           中位 2 档 / 最大 3 档), 用 min 会把整张签子顶高 ≈3 档 + 抬升 ≈1 档 = **4 格**。
+           取 p25 = 内容密集区的北沿 ⇒ 配合下面 ~1 档抬升, 签子离地物 ≈1 格
+           (与灵脉签观感一致)。`?ancgeo=1` 仍可把横向退回包围盒中心。 */
+        var y0 = rs.length ? rs[Math.min(rs.length - 1, Math.floor(0.25 * rs.length))] : Infinity;
+        var ax = ANC_GEO ? (x0 + x1) / 2 : st.x;
+        st._anc = isFinite(y0) ? { x: ax, y: y0 } : { x: st.x, y: st.y };
       }
+      return st._anc;
     }
 
     /* 聚落/景点实体图标 + 名牌 (图层2/3: 动态实体独立于静态地形层, 设计 §二) */
@@ -899,57 +1283,53 @@
            景点无建筑, 图标照旧。远景 (格半径不足, 建筑层未画) 两种都保留。 */
         var solid = bldgShown && st.type !== 'poi';
         if (!solid) fn(ctx, ps2.x, ps2.y, baseSize * zoomClamp);
-        var showName = st.type === 'sect' || st.type === 'city' || st.type === 'poi' || z > 0.72;
-        if (showLabels && showName) {
-          var nfs = 11.5 * Math.max(z, 0.75);
-          ctx.font = nfs + 'px "KaiTi","STKaiti",serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          ctx.lineWidth = 3 * Math.max(z, 0.75);
-          ctx.strokeStyle = 'rgba(240,232,214,0.88)';
-          /* 实体化时名牌落在建筑群外沿之下 (TOWN_R 格 ≈ 4.5·hexR) */
-          var ly = solid
-            ? ps2.y + (4.8 * geo.hexR * z + 4)
-            : ps2.y + baseSize * zoomClamp * 0.75 + 3 * Math.max(z, 0.75);
-          ctx.strokeText(st.name, ps2.x, ly);
-          ctx.fillStyle = st.type === 'poi' ? 'rgba(140,48,34,0.95)' : 'rgba(50,42,34,0.92)';
-          ctx.fillText(st.name, ps2.x, ly);
+        var showName = st.type === 'sect' || st.type === 'city' || st.type === 'poi' || z > 0.62;
+        /* 名牌 = 竖排纸签, 一律挂在对应地物**上方** (2026-09-14 改; 旧版为横排落在下方)。
+           签底锚在图标顶/建筑群上沿之上, 引绳由 drawNameBanner 自己连回锚点。 */
+        if (showBanners && showName && statBanner < BANNER_MAX) {
+          var aX = ps2.x, anchorY;
+          if (solid) {
+            var anc = bldgAnchor(st);
+            var ap = w2s(anc.x, anc.y);
+            aX = ap.x;
+            anchorY = ap.y - (1.15 * geo.hexR * z + 2);   // 贴住建筑群上沿 (sprite 上探 ~1.5R)
+          } else {
+            anchorY = ps2.y - (baseSize * zoomClamp * 0.72 + 4);
+          }
+          drawNameBanner(ctx, aX, anchorY, st.name, {
+            fs: 11.5 * Math.max(z, 0.75), vh: vh, poi: st.type === 'poi'
+          });
         }
       }
     }
     settleCells.forEach(drawEntityList);
     poiCells.forEach(drawEntityList);
 
-    /* 「本宗」朱砂标记: 双圈 + 四角斜标 (与宗门录面板同源, 标明当前展示的是哪一座) */
-    if (sect.cur) {
-      var sc = w2s(sect.cur.x, sect.cur.y);
-      if (sc.x > -70 && sc.y > -70 && sc.x < vw + 70 && sc.y < vh + 70) {
-        var sr = 15 * Math.max(z, 0.7);
-        ctx.save();
-        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-        ctx.strokeStyle = 'rgba(166,58,44,0.88)'; ctx.lineWidth = 1.7;
-        ctx.beginPath(); ctx.arc(sc.x, sc.y, sr, 0, Math.PI * 2); ctx.stroke();
-        ctx.strokeStyle = 'rgba(166,58,44,0.32)'; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(sc.x, sc.y, sr + 3.4, 0, Math.PI * 2); ctx.stroke();
-        ctx.strokeStyle = 'rgba(166,58,44,0.85)'; ctx.lineWidth = 2;
-        for (var s4 = 0; s4 < 4; s4++) {
-          var sa = Math.PI / 4 + s4 * Math.PI / 2;
-          var sx2 = sc.x + Math.cos(sa) * (sr + 6.5), sy2 = sc.y + Math.sin(sa) * (sr + 6.5);
-          ctx.beginPath();
-          ctx.moveTo(sx2 - Math.cos(sa) * 4, sy2 - Math.sin(sa) * 4);
-          ctx.lineTo(sx2 + Math.cos(sa) * 4, sy2 + Math.sin(sa) * 4);
-          ctx.stroke();
-        }
-        ctx.font = 11.5 * Math.max(z, 0.75) + 'px "KaiTi","STKaiti",serif';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(240,232,214,0.88)';
-        ctx.strokeText('本宗', sc.x, sc.y - sr - 5);
-        ctx.fillStyle = 'rgba(166,58,44,0.95)';
-        ctx.fillText('本宗', sc.x, sc.y - sr - 5);
-        ctx.restore();
+    /* 灵脉名牌 —— 与聚落同款**竖排纸签** (2026-09-14 二改: 原为横排描边字)。
+       受「匾额」开关统一管 (注记只管区域名淡字); 签面薄敷灵根本色 + 签脚一枚色印,
+       一眼分得清金木水火土。签底立在脉峰之上: 峰高 ≈ 2.5 格半径 (PROP_VS 的
+       H≈3.5~4.7R 折中, 减去山脚 0.95R 与顶部留白)。
+       ⚠ 画在聚落名牌**之后**: 签位占用表里先到者优先, 灵脉签长 (7 字), 撞上
+         村名时让它往上让一档 —— 灵脉常就在聚落旁边, 不避让必叠。 */
+    if (showBanners && z >= 0.85) {
+      for (var vl = 0; vl < veinLabels.length; vl++) {
+        var vb = veinLabels[vl];
+        var ps3 = w2s(vb.x, vb.y);
+        if (ps3.x < -90 || ps3.y < -40 || ps3.x > vw + 90 || ps3.y > vh + 140) continue;
+        if (statBanner >= BANNER_MAX) break;
+        var peakTop = ps3.y - geo.hexR * z * vb.topU;
+        drawNameBanner(ctx, ps3.x, peakTop, vb.name, {
+          fs: (vb.level === 0 ? 11.5 : 10.5) * Math.max(z, 0.75), vh: vh, tint: vb.rgb,
+          avoid: true
+        });
       }
     }
 
+    /* 朱砂「点选」标记不在这里画 (2026-09-14 九版改动):
+       它已从「本宗·自动择宗标记」改为「玩家点选标记」, 画在**覆盖层** (drawOverlay)
+       里 —— 好处是点一下立刻可见, 不必等静态层置脏重绘; 且不再随相机自动漂移。 */
+
+    if (PLAQ_DBG) drawPlaqueDbg(ctx);
     staticCam.x = cam.x; staticCam.y = cam.y;
     staticCam.zoom = cam.zoom; staticCam.w = els.app.clientWidth; staticCam.h = els.app.clientHeight;
     staticDirty = false;
@@ -970,6 +1350,136 @@
     return (geo && geo.variantRGB && geo.variantRGB[name]) || VARIANT_RGB_FB[name] || [150, 130, 100];
   }
 
+  /* ---------- 云气层 (水墨祥云: 勾线云团 + 卷云钩) ----------
+     云毯锚在**世界坐标**上: 平移时云跟着走, 但比地面慢 (视差 0.88) ⇒ 有高度感;
+     云团大小只随 zoom 微调 (它是"天气层", 不该像地面那样线性放大)。
+     播种密度由格号 hash 决定 —— 同格恒定, 不会有随机闪烁。
+     位图 (6 种形态) 见 textures.js buildClouds() —— 云球勾线 + 上白下阴 + 卷云钩 + 云尾。
+     ⚠ 变体数**不写死**: 取模走 cloudSprites.length, 加变体只改 textures.js CLOUD_N。
+     七版三条 (用户反馈"云太大 / 太不透明 / 地上没阴影"):
+       · 基准宽 base 由 176 降到 92 (≈五成), 大小方差收窄 ⇒ 云不再是"大块白斑";
+       · 不透明度由 0.72~0.98 降到 0.32~0.54 ⇒ 云下的地形/道路/建筑透得出来;
+       · 新增**地面云影**: 同源轮廓的墨色软影, 向右下偏一点, 铺在所有云体之前
+         (影位图见 textures.js buildCloudShadows)。 */
+  var CLOUD_CELL = 190;        // 播云格边长 (世界像素) —— 基准朵宽 ~94 ⇒ 格距 ≈ 2 倍朵宽
+  /* 族群块 = 3×3 播云格 (570 世界像素)。
+     ★ 九版**结构性的改法**: 云按「块」播、不再按「格」播。
+       八版 (以及九版初稿) 逐格独立播种 ⇒ **每格都长云** ⇒ 云均匀铺满整屏, 看着只有
+       "稀/密" 之别, 没有 "一团一团" 的**集群感** (用户: "成批的云要聚集很多, 像乌云
+       一样密集; 散装的云也要有集群感")。
+       现在: ① 先给块定**聚集度** (偏斜分布: 多数块偏稀、少数块极密);
+             ② 块内挑 1~3 个**云团中心**, 把朵**按圆盘分布堆在中心周围**;
+             ③ 团内朵数远多于八版 ⇒ 中心叠成实心云体, 团与团之间/块与块之间留出晴空。
+       于是同一屏里同时有 "厚云幕 / 小批 / 孤单小朵 / 晴空" 四种层次, 且每种都成团。 */
+  var CLOUD_CLUSTER = 3;
+  var CLUSTER_W = CLOUD_CELL * CLOUD_CLUSTER;   // 族群块边长 (世界像素)
+  var CLOUD_PARALLAX = 0.88;   // 视差: 云比地面慢 12%
+  var CLOUD_DRIFT = 7;         // 向东漂移速度 (世界像素/秒)
+  /* 一块要播的云 (可能为空)。三层掷骰, 全用块号 hash ⇒ 同块恒定不闪:
+       ① 聚集度 → 晴空 / 孤单 / 小批 / 成批 四档;
+       ② 档位定「几团云 (nm) / 每团几朵 (per) / 团内散开半径 (spr) / 朵的大小与不透明度」;
+       ③ 逐朵在团心周围按**圆盘均匀分布**撒点 (中心密、外缘疏) ⇒ 团内叠成实心云体。
+     期望 (z=1 视野 ~5×4 块): 成批块 ~1 个 ⇒ 2~3 团大云幕; 另有小批/孤单各若干团。 */
+  function cloudOf(ka, kb) {
+    function h01(a, b, k) {
+      var v = Math.sin(a * k + b * (k * 3.1)) * 43758.5453;
+      return v - Math.floor(v);
+    }
+    var h = h01(ka, kb, 17.7719);
+    if (h < 0.18) return null;                                        // 晴空 (~18% 块)
+    var nm, per, spr, scLo, scHi, aLo, aHi;
+    if (h < 0.46) {        // 孤单: 1 团小朵 (散装云也要成团 ⇒ 4 朵抱在一起)
+      nm = 1; per = 4;  spr = 0.105; scLo = 0.50; scHi = 0.78; aLo = 0.24; aHi = 0.40;
+    } else if (h < 0.72) { // 小批: 2 团中等
+      nm = 2; per = 13; spr = 0.150; scLo = 0.68; scHi = 1.08; aLo = 0.28; aHi = 0.48;
+    } else {               // 成批: 3 团厚云幕 (乌云般密集)
+      nm = 3; per = 24; spr = 0.180; scLo = 0.88; scHi = 1.36; aLo = 0.32; aHi = 0.58;
+    }
+    var nsp = (cloudSprites && cloudSprites.length) || 1;     // 变体数取实际产出
+    var out = [];
+    for (var m = 0; m < nm; m++) {
+      /* 团心: 块内偏置 ±0.30 块 —— 同块几团错开, 又都留在本块范围内 */
+      var ox = (h01(ka * 31 + m, kb * 31 + m, 7.3319) - 0.5) * CLUSTER_W * 0.60;
+      var oy = (h01(ka * 31 + m, kb * 31 + m, 19.7717) - 0.5) * CLUSTER_W * 0.60;
+      var mx = (ka + 0.5) * CLUSTER_W + ox, my = (kb + 0.5) * CLUSTER_W + oy;
+      /* 每团朵数再抖 ±40% (成批 12~28 / 小批 6~14 / 孤单 2~4) */
+      var cnt = Math.max(2, per + Math.round((h01(ka * 37 + m, kb * 37 + m, 29.1133) - 0.5) * per * 0.8));
+      var rad = spr * CLUSTER_W;
+      for (var t = 0; t < cnt; t++) {
+        var kk = ka * 53 + kb * 7 + m * 101 + t;
+        var u = h01(kk, kk * 3 + 1, 5.7781);
+        var v = h01(kk + 17, kk * 5 + 2, 23.3717);
+        var w = h01(kk + 41, kk * 9 + 3, 11.1131);
+        var ang = u * 6.2831853, rr = rad * Math.sqrt(v);      // 圆盘均匀 ⇒ 团内密、外缘疏
+        out.push({
+          wx: mx + Math.cos(ang) * rr,
+          wy: my + Math.sin(ang) * rr,
+          sp: ((w * 1000) | 0) % nsp,
+          sc: scLo + w * (scHi - scLo),               // 档位决定大小 (成批更大)
+          /* ⚠ 不透明度仍是压着的 (七版用户嫌"太不透明"): 单朵薄, **密集感靠团内多朵叠** ——
+             成批团 12~28 朵互叠 ⇒ 中心自然压成云幕; 孤单团 2~4 朵 ⇒ 仍是薄云。 */
+          a: aLo + ((u + v) % 1) * (aHi - aLo)
+        });
+      }
+    }
+    return out;
+  }
+  function drawClouds(ctx, vw, vh) {
+    if (!showClouds || !cloudSprites || !cloudSprites.length) return;
+    var z = cam.zoom;
+    var drift = NO_CLOUD_DRIFT ? 0 : timeSec * CLOUD_DRIFT;
+    var pad = CLUSTER_W * 0.85;
+    var b = viewBounds();
+    /* 遍历单位是**族群块** (不是播云格) —— 云按块生成, 块间距 CLUSTER_W */
+    var ka0 = Math.floor((b.x0 - pad) / CLUSTER_W), ka1 = Math.floor((b.x1 + pad) / CLUSTER_W);
+    var kb0 = Math.floor((b.y0 - pad) / CLUSTER_W), kb1 = Math.floor((b.y1 + pad) / CLUSTER_W);
+    var base = 92 * (0.70 + 0.32 * Math.min(z, 3.2));       // 屏幕基准宽度 (CSS px)
+    /* 云影偏移/不透明度 (屏幕 px): 影向右下偏 —— 光从左上来; 影比云淡得多 */
+    var SH_DX = 0.10, SH_DY = 0.30, SH_A = 0.55;
+    /* ① 先收本帧可见的云 —— 两趟绘制必须用同一批, 否则影子与云体会错开 */
+    var vis = [], ka, kb, cc;
+    for (ka = ka0; ka <= ka1; ka++) {
+      for (kb = kb0; kb <= kb1; kb++) {
+        cc = cloudOf(ka, kb);
+        if (!cc) continue;
+        for (var t = 0; t < cc.length; t++) {          // 本块 0~3 团, 每团 per 朵
+          var c1 = cc[t];
+          var ps = w2s(cam.x + (c1.wx + drift - cam.x) * CLOUD_PARALLAX,
+                       cam.y + (c1.wy - cam.y) * CLOUD_PARALLAX);
+          var cw = base * c1.sc, chh = cw * (84 / 128);
+          if (ps.x + cw * 0.5 < -12 || ps.y + chh < -12 ||
+              ps.x - cw * 0.5 > vw + 12 || ps.y - chh > vh + 12) continue;
+          vis.push({ c: c1, x: ps.x, y: ps.y, w: cw, h: chh });
+        }
+      }
+    }
+    if (!vis.length) return;
+    /* 覆盖层画布是设备像素 (与静态层同), 故下面按 dpr 放大绘制 */
+    /* ② 云影一趟: 全部先落到地上 (云体之前) —— 若夹在云体之间画, 后一朵云的影子
+          会盖在前一朵云身上。云影位图与云体同源轮廓 (textures.js buildCloudShadows) */
+    var i;
+    if (cloudShadows && cloudShadows.length && !NO_CLOUD_SHADOW) {
+      ctx.globalAlpha = SH_A;
+      for (i = 0; i < vis.length; i++) {
+        var v = vis[i];
+        var sh = cloudShadows[v.c.sp % cloudShadows.length];
+        if (!sh) continue;
+        ctx.drawImage(sh, (v.x - v.w * 0.5 + v.w * SH_DX) * dpr,
+                      (v.y - v.h * 0.62 + v.h * SH_DY) * dpr,
+                      v.w * 1.04 * dpr, v.h * 1.04 * dpr);
+      }
+      ctx.globalAlpha = 1;
+    }
+    /* ③ 云体一趟 */
+    for (i = 0; i < vis.length; i++) {
+      var v2 = vis[i];
+      ctx.globalAlpha = v2.c.a;
+      ctx.drawImage(cloudSprites[v2.c.sp], (v2.x - v2.w * 0.5) * dpr,
+                    (v2.y - v2.h * 0.62) * dpr, v2.w * dpr, v2.h * dpr);
+      ctx.globalAlpha = 1;
+    }
+  }
+
   function drawOverlay() {
     var vw = els.app.clientWidth, vh = els.app.clientHeight;
     if (staticNeedsRedraw(vw, vh)) renderStaticInto();
@@ -983,7 +1493,10 @@
     } else if (staticLayer) {
       ctx.drawImage(staticLayer, 0, 0);
     }
-    function hexHi(t, alpha, pulse) {
+    /* 云气: 压在静态层之上 (云是"天", 在路/建筑/名牌之上), 交互高亮之下 */
+    drawClouds(ctx, vw, vh);
+    /* 悬停: 淡墨细六边框 —— 只回答"鼠标底下是哪一格", 不是选中态 */
+    function hexHi(t, alpha) {
       if (!t) return;
       var w = MC.tileToWorld(t.q, t.r);
       ctx.save();
@@ -991,13 +1504,39 @@
         dpr * (els.app.clientWidth / 2 - cam.x * cam.zoom),
         dpr * (els.app.clientHeight / 2 - cam.y * cam.zoom));
       ctx.strokeStyle = 'rgba(48,36,24,' + alpha + ')';
-      ctx.lineWidth = pulse ? 5 : 3.4;
+      ctx.lineWidth = 3.4;
       hexPath(ctx, w.x, w.y, geo.hexR * 0.94);
       ctx.stroke();
       ctx.restore();
     }
-    hexHi(hoverTile, 0.7, false);
-    hexHi(selectedTile, 0.95, true);
+    hexHi(hoverTile, 0.7);
+    /* 点选标记 (朱砂双圈 + 四角斜标) —— 2026-09-14 九版:
+       · 位置 = 玩家**点的那一格**(selMark), 不再跟相机自动漂 (自动择宗已删);
+       · 取代原来那圈「黑色加粗」六边框 (用户: 又黑又粗, 丑);
+       · 画在覆盖层 ⇒ 点一下立刻可见, 不必等静态层置脏。 */
+    if (selMark) {
+      var sp = w2s(selMark.x, selMark.y);
+      if (sp.x > -80 && sp.y > -80 && sp.x < vw + 80 && sp.y < vh + 80) {
+        var sr = Math.max(geo.hexR * cam.zoom * 1.9, 11);
+        ctx.save();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);          // 以下为 CSS px 作图
+        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.strokeStyle = 'rgba(166,58,44,0.88)'; ctx.lineWidth = 1.7;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, sr, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = 'rgba(166,58,44,0.30)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, sr + 3.4, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = 'rgba(166,58,44,0.85)'; ctx.lineWidth = 2;
+        for (var s4 = 0; s4 < 4; s4++) {
+          var sa = Math.PI / 4 + s4 * Math.PI / 2;
+          var sx2 = sp.x + Math.cos(sa) * (sr + 6.5), sy2 = sp.y + Math.sin(sa) * (sr + 6.5);
+          ctx.beginPath();
+          ctx.moveTo(sx2 - Math.cos(sa) * 4, sy2 - Math.sin(sa) * 4);
+          ctx.lineTo(sx2 + Math.cos(sa) * 4, sy2 + Math.sin(sa) * 4);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
   }
 
   /* ---------- 相机 ---------- */
@@ -1099,6 +1638,8 @@
     MC.blockForgetAll();                             // rev 缓存随世界重铸失效
     keepChunk = new Set();                            // R4: 世界重铸后旧窗口失效, 待 updateStreaming 重建
     keepR = new Set(); keepC = new Set();
+    propBlock.clear(); propBuilt.clear();             // 覆盖格/过滤记录随重铸失效
+    syncedVer = -1; blockedVer++;
     if (BI && BI.spriteClear) BI.spriteClear();       // 建筑精灵缓存随世界重铸失效
     lastRBucket = -1;
     chunkQueue.length = 0;
@@ -1114,8 +1655,10 @@
     cam.tzoom = cam.zoom = 2.2;
     els.seedInput.value = worldSeed;
     seedEra(worldSeed);
-    /* 世界重铸: 旧世界的宗门 id 全部失效 → 清固定选择, 回到随行 */
-    sect.auto = true; sect.pinId = ''; sect.curId = ''; sect.curFp = ''; sect.cur = null;
+    /* 世界重铸: 旧世界的宗门 id 全部失效 → 清掉选中宗门与点选标记 (九版无"随行"可回退,
+       重铸后回到"未择"状态, 由玩家重新点选) */
+    sect.pinId = ''; sect.pinEnt = null; sect.curId = ''; sect.curFp = ''; sect.cur = null;
+    selMark = null;
     openSectMenu(false);
     updateSectPanel(true);
     hideInfo();
@@ -1200,14 +1743,87 @@
     out.sort(function (a, b) { return a.d - b.d; });
     return out;
   }
-  function pickSect() {
-    sect.items = collectSects();
-    if (!sect.auto) {
-      for (var i = 0; i < sect.items.length; i++)
-        if (sect.items[i].ent.id === sect.pinId) return sect.items[i];
-      sect.auto = true;                       // 所择宗门已出视野/被毁 → 回退随行
+  /* D14: 单遍 O(n) 扫描 (不排序、不建数组) —— 层指纹未变时用它回答
+     「选中的宗门还在不在、距离变没变」。
+     九版: 选中宗门**只由 pinId 决定** (点地图 / 择宗菜单), 「随行·就近择宗」已删 ⇒
+     这里不再有"最近宗门换了人"这回事, 只需找回 pinId 对应的实体。 */
+  function scanSects() {
+    var ct = MC.pxToTile(cam.x, cam.y);
+    var pin = null;
+    if (sect.pinId) {
+      settleCells.forEach(function (list) {
+        if (pin) return;
+        for (var i = 0; i < list.length; i++) {
+          var ent = list[i];
+          if (ent.type === 'sect' && ent.state !== 1 && ent.id === sect.pinId) {
+            pin = { id: ent.id, d: Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)), ent: ent };
+            return;
+          }
+        }
+      });
     }
-    return sect.items.length ? sect.items[0] : null;
+    return { pin: pin };
+  }
+  /* 该格是否属于某座宗门的营建 (宗址格或它的山门建筑格) */
+  function tileInBuildings(ent, q, r) {
+    var bl = ent.buildings || [];
+    for (var i = 0; i < bl.length; i++) if (bl[i].q === q && bl[i].r === r) return true;
+    return false;
+  }
+  function sectAtTile(q, r) {
+    var hit = null;
+    settleCells.forEach(function (list) {
+      if (hit) return;
+      for (var i = 0; i < list.length; i++) {
+        var ent = list[i];
+        if (ent.type !== 'sect' || ent.state === 1) continue;
+        if ((ent.q === q && ent.r === r) || tileInBuildings(ent, q, r)) { hit = ent; return; }
+      }
+    });
+    return hit;
+  }
+  /* 点选一格 (2026-09-14 九版): 落朱砂标记; 若这一格属于某座宗门, 顺带把它设成
+     「宗门录」的选中宗门 —— 这是九版**唯一**的选宗途径之一 (另一条是择宗菜单)。 */
+  function selectTile(t) {
+    if (!t) return;
+    var w = MC.tileToWorld(t.q, t.r);
+    selMark = { q: t.q, r: t.r, x: w.x, y: w.y };
+    var ent = sectAtTile(t.q, t.r);
+    if (ent) {
+      sect.pinId = ent.id; sect.pinEnt = ent;
+      updateSectPanel(true);
+    }
+  }
+  function pickSectById(id) {
+    for (var i = 0; i < sect.items.length; i++)
+      if (sect.items[i].ent.id === id) return sect.items[i];
+    return null;
+  }
+  function updateSectPanel(force) {
+    if (!metaReady || !geo) return;
+    var fp = layerFingerprint();
+    var sc = scanSects();
+    /* 选中宗门已出视野/被卸载/被毁 → 退回最后一次实体 (sect.pinEnt): 面板不闪空,
+       距离继续按它算; 玩家再点到它时引用自会刷新。 */
+    var ent = sc.pin ? sc.pin.ent : sect.pinEnt;
+    if (sc.pin) sect.pinEnt = sc.pin.ent;
+    var id = ent ? ent.id : '';
+    var d = 0;
+    if (ent) {
+      if (sc.pin) d = sc.pin.d;
+      else { var ct = MC.pxToTile(cam.x, cam.y); d = Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)); }
+    }
+    if (id !== sect.curId || fp !== sect.curFp || force) {
+      sect.curFp = fp;
+      sect.curId = id; sect.cur = ent;
+      els.sectBody.innerHTML = ent
+        ? sectBodyHTML({ ent: ent, d: d })
+        : '<div class="sec-empty">未择宗门 · 点击图上宗门</div>';
+      if (els.sectMenu.classList.contains('open')) openSectMenu(true);
+    } else if (ent) {
+      var dEl = els.sectBody.querySelector('.sec-dist');
+      if (dEl) dEl.textContent = d;      // 「距此」随相机移动, 由 1.5s 节拍刷新
+    }
   }
   function tagList(list) {
     var h = '<div class="chips">';
@@ -1256,11 +1872,13 @@
     }
     return row.join('');
   }
+  /* 择宗菜单 (九版): 删掉「随行 · 就近择宗」那一项 —— 自动择宗已按用户要求移除,
+     这里只剩"点名择宗"。空列表才显示空态。 */
   function sectMenuHTML() {
-    var h = '<div class="mm-item' + (sect.auto ? ' cur' : '') + '" data-id="">随行 · 就近择宗</div>';
+    var h = '';
     for (var i = 0; i < sect.items.length && i < 30; i++) {
       var it = sect.items[i];
-      h += '<div class="mm-item' + (!sect.auto && it.ent.id === sect.pinId ? ' cur' : '') +
+      h += '<div class="mm-item' + (it.ent.id === sect.pinId ? ' cur' : '') +
            '" data-id="' + esc(it.ent.id) + '"><span class="mm-nm">' + esc(it.ent.name) +
            '</span><span class="mm-d">' + it.d + ' 格</span></div>';
     }
@@ -1268,7 +1886,9 @@
     return h;
   }
   function openSectMenu(open) {
-    if (open) els.sectMenu.innerHTML = sectMenuHTML();
+    /* 每次展开都重新收一遍视野内宗门 (按距相机中心升序) —— 原由 pickSect() 顺带刷新,
+       九版 pickSect 已删, 改在这里取。 */
+    if (open) { sect.items = collectSects(); els.sectMenu.innerHTML = sectMenuHTML(); }
     els.sectMenu.classList.toggle('open', open);
     els.sectMenuBtn.classList.toggle('on', open);
   }
@@ -1279,60 +1899,6 @@
        (id 不再变化 → 不再重建)。加了规模指纹后数据补到即自动纠正。 */
   function layerFingerprint() {
     return settleCells.size + '|' + regionCells.size + '|' + commCells.size;
-  }
-  /* D14: 单遍 O(n) 扫描 (不排序、不建数组) —— 层指纹未变时用它回答
-     「选中的宗门会不会变」: 随行模式看最近宗门是否换人, 指定模式看所择宗门是否还在视野。
-     只有结论确实要变时才落到全量 collectSects()+sort+innerHTML 重建。 */
-  function scanSects() {
-    var ct = MC.pxToTile(cam.x, cam.y);
-    var best = null, bd = Infinity, pin = null, seen = {};
-    settleCells.forEach(function (list) {
-      for (var i = 0; i < list.length; i++) {
-        var ent = list[i];
-        if (ent.type !== 'sect' || ent.state === 1) continue;
-        if (seen[ent.id]) continue;
-        seen[ent.id] = true;
-        var d = hexDist(ct.q, ct.r, ent.q, ent.r);
-        if (sect.pinId && ent.id === sect.pinId) pin = { id: ent.id, d: Math.round(d), ent: ent };
-        if (d < bd) { bd = d; best = { id: ent.id, d: Math.round(d), ent: ent }; }
-      }
-    });
-    return { best: best, pin: pin };
-  }
-  function updateSectPanel(force) {
-    if (!metaReady || !geo) return;
-    var fp = layerFingerprint();
-    /* D14: 原实现每次都先跑 collectSects() (全量收集 + 排序), 之后才比指纹 ——
-       1.5s 一次的固定开销里, 九成以上的调用结论完全没变。 */
-    if (!force && fp === sect.curFp) {
-      var sc = scanSects();
-      var want = sect.auto ? sc.best : (sc.pin || null);
-      var wantId = want ? want.id : '';
-      if (wantId === sect.curId) {
-        if (want) {
-          sect.cur = want.ent;               // 刷新实体引用 (同 id 的新对象)
-          var dEl0 = els.sectBody.querySelector('.sec-dist');
-          if (dEl0) dEl0.textContent = want.d;
-        }
-        return;
-      }
-      /* 结论要变 → 落到下面的全量重建路径 */
-    }
-    var pick = pickSect();
-    var ent = pick ? pick.ent : null;
-    var id = ent ? ent.id : '';
-    if (id !== sect.curId || fp !== sect.curFp || force) {
-      sect.curFp = fp;
-      sect.curId = id; sect.cur = ent;
-      els.sectBody.innerHTML = ent ? sectBodyHTML(pick)
-                                   : '<div class="sec-empty">此方地界，未闻宗门</div>';
-      if (els.sectMenu.classList.contains('open')) openSectMenu(true);
-      forceStaticDirty();        // 本宗朱砂标记随选中宗门移动 (相机静止时也须重绘)
-    } else {
-      sect.cur = ent;
-      var dEl = els.sectBody.querySelector('.sec-dist');
-      if (dEl && pick) dEl.textContent = pick.d;
-    }
   }
 
   /* ---------- 输入 ---------- */
@@ -1379,6 +1945,7 @@
       if (mx < 0 || my < 0 || mx > rect.width || my > rect.height) return;
       var wpt = s2w(mx, my);
       selectedTile = MC.pxToTile(wpt.x, wpt.y);
+      selectTile(selectedTile);         // 九版: 点哪选哪 (朱砂圈 + 若是宗门则立选)
       showInfo(selectedTile);
     });
     app.addEventListener('wheel', function (e) {
@@ -1496,7 +2063,19 @@
       this.classList.toggle('off', !showLabels);
       forceStaticDirty();          // 同上: 区域名/聚落名/灵脉名牌都在静态层
     });
-    /* 择宗菜单: 按钮开合 / 选项落定 / 点空白处收起 */
+    /* 地名纸签 (山海经式竖排匾额) 开关 */
+    $('btnBanners').addEventListener('click', function () {
+      showBanners = !showBanners;
+      this.classList.toggle('off', !showBanners);
+      forceStaticDirty();
+    });
+    /* 云气层开关 */
+    $('btnClouds').addEventListener('click', function () {
+      showClouds = !showClouds;
+      this.classList.toggle('off', !showClouds);
+      forceStaticDirty();          // 顺带置脏: 静止降帧会吞掉"立刻消失"
+    });
+    /* 择宗菜单: 按钮开合 / 选项落定 / 点空白处收起 (九版: 不再有「随行」项) */
     els.sectMenuBtn.addEventListener('click', function (e) {
       e.stopPropagation();
       openSectMenu(!els.sectMenu.classList.contains('open'));
@@ -1505,10 +2084,18 @@
       var it = e.target && e.target.closest ? e.target.closest('.mm-item') : null;
       if (!it) return;
       var id = it.getAttribute('data-id') || '';
-      sect.auto = !id;                    // 空 id = 「随行」项
-      sect.pinId = id;
+      var pick = id ? pickSectById(id) : null;
+      sect.pinId = pick ? id : '';
+      sect.pinEnt = pick ? pick.ent : null;
+      /* 选中即把朱砂圈也移过去 (与"点地图选宗"同一套标记) */
+      if (pick) {
+        var w = MC.tileToWorld(pick.ent.q, pick.ent.r);
+        selMark = { q: pick.ent.q, r: pick.ent.r, x: w.x, y: w.y };
+      } else {
+        selMark = null;
+      }
       openSectMenu(false);
-      updateSectPanel(true);              // 立即重排面板 + 移动朱砂标记
+      updateSectPanel(true);              // 立即重排面板
     });
     window.addEventListener('mousedown', function (e) {
       if (!els.sectMenu.classList.contains('open')) return;
@@ -1532,8 +2119,15 @@
 
   /* ---------- 主循环 ---------- */
   var frame = 0;
+  /* D5b: 「隔帧降载」必须用**每次 loop 都自增**的计数, 不能用 frameCount ——
+     frameCount 只在真正渲染的帧里 ++, 一旦相机静止且它恰好为奇数, 跳帧分支会
+     永远成立 (它自己不会前进) ⇒ 整个渲染循环冻死: 滚轮改的 zoom 数值在涨、
+     画面纹丝不动, 只有拖动 (drag 让跳帧条件不成立) 才"活一帧"再冻。
+     这正是"滚轮有时没响应、只有拖屏幕才有反应"的根因。 */
+  var tickCount = 0;
   function loop(t) {
     try {
+      tickCount++;
       timeSec = t / 1000;
       var dt = Math.min((t - lastT) / 1000, 0.1);
       lastT = t;
@@ -1550,12 +2144,12 @@
       var settled = Math.abs(cam.tx - cam.x) < 0.5 && Math.abs(cam.ty - cam.y) < 0.5 &&
                     Math.abs(cam.tzoom - cam.zoom) < 0.004;
       if (settled && !staticDirty && !minimapDirty && !drag && chunkBusy.size === 0 &&
-          (frameCount & 1)) {
+          (tickCount & 1)) {
         requestAnimationFrame(loop);
         return;
       }
 
-      if (metaReady) updateStreaming();
+      if (metaReady) { updateStreaming(); syncPropBlock(); }
       renderer.render(cam, timeSec);
       drawOverlay();
       frameCount++;
@@ -1612,6 +2206,8 @@
     }
     var atlas = IT.buildAtlas();
     renderer.setTextures(atlas, IT.buildPaper(), IT.buildNoise());
+    cloudSprites = IT.buildClouds();          // 云气层位图 (Canvas2D, 不进 WebGL 图集)
+    cloudShadows = IT.buildCloudShadows ? IT.buildCloudShadows() : null;   // 云影 (同源轮廓)
     renderer.setAvgColors(IT.computeAvgColors(atlas));
     renderer.dpr = dpr;
     renderer.noFade = new URLSearchParams(location.search).get('nofade') === '1';
@@ -1635,6 +2231,9 @@
       if (urlParams.get('zm') != null) {
         cam.tzoom = cam.zoom = MC.clamp(parseFloat(urlParams.get('zm')), minZoom, maxZoom);
       }
+      /* 开关初值落到按钮外观 (nobanner=1 / nocloud=1 时按钮显示为关闭态) */
+      if (!showBanners) $('btnBanners').classList.add('off');
+      if (!showClouds) $('btnClouds').classList.add('off');
       bindInput();
 
       /* R10: 调试句柄仅 DEBUG 模式 (debug=1 / capture=1) 暴露 */
@@ -1642,6 +2241,72 @@
         window.__cam = cam;
         window.__renderer = renderer;
         window.__data = function () { return { chunks: chunkData.size, regions: regionCells.size, comms: commCells.size }; };
+        /* 表现升级验数: 一次性汇总, 供 headless 断言 (看图之外的"事实"证据) */
+        window.__feat = function () {
+          var cutChunks = 0, removed = 0, keptVein = 0, keptMtn = 0, keptOther = 0, props = 0;
+          chunkData.forEach(function (info) {
+            if (info.propOrig == null) return;
+            props += info.propOrig;
+            keptVein += info.keptVein || 0;
+            keptMtn += info.keptMtn || 0;
+            keptOther += info.keptOther || 0;
+            if (info.propCut) { cutChunks++; removed += info.propOrig - (info.propKept || 0); }
+          });
+          return {
+            bannersOn: showBanners, cloudsOn: showClouds,
+            showVeins: showVeins, bldgShown: bldgShown,
+            cloudVariants: cloudSprites ? cloudSprites.length : 0,
+            propBlock: propBlock.size, blockedVer: blockedVer, syncedVer: syncedVer,
+            propBuilt: propBuilt.size, cutChunks: cutChunks, propsRemoved: removed,
+            propsTotal: props, keptVein: keptVein, keptMtn: keptMtn, keptOther: keptOther,
+            banners: statBanner, bridges: statBridge, waterQuads: statWaterQuads,
+            /* 九版点选态: headless 用 Input.dispatchMouseEvent 点一下, 再读这两项
+               即知「朱砂标记落在哪一格 / 宗门录选中的是哪一座」。无点击时为 null/''。 */
+            sel: selMark ? [selMark.q, selMark.r] : null,
+            sectPin: sect.pinId ? String(sect.pinId) : '',
+            zoom: +cam.zoom.toFixed(3), camTile: [Math.round(cam.x), Math.round(cam.y)]
+          };
+        };
+        /* 定点相机助手: 把「路压水」「建筑压水」的世界格坐标吐出来 —— 否则
+           headless 无从知道该把镜头停在哪才能同时看到虚线航道与栈桥。 */
+        window.__spots = function () {
+          var water = [], bridge = [];
+          /* ⚠ biomeAt 对未加载格返回 -1; 水是 0/1。必须 bb>=0 才算, 否则
+             "未加载" 会被误判成水 (<=1)。 */
+          function isW(q, r) { var bb = biomeAt(q, r); return bb >= 0 && bb <= 1; }
+          regionCells.forEach(function (pack) {
+            var roads = pack.roads || [];
+            for (var i = 0; i < roads.length && water.length < 12; i++) {
+              var pts = roads[i].pts;
+              for (var p = 0; p + 3 < pts.length; p += 2) {
+                var ta = worldToTileI(pts[p], pts[p + 1]);
+                var tb = worldToTileI(pts[p + 2], pts[p + 3]);
+                if (isW(ta.q, ta.r) || isW(tb.q, tb.r)) {
+                  water.push([ta.q, ta.r, tb.q, tb.r]); break;
+                }
+              }
+            }
+          });
+          settleCells.forEach(function (ents) {
+            for (var i = 0; i < ents.length; i++) {
+              var st = ents[i];
+              if (st.state === 1 || !st.buildings) continue;
+              for (var j = 0; j < st.buildings.length && bridge.length < 12; j++) {
+                var b = st.buildings[j];
+                if (isW(b.q, b.r)) bridge.push([b.q, b.r, st.name]);
+              }
+            }
+          });
+          var towns = [];
+          settleCells.forEach(function (ents) {
+            for (var i = 0; i < ents.length; i++) {
+              var s = ents[i];
+              if (s.state === 1 || !s.buildings || !s.buildings.length) continue;
+              if (towns.length < 24) towns.push([s.q, s.r, s.name, s.type, s.buildings.length]);
+            }
+          });
+          return { water: water, bridge: bridge, towns: towns, cam: [cam.x, cam.y, cam.zoom] };
+        };
       }
 
       /* 调试钩子: capture=1 时等待块数据真实到达 (≥3 块或 25s 兜底) 再把
@@ -1656,11 +2321,18 @@
       if (new URLSearchParams(location.search).get('capture') === '1') {
         var snapStart = Date.now();
         var readyFrame = -1;
+        /* ⚠ capmin=N (秒): 在「就绪门槛」之外**再等 N 秒**才合成。
+           门槛 (chunkData≥3) 在低 zoom 下远远不够 —— zm≤2.2 的视口要上百个区块,
+           只等到 3 块就截 ⇒ 画面大面积缺块 (paper 空白), 且缺多少随服务端冷热
+           波动 ⇒ **同机位两次截图能差 20%** (2026-09-14 实测: 墨像素 6.4% vs 13.9%)。
+           故凡做实机 A/B, URL 一律带 capmin (推荐 8~10) 并先"预热"一次同 URL。 */
+        var capMinMs = (Number(new URLSearchParams(location.search).get('capmin')) || 0) * 1000;
         var trySnap = function () {
           var ready = chunkData.size >= 3 && regionCells.size >= 1;
           if (ready && readyFrame < 0) readyFrame = frameCount;
           var timedOut = Date.now() - snapStart >= 25000;
-          if (!timedOut && (!ready || frameCount <= readyFrame)) { setTimeout(trySnap, 200); return; }
+          var waited = Date.now() - snapStart >= capMinMs;
+          if (!timedOut && (!ready || frameCount <= readyFrame || !waited)) { setTimeout(trySnap, 200); return; }
           try {
             var canvas = document.createElement('canvas');
             canvas.width = els.app.clientWidth;

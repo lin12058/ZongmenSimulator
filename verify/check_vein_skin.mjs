@@ -21,9 +21,14 @@
  *     9. hScale 严格递减; 每档 hRand 合法 (0<=lo<hi<=1)
  *    10. 视觉高度**严格不重叠**: 大min > 中max, 中min > 小max
  *        (视觉高度倍数 = (3.3 + 1.2*hRand) * hScale)
- *    11. **占地格数** (引擎侧 veinFootKeep): 大=7格(本格+六邻) / 中=3格(本格+下方两格)
- *        / 小=1格; 且三级**嵌套** (小 ⊂ 中 ⊂ 大), 中的额外两格 dr 必须 == +1 (正下方一行)
- *    12. 大档仍高于大世界雪峰最高档 (hScale > 1.55)
+ *    11. **占地** (引擎侧 veinFootKeep): **三档一律只占本格 = 1 格** (2026-09-14 六版) ——
+ *        等级只影响高度、不影响占地; 六邻与更远处一律不保留
+ *    12. 相对高度倍率仍是"高"档 (hScale > 1.55) —— 上屏尺寸另由 shape.sizeScale 缩放
+ *    13. **上屏尺寸总倍率** shape.sizeScale 有效 (0<s<=1.2)、上屏后三档仍严格不重叠、
+ *        且大档上屏高 ≤ 3.6 uR (≈1.8 格高: 单格灵脉不许大到越格成灾)
+ *   C. 山地底座契约 (2026-09-14 九版, 用户: "灵脉在山地要在原来的山的基础上加上高度")
+ *    14. shape.terrainBase 有效 (0<=tb<=2); 引擎 LIFT_CORE 三档 >= 0.70 (⇒ 灵脉格必在山地档
+ *        以上, 底座不为 0); 大档底座 >= 3 uR, 且大档上屏总高 (底座 + 灵脉峰) <= 11 uR
  *
  * 用法: node verify/check_vein_skin.mjs
  * ============================================================ */
@@ -129,31 +134,73 @@ console.log('  视觉高度 (uR 倍数) 大 ' + R[0][0].toFixed(2) + '~' + R[0][
             ' | 小 ' + R[2][0].toFixed(2) + '~' + R[2][1].toFixed(2) +
             '   (大世界: 山地 ≤5.85 / 雪峰 ≤6.98)');
 
-/* 11. 占地格数 —— 引擎侧 veinFootKeep */
+/* 11. 占地 —— 引擎侧 veinFootKeep: 三档一律只占本格 (2026-09-14 六版) */
 const RING = [[0, 0], [1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];   // d <= 1 的七个偏移
-check('引擎导出 veinFootKeep / VEIN_LVL_BELOW', typeof MG.veinFootKeep === 'function' && Array.isArray(MG.VEIN_LVL_BELOW), '');
+check('引擎导出 veinFootKeep', typeof MG.veinFootKeep === 'function', '');
 if (typeof MG.veinFootKeep === 'function') {
   const kept = (lv) => RING.filter(([dq, dr]) => MG.veinFootKeep(lv, dq, dr));
-  const k0 = kept(0), k1 = kept(1), k2 = kept(2);
-  check('大(0) 占地 = 本格 + 六邻 = 7 格 (原样)', k0.length === 7, `实际 ${k0.length}`);
-  check('中(1) 占地 = 本格 + 下方两格 = 3 格', eq(k1, [[0, 0], [0, 1], [-1, 1]]), JSON.stringify(k1));
-  check('小(2) 占地 = 仅本格 = 1 格', eq(k2, [[0, 0]]), JSON.stringify(k2));
-  check('三级嵌套: 小 ⊂ 中 ⊂ 大', k2.every((c) => k1.some((d) => eq(c, d))) && k1.every((c) => k0.some((d) => eq(c, d))), '');
-  const below = k1.filter(([dq, dr]) => !(dq === 0 && dr === 0));
-  check('中档的额外两格都在正下方一行 (dr == +1)', below.length === 2 && below.every(([, dr]) => dr === 1),
-    JSON.stringify(below));
-  check('「下方两格」== tileToWorld 的 r+1 方向 ([0,1] / [-1,1])', eq(MG.VEIN_LVL_BELOW, [[0, 1], [-1, 1]]), JSON.stringify(MG.VEIN_LVL_BELOW));
+  for (const lv of [0, 1, 2]) {
+    const k = kept(lv);
+    check(`level ${lv} 占地 = 仅本格 = 1 格`, eq(k, [[0, 0]]), JSON.stringify(k));
+  }
+  check('等级不影响占地 (大/中/小 同 footprint)',
+    [0, 1, 2].every((lv) => eq(kept(lv), kept(0))), '');
+  const OUT = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1], [2, 0], [0, 2], [-2, 2], [3, 3]];
+  check('六邻与更远处一律不保留 (灵脉不再是山脉群)',
+    [0, 1, 2].every((lv) => OUT.every(([dq, dr]) => MG.veinFootKeep(lv, dq, dr) === false)), '');
 }
 
-/* 12. 大档仍高于大世界雪峰最高档 (1.55) */
-check('大档 hScale > 1.55 (灵脉高于大世界雪峰最高档)', LV[0].hScale > 1.55, String(LV[0].hScale));
-check('中档 hScale > 1.55 (中灵脉亦高于雪峰档位倍率)', LV[1].hScale > 1.55, String(LV[1].hScale));
+/* 12. 相对高度倍率 (hScale) 未被缩小 —— 它表达的是"三档之间的相对高矮",
+       上屏实际尺寸另由 shape.sizeScale 统一缩放 (2026-09-14 七版)。 */
+check('大档 hScale > 1.55 (相对倍率未变; 上屏另乘 sizeScale)', LV[0].hScale > 1.55, String(LV[0].hScale));
+check('中档 hScale > 1.55 (同上)', LV[1].hScale > 1.55, String(LV[1].hScale));
+
+/* 13. 上屏尺寸总倍率 sizeScale —— 「灵脉太大/太小」的唯一旋钮 (2026-09-14 七版) */
+const SS = sh.sizeScale;
+check('shape.sizeScale 有效 (0 < s <= 1.2)', Number.isFinite(SS) && SS > 0 && SS <= 1.2, String(SS));
+const eff = (l) => [(3.3 + 1.2 * l.hRand[0]) * l.hScale * SS, (3.3 + 1.2 * l.hRand[1]) * l.hScale * SS];
+const E = LV.map(eff);
+check('上屏后三档仍严格不重叠 (大min > 中max > 小max)',
+  E[0][0] > E[1][1] && E[1][0] > E[2][1],
+  `大${E[0][0].toFixed(2)}~${E[0][1].toFixed(2)} / 中${E[1][0].toFixed(2)}~${E[1][1].toFixed(2)} / 小${E[2][0].toFixed(2)}~${E[2][1].toFixed(2)}`);
+check('大档上屏高 ≤ 3.6 uR (≈1.8 格高: 单格灵脉不越格成灾)', E[0][1] <= 3.6, E[0][1].toFixed(2) + ' uR');
+console.log('  上屏高度 (uR × sizeScale=' + SS + ') 大 ' + E[0][0].toFixed(2) + '~' + E[0][1].toFixed(2) +
+            ' | 中 ' + E[1][0].toFixed(2) + '~' + E[1][1].toFixed(2) +
+            ' | 小 ' + E[2][0].toFixed(2) + '~' + E[2][1].toFixed(2));
 
 /* 信息: 解出屏幕方框的 W/H (renderer.js PROP_VS 的公式), 提示是否近似正方 */
 const h2 = 0.5;
 const W = 3.4641016 * (1.55 + 0.65 * h2) * (0.82 + 0.22 * sh.hScale) * sh.wScale;
 const H = (3.3 + 1.2 * 0.5) * sh.hScale;
-console.log(`  屏幕方框 (大档, hash 中位): W/H = ${(W / H).toFixed(3)} (1.00 = 正方, 山形不被横向拉宽)`);
+console.log(`  屏幕方框 (大档, hash 中位): W/H = ${(W / H).toFixed(3)} (1.00 = 正方, 山形不被横向拉宽)` +
+            ' —— sizeScale 同乘 W/H, 不改此比值');
+
+/* 14. **山地底座** (2026-09-14 九版) —— 用户: "灵脉的高度如果在山地要在原来的山的基础上加上
+       高度, 避免看不见"。灵脉中心格的海拔由引擎 §八「灵脉地形迁就」抬到 LIFT_CORE, 故该格
+       必属山地档 (0.70~0.84) 或雪峰档 (>0.84); 底座 = **大世界山同档公式**的高度 × terrainBase
+       (PROP_VS 灵脉分支), 叠在灵脉峰之下 ⇒ 平原/水面格 (海拔 <= 0.70) 底座恒为 0。 */
+console.log('\n== 灵脉契约 C: 山地底座 (shape.terrainBase ↔ 引擎灵脉抬升) ==');
+const TB = sh.terrainBase;
+check('shape.terrainBase 有效 (0 <= tb <= 2)', Number.isFinite(TB) && TB >= 0 && TB <= 2, String(TB));
+const LC = MG.CFG && MG.CFG.LIFT_CORE;
+check('引擎 LIFT_CORE 三档均 >= 0.70 (⇒ 灵脉格必在山地档以上, 底座不为 0)',
+  Array.isArray(LC) && LC.length === 3 && LC.every((v) => v >= 0.70), JSON.stringify(LC));
+const mtnHs = (e) => (e > 0.84 ? 0.95 + 0.60 * Math.min(1, (e - 0.84) / 0.12)
+                              : 0.55 + 0.75 * Math.min(1, (e - 0.70) / 0.14));
+if (Array.isArray(LC)) {
+  const baseLo = (3.3 + 1.2 * 0.0) * mtnHs(LC[0]) * TB;    // 大档、抬升下限处的底座 (最低情形)
+  const baseHi = (3.3 + 1.2 * 1.0) * mtnHs(1.0) * TB;      // 雪峰顶、最高底座
+  const totHi = baseHi + E[0][1];
+  check('大档底座确实把灵脉垫高 (>= 3 uR)', baseLo >= 3, baseLo.toFixed(2) + ' uR');
+  check('大档上屏总高 (底座 + 灵脉峰) <= 11 uR (≈5.5 格: 不许再压成半屏大山)',
+    totHi <= 11, totHi.toFixed(2) + ' uR');
+  console.log('  底座高度 (uR, 各档在各自抬升下限处) 大 ' + baseLo.toFixed(2) +
+              ' / 中 ' + ((3.3 + 1.2 * 0.0) * mtnHs(LC[1]) * TB).toFixed(2) +
+              ' / 小 ' + ((3.3 + 1.2 * 0.0) * mtnHs(LC[2]) * TB).toFixed(2) +
+              ' | 上限 (雪峰顶) ' + baseHi.toFixed(2));
+  console.log('  ⇒ 大档上屏总高 ' + (baseLo + E[0][0]).toFixed(2) + '~' + totHi.toFixed(2) + ' uR' +
+              ' (底座 + 峰: 与周围大世界山同高再冒出一个峰头 ⇒ 不再"看不见")');
+}
 
 console.log('\n========== 结果: ' + (failures ? failures + ' 项失败' : '全部通过 ✔') + ' ==========');
 process.exit(failures ? 1 : 0);

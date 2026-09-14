@@ -312,16 +312,25 @@
   /* ============================================================
    * 5. 立体构件 (全部走 frame 投影 → 自然带朝向与遮挡)
    * ============================================================ */
-  /* 5.1 六边格基座: 与地图网格同朝向同半径的淡色格面 + 极淡墨边
-      —— 这是"六边形网格感"的来源; opts.tint 取地皮底色 */
+  /* 5.1 六边格基座 = 建筑的「场地」: 与地图网格同朝向同半径的地皮色块 + 墨边
+     2026-09-14 七版加强 (用户: "建筑背景应该有一个场地, 避免 svg 太浅被背景覆盖"):
+       · 地皮色块不透明度默认 0.32 (旧 0.22 太淡, 浅色墙/茅顶会直接糊进群系底纹);
+       · 墨边降到 detail>=1 就画 (旧仅 detail>=2), 让"这块地有边界"一眼可读;
+       · 六边**之外**再铺一圈渐隐柔光 —— 建筑与地形之间有一层过渡, 不再硬切。
+     opts.tint 取地皮底色 (LANDUSE_TINT); halo=false 可关柔光 (小尺寸省一层)。 */
   function hexPlate(S, o) {
     o = o || {};
-    var B = S.B, r = S.R * (o.rMul == null ? 0.98 : o.rMul);
+    var B = S.B, r = S.R * (o.rMul == null ? 1.0 : o.rMul);
     var pts = hexPts(S.cx, S.cy, r);
-    B.poly(pts, o.tint || STONE, o.a == null ? 0.22 : o.a);
-    if (S.detail >= 2) {
+    if (o.halo !== false && S.detail >= 2) {
+      var g0 = S.g(0, 0);
+      B.radial(g0[0], g0[1], r * 1.18, o.haloCol || '#efe6d2',
+        o.haloA == null ? 0.28 : o.haloA, r * 1.18, r * 1.18 * KY);
+    }
+    B.poly(pts, o.tint || STONE, o.a == null ? 0.32 : o.a);
+    if (S.detail >= 1) {
       B.line(pts.concat([pts[0]]), { w: o.lw || Math.max(0.5, r * 0.045), c: o.lc || INK4,
-        a: o.la == null ? 0.34 : o.la });
+        a: o.la == null ? 0.40 : o.la });
     }
   }
   /* 5.2 墙: 一段竖直墙面 (由局部线段 a→b + 高度区间 [h0,h1] 定义) */
@@ -1204,6 +1213,47 @@
     }
   };
 
+  /* --- 压水 (2026-09-14 新增) ---
+   * 水面上的建筑不再画房子, 改画「栈桥」: 水面即被桥面覆盖。
+   * 本 kind 只由前端按「格是水」派生 (main.js drawBuildings), 不在 mapgen 的
+   * BUILDINGS/CORE_KIND 里 ⇒ 不进 KIND_LIST, 与「26 种 = 服务端全集」的对齐不被打破。
+   * 朝向沿用建筑朝向 (朝水面), 桥面即沿该方向横跨本格。 */
+  KINDS['栈桥'] = function (S) {
+    waterFan(S, { u: 0, v: 0.95, r: 1.35, hw: 1.15, n: 4, a: 0.26 });
+    /* 桥面 (地面系, 跨满本格) */
+    gpQuad(S, -0.30, -0.98, 0.30, 0.98, '#c6b794', 0.95);
+    gpWash(S, 0, 0, 0.62, WOOD, 0.10);
+    /* 桥板横纹 */
+    var i, n = S.detail >= 3 ? 9 : 5;
+    for (i = 0; i < n; i++) {
+      var pv = -0.90 + (i / (n - 1)) * 1.80;
+      ink(S, [S.p(-0.30, pv, 0.05), S.p(0.30, pv, 0.05)],
+        { w: 0.85, c: EARTH, a: 0.40, n: 1, fly: false, j: 0.3 });
+    }
+    /* 两侧栏杆: 立柱 + 压顶横木 */
+    var sgn, k;
+    for (sgn = -1; sgn <= 1; sgn += 2) {
+      for (k = 0; k < 4; k++) {
+        var pv2 = -0.72 + k * 0.48;
+        ink(S, [S.p(sgn * 0.32, pv2, 0.05), S.p(sgn * 0.32, pv2, 0.34)],
+          { w: 1.35, c: EARTH, a: 0.62, n: 1, fly: false, j: 0.3 });
+      }
+      ink(S, [S.p(sgn * 0.32, -0.78, 0.34), S.p(sgn * 0.32, 0.78, 0.34)],
+        { w: 1.5, c: INK2, a: 0.52, n: 1, fly: false, j: 0.45 });
+      /* 桥面边梁 */
+      ink(S, [S.p(sgn * 0.30, -0.98, 0.03), S.p(sgn * 0.30, 0.98, 0.03)],
+        { w: 1.6, c: INK, a: 0.60, n: 2, fly: false, j: 0.4 });
+    }
+    /* 桥墩: 两端入水的木桩 (只画两根, 免得密排连线) */
+    ink(S, [S.p(-0.24, 0.86, 0.04), S.p(-0.24, 0.86, -0.26)], { w: 1.7, c: EARTH, a: 0.70, n: 1, fly: false, j: 0.3 });
+    ink(S, [S.p(0.24, 0.86, 0.04), S.p(0.24, 0.86, -0.26)], { w: 1.7, c: EARTH, a: 0.70, n: 1, fly: false, j: 0.3 });
+    /* 桥下水纹 */
+    if (S.detail >= 2) {
+      ink(S, [S.p(-0.88, 0.42, 0), S.p(-0.52, 0.30, 0)], { w: 0.8, c: AZURE, a: 0.32, n: 1, fly: false, j: 0.5 });
+      ink(S, [S.p(0.54, -0.34, 0), S.p(0.92, -0.24, 0)], { w: 0.8, c: AZURE, a: 0.32, n: 1, fly: false, j: 0.5 });
+    }
+  };
+
   /* --- 良田 --- */
   KINDS['农田'] = function (S) {
     /* 俯视田块: 长边沿朝向 → 4 垄 + 田埂 + 水光 + 禾苗 */
@@ -1697,10 +1747,10 @@
     if (!spec.face) S.setFace(resolveFace(spec.kind, S, spec.probe));
     else S.setFace(spec.face);
     var fn = KINDS[spec.kind] || KINDS['民房'];
-    /* 六边格基座 (网格感) + 落影 */
+    /* 六边格基座 = 「场地」(网格感 + 地皮色 + 墨边 + 柔光) + 落影 */
     if (spec.plate !== false) {
       hexPlate(S, { tint: spec.tint || LANDUSE_TINT[KIND_TERRAIN[spec.kind]] || STONE,
-        a: spec.plateA == null ? 0.20 : spec.plateA });
+        a: spec.plateA == null ? 0.32 : spec.plateA });
     }
     if (detail >= 2) {
       var g0 = S.g(0, 0.06);

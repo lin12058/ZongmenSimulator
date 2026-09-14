@@ -103,7 +103,7 @@ function boxOf(id, z, hashSeed, level) {
   else if (id > 59.5 && id < 61.5) hs = 0.52 + 0.24 * h5;
   else if (id > 61.5 && id < 63.5) hs = 0.72 + 0.30 * h5;
   else hs = 1.05;
-  var ss = (id > 59.5 && id < 61.5) ? 0.30 : 1.0;
+  var ss = (id > 59.5 && id < 61.5) ? 0.30 : (isVein(id) ? (VS.shape.sizeScale || 1.0) : 1.0);
   var W = 3.4641016 * R * (1.55 + 0.65 * h2) * (0.82 + 0.22 * hs) * ss * ws;
   var H = R * (3.3 + 1.2 * h5) * hs * ss;
   return { W: W * z, H: H * z, W0: W, H0: H, hs: hs };

@@ -132,6 +132,7 @@ public sealed class SqliteVirtualContext : VirtualContext
     /// T5: 与 Flush 共享 _flushLock —— 避免 DELETE 与批量 INSERT 交错触发 database is locked。</summary>
     public long PruneExcept(IReadOnlyCollection<string> seedPrefixes)
     {
+        if (_disposed) return 0;                      // C9: 关闭期不再开连接 (与 Flush 同口径)
         if (seedPrefixes == null || seedPrefixes.Count == 0) return 0;
         var sb = new System.Text.StringBuilder("DELETE FROM Data WHERE NOT (");
         var idx = 0;

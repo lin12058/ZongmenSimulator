@@ -82,7 +82,8 @@
   #titleBox h1 em { font-style: normal; color: var(--seal); }
   #titleBox .sub { margin-top: 2px; font-size: 12px; color: var(--ink-soft); letter-spacing: 2px; }
   #controls { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-  #controls .row { display: flex; gap: 6px; align-items: center; }
+  /* flex-wrap: 开关多了以后, 窄窗口下按钮不会再被挤出面板 (挤出去就"看不见/点不到") */
+  #controls .row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; align-items: center; }
   #seedInput {
     width: 150px; padding: 4px 8px;
     border: 1px solid var(--panel-border); border-radius: 2px;
@@ -245,8 +246,10 @@
       <div class="row">
         <button id="btnVeins">灵脉</button>
         <button id="btnLabels">注记</button>
-        <span id="stats">-</span>
+        <button id="btnBanners">匾额</button>
+        <button id="btnClouds">云气</button>
       </div>
+      <div class="row"><span id="stats">-</span></div>
     </div>
   </div>
 
@@ -268,6 +271,7 @@
   <script src="js/pb.js"></script>
   <script src="js/mapclient.js"></script>
   <script src="js/noiselib.js"></script>
+  <script src="js/vein-skin.js"></script>
   <script src="js/textures.js"></script>
   <script src="js/renderer.js"></script>
   <script src="js/bldg_ink.js"></script>

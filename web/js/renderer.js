@@ -107,13 +107,53 @@
   ].join('\n');
 
   /* ---- 立体精灵 (超出格子的山/树/灵脉峰, Battle Brothers 式压格) ---- */
+  /* 灵脉峰的屏幕比例 —— 取自 web/js/vein-skin.js 的 shape (唯一真源)。
+     兜底值须与 vein-skin.js 的默认值一致 (漏载时只是比例退化, 不崩)。
+     ⚠ 二者解出的 W≈H (近似正方方框) ⇒ 128 格里的山形不被横向拉宽。 */
+  var VEIN_SHAPE = (function () {
+    var vs = (typeof window !== 'undefined' && window.VeinSkin) || null;
+    var s = (vs && vs.shape) || null;
+    var out = { h: (s && s.hScale) || 1.55, w: (s && s.wScale) || 0.80,
+                sc: (s && s.sizeScale) || 1.0,
+                tb: (s && s.terrainBase != null) ? s.terrainBase : 1.0, lv: [] };
+    /* 三档 (大/中/小) 的高度倍率与收窄包络; 缺配置 → 三档一律退回 shape.hScale
+       ⚠ 顺序即 mapgen.js veins[].level (0大 / 1中 / 2小), 契约见 verify/check_vein_skin.mjs */
+    var EPS = 1.0 / 1024.0;                       // 浮点字面量精度 (避免 GLSL 里出现 0.7200001)
+    for (var i = 0; i < 3; i++) {
+      var L = vs && vs.levels && vs.levels[i];
+      var lo = (L && L.hRand && L.hRand[0] != null) ? L.hRand[0] : 0.72;
+      var hi = (L && L.hRand && L.hRand[1] != null) ? L.hRand[1] : 1.00;
+      out.lv.push({
+        h: (L && L.hScale != null) ? L.hScale : out.h,
+        lo: Math.round(lo / EPS) * EPS,
+        hi: Math.round(hi / EPS) * EPS
+      });
+    }
+    return out;
+  })();
+  /* GLSL 字面量取用: 第 i 档 (0大/1中/2小) 的高度倍率 / 包络下界 / 上界。
+     ⚠ 必须 toFixed(3) 落成 `1.900` 这类字面量 —— 直接拼 JS number 会出现
+       1.9000000000000001 / 0.7200000000000001 这种尾数进着色器。 */
+  var VH  = function (i) { return VEIN_SHAPE.lv[i].h.toFixed(3); };
+  var VLO = function (i) { return VEIN_SHAPE.lv[i].lo.toFixed(3); };
+  var VHI = function (i) { return VEIN_SHAPE.lv[i].hi.toFixed(3); };
+  /* 灵脉峰**上屏尺寸总倍率** (vein-skin.js shape.sizeScale): W/H 同乘 ⇒ 等比缩放,
+     比值与三档相对高矮都不变。只作用在灵脉峰分支, 不动大世界山/林/沙。 */
+  var VSIZE = VEIN_SHAPE.sc.toFixed(3);
+  /* 灵脉格「山地底座」倍率 (vein-skin.js shape.terrainBase): 见 PROP_VS 灵脉分支 ——
+     把该格真实海拔对应的**那层山**垫在灵脉峰之下 (平原格自动为 0)。 */
+  var VBASE = VEIN_SHAPE.tb.toFixed(3);
+  /* 大世界山/雪峰的高度倍率档位 —— 山地底座与地形分支**共用同一组常量**,
+     避免"灵脉底座用的山高"与"旁边真山"两套数字各自漂移。 */
+  var MTN_LO = (0.55).toFixed(3), MTN_HI = (1.30).toFixed(3);
+  var SNOW_LO = (0.95).toFixed(3), SNOW_HI = (1.55).toFixed(3);
   var PROP_VS = [
     '#version 300 es',
     'layout(location=0) in vec2 aPos;',        // [-1..1] 方块
     'layout(location=1) in vec2 iCenter;',
     'layout(location=2) in float iSprite;',    // row*8+col
     'layout(location=3) in float iHash;',
-    'layout(location=4) in float iElev;',      // 海拔: 山体高度随 noise 缩放
+    'layout(location=4) in float iElev;',      // 大世界山=海拔; 灵脉峰=(等级+海拔)/3, 见下
     'uniform vec2 uRes;',
     'uniform vec2 uCam;',
     'uniform float uZoom;',
@@ -124,20 +164,56 @@
     'void main(){',
     '  float h2 = fract(iHash*13.73);',
     /* 高度系数: 山 40/41·56/57 与 雪 42/43·58/59 按海拔档位缩放 (noise 驱动, 非固定高);
-       林 44..47 / 沙 48 / 草 49 只做轻微随机; 灵脉峰 50..54 近似固定 */
-    '  float hs;',
-    '  if (iSprite < 41.5 || (iSprite > 55.5 && iSprite < 57.5))',
-    '    hs = mix(0.55, 1.30, clamp((iElev-0.70)/0.14, 0.0, 1.0));',
+       林 44..47 / 沙 48 / 草 49 只做轻微随机;
+       灵脉峰 32..35(异灵根) 与 50..54(五行) 用 vein-skin.js 的**分档**倍率:
+         大/中/小 三档高度不同 (levels[].hScale), 且各自收窄随机包络 (levels[].hRand);
+       ⚠ 通道复用 (九版): 灵脉峰的 iElev **既不是海拔、也不只是等级**, 而是**归一化复合值**
+         `(灵脉等级 + 该格真实海拔) / 3` —— 精灵段的海拔通道是 u16 量化 (值域 [0,1]), 装不下
+         「等级 0..2」+「海拔 0..1」两个量, 故在 main.js refreshChunkProps 里先压进 [0,1],
+         这里再还原 (等级 = floor(3*iElev), 海拔 = frac(3*iElev))。见下面的 ve/bhs 分支。
+         大世界山照旧直接下发海拔 (else-if 分支里 iElev 就是 e)。
+       wScale 收窄 + hScale 抬高 ⇒ 方框近似正方, 山形不被横向拉宽 (历史画崩的根因)。
+       ⚠ 灵脉峰还**额外收窄高度随机包络** —— 否则同一 hash 抖动区间会盖过倍率差:
+         极端情形下 (灵脉 hrand=0, 雪峰 hrand=1) 雪峰反而更高, 出现实测 seed 74
+         那样"灵脉淹没在雪岭里"。分档后 大/中 恒 > 任何大世界山 (小 ≈ 山地峰高)。
+       ⚠ 七版: 灵脉峰再乘 shape.sizeScale (整体等比缩小, W/H 同乘) —— 只改**上屏尺寸**,
+         不改这套相对高矮; 但缩小后灵脉不再恒高于雪峰, 识别改由晕圈/名牌承担。
+       ⚠ 九版: 灵脉格再垫一层「**山地底座**」(vein-skin.js shape.terrainBase) —— 该格真实
+         海拔对应的那层山 (与大世界山同档公式), 不乘 sizeScale; 峰体叠在它之上。
+         平原/水面格 (海拔 < 0.70) 底座为 0 ⇒ 只影响山地, 不影响水中孤峰。 */
+    '  float hs; float ws = 1.0; float hrand = fract(iHash*5.17);',
+    '  float vbaseH = 0.0; float vbaseW = 0.0;',      // 山地底座 (仅灵脉格非 0)
+    '  if ((iSprite > 31.5 && iSprite < 35.5) || (iSprite > 49.5 && iSprite < 54.5)) {',
+    '    float vz = clamp(iElev, 0.0, 1.0) * 3.0;',   // 复合通道 → 等级 + 海拔
+    '    float vlv = min(floor(vz), 2.0);',           // 灵脉等级 (0大/1中/2小)
+    '    float ve  = vz - floor(vz);',                // 该格真实海拔 (0..1)
+    '    ws = ' + VEIN_SHAPE.w.toFixed(3) + ';',
+    '    hs = (vlv < 0.5) ? ' + VH(0) + ' : ((vlv < 1.5) ? ' + VH(1) + ' : ' + VH(2) + ');',
+    '    hrand = (vlv < 0.5) ? mix(' + VLO(0) + ', ' + VHI(0) + ', hrand)',
+    '          : (vlv < 1.5) ? mix(' + VLO(1) + ', ' + VHI(1) + ', hrand)',
+    '          :               mix(' + VLO(2) + ', ' + VHI(2) + ', hrand);',
+    /* 「原来的山」: 与大世界山**同一档公式** (海拔 → 高度倍率), 平原/水面 → 0 */
+    '    float bhs = 0.0;',
+    '    if (ve > 0.84)      bhs = mix(' + SNOW_LO + ', ' + SNOW_HI + ', clamp((ve-0.84)/0.12, 0.0, 1.0));',
+    '    else if (ve > 0.70) bhs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((ve-0.70)/0.14, 0.0, 1.0));',
+    '    bhs *= ' + VBASE + ';',
+    '    vbaseH = uR*(3.3+1.2*hrand) * bhs;',
+    '    vbaseW = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*bhs);',
+    '  }',
+    '  else if (iSprite < 41.5 || (iSprite > 55.5 && iSprite < 57.5))',
+    '    hs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((iElev-0.70)/0.14, 0.0, 1.0));',
     '  else if ((iSprite > 41.5 && iSprite < 43.5) || (iSprite > 57.5 && iSprite < 59.5))',
-    '    hs = mix(0.95, 1.55, clamp((iElev-0.84)/0.12, 0.0, 1.0));',
+    '    hs = mix(' + SNOW_LO + ', ' + SNOW_HI + ', clamp((iElev-0.84)/0.12, 0.0, 1.0));',
     '  else if (iSprite < 49.5) hs = 0.62 + 0.34*fract(iHash*9.13);',
     '  else if (iSprite > 59.5 && iSprite < 61.5) hs = 0.52 + 0.24*fract(iHash*9.13);',  // 草地小山包: 更矮缓
     '  else if (iSprite > 61.5 && iSprite < 63.5) hs = 0.72 + 0.30*fract(iHash*9.13);',  // 草地孤树: 中等
     '  else                     hs = 1.05;',
     '  float ss = 1.0;',
     '  if (iSprite > 59.5 && iSprite < 61.5) ss = 0.30;',   // 小山包整体缩至 30%
-    '  float W = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*hs) * ss;',
-    '  float H = uR*(3.3+1.2*fract(iHash*5.17)) * hs * ss;',  // 高 ≈ 3.3~4.5 倍半径 × 海拔系数
+    '  else if ((iSprite > 31.5 && iSprite < 35.5) || (iSprite > 49.5 && iSprite < 54.5))',
+    '    ss = ' + VSIZE + ';',   // 灵脉峰整体尺寸倍率 (vein-skin.js shape.sizeScale)
+    '  float W = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*hs) * ss * ws + vbaseW;',
+    '  float H = uR*(3.3+1.2*hrand) * hs * ss + vbaseH;',  // 底座山 (不缩) + 灵脉峰 (乘 sizeScale)
     '  float jx = (fract(iHash*3.77)-0.5)*uR*1.8;',
     '  float flip = step(0.5, fract(iHash*7.31));',
     '  float u0 = aPos.x*0.5+0.5;',
@@ -319,7 +395,8 @@
     this.progRoad = this._build(ROAD_VS, ROAD_FS);
     this.roadBufHalo = gl.createBuffer();   // 道路柔光底层 (宽而淡)
     this.roadBufCore = gl.createBuffer();   // 道路主路面
-    this.roadCounts = [0, 0];
+    this.roadBufWater = gl.createBuffer();  // 过水段: 虚线航道 (石青墨, 与陆上路面分色)
+    this.roadCounts = [0, 0, 0];
 
     var quad = new Float32Array([
       -1, -1, 1, -1, 1, 1,
@@ -405,8 +482,9 @@
     this.avgColors = arr;
   };
 
-  /* 上传道路三角面 (世界坐标, CPU 展宽成 quad; 每帧由 main.js 调用) */
-  InkRenderer.prototype.setRoads = function (halo, core) {
+  /* 上传道路三角面 (世界坐标, CPU 展宽成 quad; 每帧由 main.js 调用)
+     water: 过水段的虚线航道 (可为空数组). 三档分开画 ⇒ 陆上路面与水上航道不同色。 */
+  InkRenderer.prototype.setRoads = function (halo, core, water) {
     var gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.roadBufHalo);
     gl.bufferData(gl.ARRAY_BUFFER, halo, gl.DYNAMIC_DRAW);
@@ -414,6 +492,10 @@
     gl.bindBuffer(gl.ARRAY_BUFFER, this.roadBufCore);
     gl.bufferData(gl.ARRAY_BUFFER, core, gl.DYNAMIC_DRAW);
     this.roadCounts[1] = core.length / 2;
+    water = water || new Float32Array(0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.roadBufWater);
+    gl.bufferData(gl.ARRAY_BUFFER, water, gl.DYNAMIC_DRAW);
+    this.roadCounts[2] = water.length / 2;
   };
 
   /* 上传一个区块的实例数据, 建独立 VAO (底图 + 立体精灵两套) */
@@ -454,30 +536,52 @@
     gl.bindVertexArray(null);
 
     /* 立体精灵实例 (可为空) */
-    var propVao = null, propBufs = [], propCount = 0;
-    if (data.propCenters && data.propCenters.length) {
-      propVao = gl.createVertexArray();
-      gl.bindVertexArray(propVao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-      var pd = [data.propCenters, data.propSprites, data.propHashes, data.propElevs];
-      var pl = [1, 2, 3, 4];
-      for (k = 0; k < 4; k++) {   // 4 通道全绑: centers/sprites/hashes/iElev, 漏绑 iElev 会让山/雪峰高度恒为最低档
-        var pb = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, pb);
-        gl.bufferData(gl.ARRAY_BUFFER, pd[k], gl.STATIC_DRAW);
-        gl.enableVertexAttribArray(pl[k]);
-        gl.vertexAttribPointer(pl[k], pl[k] === 1 ? 2 : 1, gl.FLOAT, false, 0, 0);
-        gl.vertexAttribDivisor(pl[k], 1);
-        propBufs.push(pb);
-      }
-      gl.bindVertexArray(null);
-      propCount = data.propSprites.length;
-    }
+    var prop = this._buildPropVao(data);
     this.chunks.set(key, { vao: vao, bufs: bufs, count: data.tiles.length,
-                           propVao: propVao, propBufs: propBufs, propCount: propCount,
+                           propVao: prop.vao, propBufs: prop.bufs, propCount: prop.count,
                            bbox: bbox, born: performance.now() / 1000 });
+  };
+
+  /* 建/重建一个区块的立体精灵 VAO (uploadChunk 与 updateProps 共用)
+     data: { propCenters, propSprites, propHashes, propElevs }
+     ⚠ 4 通道必须全绑: 漏绑 iElev 会让山/雪峰高度恒为最低档。 */
+  InkRenderer.prototype._buildPropVao = function (data) {
+    var gl = this.gl;
+    var vao = null, bufs = [], count = 0;
+    if (!data.propCenters || !data.propCenters.length) return { vao: null, bufs: [], count: 0 };
+    vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    var pd = [data.propCenters, data.propSprites, data.propHashes, data.propElevs];
+    var pl = [1, 2, 3, 4];
+    for (var k = 0; k < 4; k++) {
+      var pb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, pb);
+      gl.bufferData(gl.ARRAY_BUFFER, pd[k], gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(pl[k]);
+      gl.vertexAttribPointer(pl[k], pl[k] === 1 ? 2 : 1, gl.FLOAT, false, 0, 0);
+      gl.vertexAttribDivisor(pl[k], 1);
+      bufs.push(pb);
+    }
+    gl.bindVertexArray(null);
+    return { vao: vao, bufs: bufs, count: data.propSprites.length };
+  };
+
+  /* 只换某区块的立体精灵 (地形网格与原 VAO 不动)。
+     用途: 道路/建筑覆盖格上的树·山要被"抹平" —— 前端过滤后重传精灵实例。
+     不动 born ⇒ 不触发二次墨色渐入 (那是区块初次到达时的事)。 */
+  InkRenderer.prototype.updateProps = function (key, data) {
+    var gl = this.gl;
+    var c = this.chunks.get(key);
+    if (!c) return;                       // 区块已被卸载: 丢弃 (rev 缓存已同步失效)
+    if (c.propVao) {
+      gl.deleteVertexArray(c.propVao);
+      for (var i = 0; i < c.propBufs.length; i++) gl.deleteBuffer(c.propBufs[i]);
+    }
+    var prop = this._buildPropVao(data);
+    c.propVao = prop.vao; c.propBufs = prop.bufs; c.propCount = prop.count;
   };
 
   InkRenderer.prototype.dropChunk = function (key) {
@@ -607,7 +711,7 @@
     gl.bindVertexArray(null);
 
     /* ---- Pass1.2: 道路 → 底图 FBO (RGB 混合, alpha 通道保持 biome 编码不变) ---- */
-    if (this.roadCounts[0] || this.roadCounts[1]) {
+    if (this.roadCounts[0] || this.roadCounts[1] || this.roadCounts[2]) {
       var ur = this._uRoad || (this._uRoad = {
         res: gl.getUniformLocation(this.progRoad, 'uRes'),
         cam: gl.getUniformLocation(this.progRoad, 'uCam'),
@@ -629,6 +733,11 @@
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
       gl.uniform4f(ur.color, 0.878, 0.831, 0.674, 0.55);
       gl.drawArrays(gl.TRIANGLES, 0, this.roadCounts[1]);
+      /* 过水段: 虚线航道 —— 石青偏墨, 比陆上路面冷且透 (压在水色上才看得出来) */
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.roadBufWater);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform4f(ur.color, 0.325, 0.435, 0.500, 0.62);
+      gl.drawArrays(gl.TRIANGLES, 0, this.roadCounts[2]);
       gl.disable(gl.BLEND);
     }
 

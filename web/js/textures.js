@@ -3,10 +3,11 @@
  * 产出三张贴图供 WebGL 使用:
  *   atlas  2048×2048  共 8 行 (ATLAS_ROWS=8, 与 renderer.js 常量一致):
  *     第 0~3 行  8 群系 × 4 变体 (群系底纹)
- *     第 4 行    5 灵脉格底
+ *     第 4 行    4 异灵根灵脉峰 (雷/风/冰/暗, 精灵位 32..35)
  *     第 5/6/7 行 立体精灵 (透明底: 山/雪/林/沙/草丛/灵脉峰/草丘/孤树)
  *   paper   512×512 无缝宣纸(纤维/斑驳)
  *   noise   256×256 R:枯笔噪声 G:细纤维 B:团渍
+ *   clouds  6×(256×168) 云团变体 + 等长**云影** (仅 Canvas2D 云气层用, 不进 WebGL 图集)
  * 笔触引擎模拟: 叠层枯笔(飞白)、晕染水渍、皴笔、椿点。
  * ============================================================ */
 (function (global) {
@@ -16,7 +17,7 @@
   /* COLS × ROWS = 「群系区块」尺寸: 8 个群系列 × 每群系 4 个变体行
      (对应格底编码 tile = biome*4 + variant, variant 由 mapgen 用 %4 保证 0..3)。
      ⚠ 注意 ROWS 不是「图集总行数」—— 图集为 COLS 列 × ATLAS_ROWS(8) 行:
-       第 0~3 行群系变体 / 第 4 行灵脉格底(VEIN_ROW) / 第 5~7 行立体精灵。
+       第 0~3 行群系变体 / 第 4 行异灵根灵脉峰(VEIN_ROW) / 第 5~7 行立体精灵。
        与着色器对齐的总行数一律用 ATLAS_ROWS。 */
   var TILE = 128, COLS = 8, ROWS = 4;  // TILE: 笔触绘制的逻辑坐标系
   var PX = TILE * 2;                   // 实际纹素(256px/格), 提升放大后的清晰度
@@ -305,11 +306,10 @@
     }
   };
 
-  /* ---------- 灵脉格 (8金 9木 10水 11火 12土): 暗岩底 + 灵根色晕 + 符纹 ---------- */
-  var VEIN_BASE = ['#6e685c', '#5c6650', '#54626b', '#6b5248', '#6e6353'];
-  var VEIN_TINT = [
-    [206, 186, 128], [116, 152, 92], [96, 128, 152], [190, 82, 56], [162, 130, 88]
-  ];
+  /* ---------- 灵脉配色已外移到 web/js/vein-skin.js (唯一真源) ----------
+     此前的 VEIN_BASE(暗岩格底) / VEIN_TINT(灵根色表) 已随之删除:
+     · 灵脉格底是死图 (tile 索引由 biome*4+variant 而来, 恒 ≤31, 走不到第 4 行);
+     · 灵根色改由 VeinSkin.elements / VeinSkin.variants 提供 (本文件不再内联色值)。 */
 
   /* 灵根符纹 (TILE 坐标系内作画) */
   var drawSigil = [
@@ -355,25 +355,44 @@
     }
   ];
 
-  for (var vb = 0; vb < 5; vb++) {
-    (function (b) {
-      painters[b] = function (ctx) {
-        ctx.fillStyle = VEIN_BASE[b - 8];
-        ctx.fillRect(0, 0, TILE, TILE);
-        var tint = VEIN_TINT[b - 8];
-        wash(ctx, 64, 64, 80, tint, 0.10);
-        wash(ctx, 20 + trng() * 88, 20 + trng() * 88, 46, tint, 0.14);
-        wash(ctx, trng() * 128, trng() * 128, 36, [250, 244, 226], 0.08);
-        /* 灵光星点 (灵峰本体由立体精灵承担) */
-        for (var i = 0; i < 12; i++) {
-          ctx.fillStyle = rgba(tint, 0.22 + trng() * 0.32);
-          ctx.beginPath();
-          ctx.arc(trng() * 128, trng() * 128, 0.7 + trng() * 1.6, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      };
-    })(vb + 8);
-  }
+  /* 异灵根符纹 (键名须与 vein-skin.js variants 的 key 一致) */
+  var drawSigilVariant = {
+    /* 雷: 折线电芒 */
+    '雷': function (ctx, c) {
+      strokeInk(ctx, [[70, 20], [52, 58], [68, 56], [46, 104]],
+        { width: 2.0, color: c, alpha: 0.62, layers: 2 });
+      strokeInk(ctx, [[86, 34], [74, 62], [88, 68]],
+        { width: 1.2, color: c, alpha: 0.38, layers: 1 });
+    },
+    /* 风: 三叠回旋弧 */
+    '风': function (ctx, c) {
+      for (var s = 0; s < 3; s++) {
+        var y = 40 + s * 20;
+        strokeInk(ctx, [[30, y], [56, y - 10], [84, y + 6], [100, y - 2]],
+          { width: 1.6, color: c, alpha: 0.50 - s * 0.08, layers: 2 });
+      }
+      strokeInk(ctx, [[64, 30], [78, 44], [64, 58]],
+        { width: 1.2, color: c, alpha: 0.34, layers: 1 });
+    },
+    /* 冰: 六棱晶 */
+    '冰': function (ctx, c) {
+      strokeInk(ctx, [[64, 24], [64, 104]], { width: 1.8, color: c, alpha: 0.55, layers: 2 });
+      strokeInk(ctx, [[44, 40], [84, 88]], { width: 1.4, color: c, alpha: 0.45, layers: 2 });
+      strokeInk(ctx, [[84, 40], [44, 88]], { width: 1.4, color: c, alpha: 0.45, layers: 2 });
+      strokeInk(ctx, [[40, 64], [88, 64]], { width: 1.2, color: c, alpha: 0.40, layers: 1 });
+    },
+    /* 暗: 涡旋 + 星点 */
+    '暗': function (ctx, c) {
+      strokeInk(ctx, [[62, 30], [82, 46], [70, 66], [46, 62], [42, 84], [70, 96], [92, 82]],
+        { width: 1.8, color: c, alpha: 0.50, layers: 2 });
+      for (var i = 0; i < 5; i++) {
+        ctx.fillStyle = rgba(c, 0.30 + trng() * 0.30);
+        ctx.beginPath();
+        ctx.arc(36 + trng() * 56, 32 + trng() * 64, 0.8 + trng() * 1.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  };
 
   /* ============================================================
    * 立体精灵 (第 5/6/7 行): 透明底绘制, 超出格子压到邻格上
@@ -399,8 +418,9 @@
     opt = opt || {};
     var apexY = baseY - h;
     var g = ctx.createLinearGradient(0, apexY, 0, baseY);
-    g.addColorStop(0, rgba(dark, 0.92));
-    g.addColorStop(0.5, rgba(mid, 0.50));
+    /* opt.g0/g1 可放宽脊线对比 (灵脉峰比岩峰淡一档 → 不用焦墨般的 0.92) */
+    g.addColorStop(0, rgba(dark, opt.g0 == null ? 0.92 : opt.g0));
+    g.addColorStop(0.5, rgba(mid, opt.g1 == null ? 0.50 : opt.g1));
     g.addColorStop(1, rgba(mid, 0.0));
     ctx.beginPath();
     ctx.moveTo(cx - w * 0.5, baseY);
@@ -410,11 +430,12 @@
     ctx.closePath();
     ctx.fillStyle = g;
     ctx.fill();
-    /* 受光面 (左坡): 淡亮 wash, 参考图日光自左上来 */
+    /* 受光面 (左坡): 淡亮 wash, 参考图日光自左上来
+       (opt.lit0/1/2 可换色: 灵脉峰用青白, 岩峰用暖白) */
     var gl2 = ctx.createLinearGradient(cx - w * 0.5, baseY, cx, apexY);
-    gl2.addColorStop(0, 'rgba(214,210,196,0)');
-    gl2.addColorStop(0.55, 'rgba(214,210,196,0.16)');
-    gl2.addColorStop(1, 'rgba(226,222,208,0.30)');
+    gl2.addColorStop(0, opt.lit0 || 'rgba(214,210,196,0)');
+    gl2.addColorStop(0.55, opt.lit1 || 'rgba(214,210,196,0.16)');
+    gl2.addColorStop(1, opt.lit2 || 'rgba(226,222,208,0.30)');
     ctx.beginPath();
     ctx.moveTo(cx - w * 0.5, baseY);
     ctx.quadraticCurveTo(cx - w * 0.28, baseY - h * 0.5, cx - w * 0.04, apexY + h * 0.05);
@@ -432,8 +453,9 @@
     ctx.closePath();
     ctx.fillStyle = rgba(dark, 0.30);
     ctx.fill();
-    /* 岩层横裂: 右坡短促横向皴断 (参考图岩壁层理) */
-    var nCrag = 2 + (trng() * 2 | 0);
+    /* 岩层横裂: 右坡短促横向皴断 (参考图岩壁层理)
+       (opt.noCrag: 灵脉峰不画岩层, 改在外面叠「米点皴」) */
+    var nCrag = opt.noCrag ? 0 : 2 + (trng() * 2 | 0);
     for (var ci = 0; ci < nCrag; ci++) {
       var ct = 0.30 + trng() * 0.45;
       var cxp = cx + w * (0.08 + ct * 0.16);
@@ -494,6 +516,61 @@
         [sx, sy], [sx - len * 0.7, sy + len], [sx - len, sy + len * 1.6]
       ], { width: 1.0, color: INK, alpha: 0.20 + trng() * 0.18, fly: false, layers: 1 });
     }
+  }
+
+  /* ============================================================
+   * 灵脉山体 (三改版, 定稿) —— 山形**直接复用 drawPropPeak 的已验证骨架**,
+   *   只换「色 / 气 / 皴」: 大世界岩峰是深暖灰 + 焦墨勾脊 + 披麻皴 + 岩层横裂
+   *   (硬朗、有骨、近); 灵脉峰是**青灰绿** + 收敛的峰顶渐变 (opt.g0/g1) +
+   *   `noCrag`(免岩层横裂) + 米点皴 + 山脚「云断」横带 + 灵气敷色 + 元素符印
+   *   ⇒ 同族山形, 换一身皮, 上屏读作「氤氲远峰」而非「另一物种」。
+   *
+   *   ⚠ 为什么不再自己造形 (前两版画崩的真因):
+   *     (1) PROP_VS 把整个 128 格**非等比**映射到 W×H, W 常是 H 的 1.5~2.2 倍
+   *         ⇒ 128 坐标里画的东西上屏被横向拉宽, 自造形状极易变矮胖/兔耳。
+   *     (2) drawPropPeak 的凹左坡+偏右峰尖+凸右坡骨架**已过大世界实机验证**,
+   *         站在巨人肩上比自己另捏山形稳得多。颜色/纹理差异足够拉开辨识度。
+   * ============================================================ */
+  /* 云气/米点两色 (灵脉峰只用这两个; 青灰绿山体色已内联在 propVein 的
+     drawPropPeak 调用里, 免得两处维护) */
+  var MIST_PAL = {
+    pale: [228, 233, 221],   // 云气 / 留白 (云断横带)
+    dark: [72, 88, 68]       // 米点皴
+  };
+
+  /* 米点皴: 沿坡面成串的横点 —— 米氏云山的招牌笔法。
+     落在**渐隐线以上**的中上段 (下半已化开, 点在那儿会像悬空的黑点)。 */
+  function miDian(ctx, cx, baseY, w, h, n, col) {
+    for (var i = 0; i < n; i++) {
+      var t = 0.44 + trng() * 0.48;
+      var side = trng() < 0.5 ? -1 : 1;
+      var px = cx + side * w * (0.5 - 0.28 * t) * (0.30 + trng() * 0.62);
+      var py = baseY - h * t;
+      var run = 2 + (trng() * 3 | 0);
+      for (var j = 0; j < run; j++) {
+        ctx.fillStyle = rgba(col, 0.18 + trng() * 0.24);
+        ctx.beginPath();
+        ctx.ellipse(px + (j - run / 2) * w * 0.045 + (trng() - 0.5) * 2,
+                    py + (trng() - 0.5) * h * 0.05,
+                    w * (0.022 + trng() * 0.016), w * (0.014 + trng() * 0.010),
+                    0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  /* 云气横带: 一条水平软霭 (传统「云断」) —— 把山拦腰隔开, 立刻有氤氲气 */
+  /* col 缺省 = 通用云气色; 灵脉峰传自己的 pal.mist (五行/异灵根各有云气色) */
+  function mistBand(ctx, cx, y, w, h, a, col) {
+    col = col || MIST_PAL.pale;
+    var g = ctx.createLinearGradient(0, y - h, 0, y + h);
+    g.addColorStop(0, rgba(col, 0));
+    g.addColorStop(0.5, rgba(col, a));
+    g.addColorStop(1, rgba(col, 0));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(cx, y, w, h, 0, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   /* 透明底树: 枯笔干 + 多层球冠 (暗底冠/主冠/高光) + 可选花色
@@ -595,22 +672,183 @@
         { width: 1.1, color: [96, 112, 76], alpha: 0.5, fly: false, layers: 1 });
     }
   }
-  function propVein(el) {
+  /* ============================================================
+   * 灵脉峰 (2026-09-14 六版: 宽顶缓坡块面 + 下半截渐隐)
+   * ------------------------------------------------------------
+   * 美术方向对齐参考图: **宽而圆的顶 + 两肩 + 缓坡 + 山脚化进地形**。
+   *   · 五版是「折线尖锥 + 硬切底边」⇒ 实机读作「三角形山」且下半不透, 已废弃;
+   *   · 与大世界岩峰 (drawPropPeak) 的区分仍靠「色 / 气 / 皴」——
+   *     五行/异灵根配色 + 米点皴 + 山脚云断 + 灵根符纹, 而**形**现在同源。
+   *
+   *   ⚠ 前提 (历次画崩的根因, 别再踩): renderer.js PROP_VS 把整个 128 格
+   *     非等比映射到 W×H 方框。vein-skin.shape 的 hScale/wScale 已把灵脉峰的
+   *     方框调成**近似正方形** (解出 W≈H), 所以 128 坐标里画的山形上屏不再
+   *     被横向拉宽。若改 hScale/wScale 破坏了这一平衡, 山形会再次变形。
+   * ============================================================ */
+
+  /* 宽顶缓坡山形 (对齐参考图):
+     左山脚 → 左坡 → 左肩 → 顶台(微隆) → 右肩 → 右坡 → 右山脚。
+     · topW 决定顶台宽度 (0.44 ⇒ 宽顶, 不是尖锥);
+     · 坡面剖面 x = 1-(1-t)^0.50 (钟形) ⇒ 山腰仍宽 (~0.79 底宽), 不是"喇叭口";
+     · 顶面做成**圆拱** (sin 隆起 0.11h) ⇒ 免得读成"梯形台/方山"。 */
+  function veinPeakPts(cx, baseY, w, h) {
+    var S = VeinSkin.shape;
+    var topW = S.topW == null ? 0.44 : S.topW;
+    var N = Math.max(5, (S.seg | 0) || 9);
+    var M = Math.max(3, (S.topSeg | 0) || 7);
+    var apY = baseY - h, xL = cx - w * 0.5, xR = cx + w * 0.5;
+    var shY = apY + h * 0.10;                        // 肩高 (顶台两端)
+    var labX = cx - w * topW * 0.5, rabX = cx + w * topW * 0.5;
+    var pts = [[xL, baseY]], i, t;
+    for (i = 1; i <= N; i++) {                       // 左坡: 底 → 左肩
+      t = i / N;
+      pts.push([labX - (labX - xL) * Math.pow(1 - t, 0.50),
+                baseY + (shY - baseY) * Math.pow(t, 0.94)]);
+    }
+    for (i = 1; i < M; i++) {                        // 顶台: 左肩 → 右肩
+      t = i / M;
+      pts.push([labX + (rabX - labX) * t, shY - Math.sin(Math.PI * t) * h * 0.110]);
+    }
+    for (i = N; i >= 0; i--) {                       // 右坡: 右肩 → 底
+      t = i / N;
+      pts.push([rabX + (xR - rabX) * Math.pow(1 - t, 0.50),
+                baseY + (shY - baseY) * Math.pow(t, 0.94)]);
+    }
+    var apex = 0;                                    // 最高点 (顶台中部)
+    for (i = 1; i < pts.length; i++) if (pts[i][1] < pts[apex][1]) apex = i;
+    return { pts: pts, apex: apex };
+  }
+  function tracePts(ctx, pts) {
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  }
+
+  /* 单座灵脉峰: 宽顶块面 + **下半截渐隐** + 墨线只勾上段。
+     ⚠ 关键: 山脚不做硬切 —— 山体不透明度自 fade 起连续降到 0, 上屏就"化进地形里"
+       (这正是参考图的关键特征)。轮廓线同样**只勾到山腰以上**, 免得在已经化开的
+       位置留一条硬边。 */
+  function drawVeinPeak(ctx, cx, baseY, w, h, pal) {
+    var g0 = veinPeakPts(cx, baseY, w, h);
+    var pts = g0.pts, apex = g0.apex, ap = pts[apex], i;
+    var F = VeinSkin.shape.fade == null ? 0.60 : VeinSkin.shape.fade;
+    var ridgeFoot = [ap[0] + w * 0.11, baseY];
+    /* ① 山体: 上实下虚 (fade 起连续衰减到 0) */
+    ctx.beginPath(); tracePts(ctx, pts); ctx.closePath();
+    var gb = ctx.createLinearGradient(0, ap[1], 0, baseY);
+    gb.addColorStop(0, rgba(pal.mid, 0.96));
+    gb.addColorStop(Math.max(0.02, F * 0.62), rgba(pal.mid, 0.90));
+    gb.addColorStop(F, rgba(pal.mid, 0.58));
+    gb.addColorStop(0.84, rgba(pal.mid, 0.15));
+    gb.addColorStop(1, rgba(pal.mid, 0.0));
+    ctx.fillStyle = gb; ctx.fill();
+    /* ② 受光面 (左坡 → 山脊脚): 硬边亮面, 随山体一起收干净 */
+    var litPoly = [ap];
+    for (i = apex - 1; i >= 0; i--) litPoly.push(pts[i]);
+    litPoly.push(ridgeFoot);
+    ctx.beginPath(); tracePts(ctx, litPoly); ctx.closePath();
+    var gl = ctx.createLinearGradient(0, ap[1], 0, baseY);
+    gl.addColorStop(0, rgba(pal.lit, 0.24));
+    gl.addColorStop(F, rgba(pal.lit, 0.10));
+    gl.addColorStop(1, rgba(pal.lit, 0.0));
+    ctx.fillStyle = gl; ctx.fill();
+    /* ③ 背光面 (右坡 → 山脊脚): 暗面, 上浅下深后收干净 */
+    var darkPoly = [ap];
+    for (i = apex + 1; i < pts.length; i++) darkPoly.push(pts[i]);
+    darkPoly.push(ridgeFoot);
+    ctx.beginPath(); tracePts(ctx, darkPoly); ctx.closePath();
+    var gd = ctx.createLinearGradient(0, ap[1], 0, baseY);
+    gd.addColorStop(0, rgba(pal.back, 0.20));
+    gd.addColorStop(F, rgba(pal.back, 0.40));
+    gd.addColorStop(1, rgba(pal.back, 0.0));
+    ctx.fillStyle = gd; ctx.fill();
+    /* ④ 墨线轮廓 —— **只勾山腰以上** (开放路径): 山脚已化开, 在那儿勾线 =
+       在雾里画一道硬边。 */
+    var lim = baseY - h * (F + 0.02), iA = 0, iB = pts.length - 1;
+    while (iA < pts.length && pts[iA][1] > lim) iA++;
+    while (iB > 0 && pts[iB][1] > lim) iB--;
+    if (iB > iA + 1) {
+      strokeInk(ctx, pts.slice(iA, iB + 1),
+        { width: 1.7, color: INK, alpha: 0.48, fly: false, layers: 2 });
+    }
+    /* 山脊线: 自峰顶沿背光侧下到中段 */
+    strokeInk(ctx, [ap, [ap[0] + w * 0.20, baseY - h * 0.36]],
+      { width: 1.1, color: INK, alpha: 0.20, fly: false, layers: 1 });
+    /* ⑤ 石纹: 山体中上段短折线 (岩面分层), 低对比 */
+    var nS = 2 + (trng() * 2 | 0);
+    for (var s2 = 0; s2 < nS; s2++) {
+      var ty = baseY - h * (F + 0.04 + trng() * 0.30);
+      var tx = cx - w * 0.30 + trng() * w * 0.52;
+      var tw = w * (0.10 + trng() * 0.14);
+      strokeInk(ctx, [[tx - tw, ty], [tx, ty + h * 0.030], [tx + tw, ty - h * 0.010]],
+        { width: 1.0, color: INK, alpha: 0.12 + trng() * 0.10, fly: false, layers: 1 });
+    }
+    /* ⑥ 米点皴 (米氏云山招牌) —— 落在渐隐线以上 */
+    miDian(ctx, cx, baseY, w, h, ((VeinSkin.shape.miDian | 0) || 12) * (w / 60), pal.back);
+    /* ⑦ (2026-09-14 移除) 原「山脚化雾」是往渐隐区**叠加** mist 色 (最高 0.50
+       alpha) —— 它恰好把 ① 的渐隐重新糊实, 与「下半截半透明」互相抵消。
+       实测: 带它时山脚逐行 alpha 只到最后 1 档才掉到 9 (几乎硬边)。
+       现在渐隐由 ① 的 alpha 渐变独立负责, 云断交给外部 mistBand (已同降 alpha)。 */
+  }
+
+  function blendRGB(a, b, k) {
+    return [0, 1, 2].map(function (i) { return Math.round(a[i] + (b[i] - a[i]) * k); });
+  }
+
+  /* 生成一个灵脉峰画师: pal = vein-skin 的一整套色, sigilFn = 该灵根符纹 */
+  function veinPainter(pal, sigilFn) {
+    /* 副峰压一档 (向背光色靠) → 前后拉开层次, 不然两座同色像贴纸 */
+    var subPal = {
+      back: pal.back,
+      mid: blendRGB(pal.mid, pal.back, 0.34),
+      lit: blendRGB(pal.lit, pal.back, 0.42),
+      mist: pal.mist,
+      glow: pal.glow,
+      rune: pal.rune
+    };
     return function (ctx) {
-      var tint = VEIN_TINT[el];
-      var hi = [Math.min(255, tint[0] + 36), Math.min(255, tint[1] + 36), Math.min(255, tint[2] + 36)];
-      propShadow(ctx, 64, 108, 38, 13, 0.32);
-      drawPropPeak(ctx, 64, 106, 70, 88, [46, 42, 36], [104, 100, 90], {});
-      wash(ctx, 64, 66, 42, tint, 0.30);
-      wash(ctx, 64, 96, 30, tint, 0.20);
-      drawSigil[el](ctx, hi);
-      for (var i = 0; i < 14; i++) {
-        ctx.fillStyle = rgba(tint, 0.28 + trng() * 0.4);
+      var C = VeinSkin.shape.cell;
+      var mist = pal.mist, glow = pal.glow;
+      propShadow(ctx, (C.mainCx + C.subCx) * 0.5 + 12, C.mainBase + 3, 34, 8, 0.05);
+      /* 山背雾光: 先垫一层淡霭 → 峰"浮"在气里 (被峰体压住, 只留边缘晕开) */
+      wash(ctx, 58, 58, 50, mist, 0.18);
+      /* 副峰 (左, 矮) 先画 → 被主峰压住, 出前后层次 */
+      drawVeinPeak(ctx, C.subCx, C.subBase, C.subW, C.subH, subPal);
+      drawVeinPeak(ctx, C.mainCx, C.mainBase, C.mainW, C.mainH, pal);
+      /* 云断: 山脚一道横云埋掉山脚 → 山"浮"在云上 (岩峰是落地有影, 一眼可辨) */
+      /* 云断: 只在下缘留一道**淡**霭 —— 0.70 会把山脚渐隐重新糊实 ⇒ 降档 */
+      mistBand(ctx, 62, C.mainBase - 1, 60, 9, 0.46, mist);
+      mistBand(ctx, 58, C.mainBase - 11, 40, 6, 0.18, mist);
+      /* 山腰淡霭 (只压一层; 做成"带"会像玻璃反光) */
+      mistBand(ctx, C.mainCx, 62, 30, 9, 0.18, mist);
+      /* 灵气敷色: 只压山体中下段 (整座罩色会把山染成色块) */
+      wash(ctx, 60, 86, 24, glow, 0.10);
+      wash(ctx, 68, 54, 18, glow, 0.07);
+      /* 灵根符纹: 缩到 0.46 并抬到**山腰以上** (原尺寸 y26~100 会盖满山体, 且落在
+         底部已化开处会糊掉) */
+      ctx.save();
+      ctx.translate(64, 52); ctx.scale(0.46, 0.46); ctx.translate(-64, -52);
+      sigilFn(ctx, pal.rune);
+      ctx.restore();
+      /* 灵气游丝: 只落山脚, 免得峰面变成"撒了糖霜" */
+      for (var i = 0; i < 7; i++) {
+        ctx.fillStyle = rgba(glow, 0.10 + trng() * 0.18);
         ctx.beginPath();
-        ctx.arc(18 + trng() * 92, 18 + trng() * 90, 0.7 + trng() * 1.5, 0, Math.PI * 2);
+        ctx.arc(20 + trng() * 88, 44 + trng() * 44, 0.6 + trng() * 1.1, 0, Math.PI * 2);
         ctx.fill();
       }
     };
+  }
+
+  /* 五行灵脉峰 (el: 0金 1木 2水 3火 4土 —— 与 vein-skin.elements 同序) */
+  function propVein(el) {
+    var i = (typeof el === 'number' && el >= 0 && el < 5) ? el : 0;
+    return veinPainter(VeinSkin.elements[i], drawSigil[i] || drawSigil[0]);
+  }
+  /* 异灵根灵脉峰 (vi: 0雷 1风 2冰 3暗 —— 与 vein-skin.variants / mapgen VEIN_VARIANT_ORDER 同序) */
+  function propVeinVariant(vi) {
+    var V = VeinSkin.variants;
+    var v = V[vi] || V[0];
+    return veinPainter(v, drawSigilVariant[v.key] || drawSigilVariant['雷']);
   }
 
   /* ---- 第 7 行: 山 B 0/1 · 雪 B 2/3 (远山横岭构图, 打破壁纸感) ---- */
@@ -672,9 +910,9 @@
 
   /* ---------- 生成图集 ----------
    * 布局: 第 0~3 行 = 8 群系 × 4 变体 (列=群系, 行=变体)
-   *       第 4 行   = 5 灵脉格底 (8金 9木 10水 11火 12土)
+   *       第 4 行   = 立体精灵: 0..3 异灵根灵脉峰 雷/风/冰/暗 (32..35, 4..7 留空)
    *       第 5 行   = 立体精灵: 0/1 山 2/3 雪 4..7 林
-   *       第 6 行   = 立体精灵: 0 沙 1 草丛 2..6 灵脉峰
+   *       第 6 行   = 立体精灵: 0 沙 1 草丛 2..6 五行灵脉峰 金木水火土 (50..54)
    *       第 7 行   = 立体精灵: 0/1 山B 2/3 雪B 4/5 草丘 6/7 孤树 (56..63) */
   var VEIN_ROW = 4;
   var ATLAS_ROWS = 8;
@@ -700,15 +938,19 @@
         ctx.restore();
       }
     }
-    for (var k = 0; k < 5; k++) {
+    /* 第 4 行: 异灵根灵脉峰 (雷风冰暗 → 32..35)。
+       ⚠ 本行原为「灵脉格底」5 张 (金木水火土), 但格底 tile 索引自
+         `tiles.push(f.biome*4 + f.variant)` 而来 (biome 恒 0..7 ⇒ ≤31),
+         HEX_FS 的 `biome-8 → 第 4 行` 分支**不可达** ⇒ 那 5 张是死图。
+         现整行改作异灵根峰; cols 4..7 (36..39) 留空, 供将来扩新灵气。
+         ⚠ 索引 32..35 与「灵脉峰 50..54」同受 renderer.js PROP_VS 的
+           灵脉分支管辖 (高度/宽度倍率见 vein-skin.shape)。 */
+    for (var k = 0; k < VeinSkin.variants.length; k++) {
       ctx.save();
       ctx.translate(k * PX, VEIN_ROW * PX);
       ctx.scale(PX / TILE, PX / TILE);
-      ctx.beginPath();
-      ctx.rect(0, 0, TILE, TILE);
-      ctx.clip();
       trng = NL.mulberry32(77777 + (k + 8) * 131);
-      painters[k + 8](ctx, 0);
+      propVeinVariant(k)(ctx);
       ctx.restore();
     }
     /* 第 5 行: 山/雪/林 精灵 */
@@ -834,6 +1076,201 @@
     return cv;
   }
 
+  /* ============================================================
+   * 云团 (云气层): 水墨祥云 (云头式)
+   *   「云头」= 1 枚底座大瓣 + 沿**上缘**错落铺 3~5 枚小瓣 + 1 枚开放卷云钩;
+   *   一条云 = 2~3 个云头横串 + 末端云尾长弧。瓣的下半压灰 = 上白下阴。
+   *   ⚠ 两条踩过的坑 (别再回头):
+   *     (1) 小瓣若**绕心一圈均匀铺** ⇒ 上屏读作花瓣/玫瑰 (已废);
+   *     (2) 卷钩若**密绕 1.5 圈以上且居中** ⇒ 同样读作玫瑰花心 (已废);
+   *     (3) 若全用同一尺寸的瓣平铺成链 ⇒ 读作"卵石链/毛毛虫" (已废)。
+   *   · **6 个形态各异**的变体: 长云 / 团云 / 双团 / 高云 / 卷云带 / 小云 ——
+   *     由 main.js 云毯按格号 hash 取用 ⇒ 天上是多种云, 不是同一朵复制粘贴。
+   * 产出 6 张 128×84 逻辑像素 (2x 超采样) 位图, 仅 Canvas2D 云气层用, 不进 WebGL 图集。
+   * ============================================================ */
+  var CLOUD_PAL = {
+    face: [252, 250, 245],   // 云体 (近白纸色)
+    shade: [208, 211, 200],  // 云体阴面 (灰绿)
+    ink: [52, 50, 46]        // 勾线墨 (浓, 参考图的线很实)
+  };
+  var CLOUD_W = 128, CLOUD_H = 84, CLOUD_N = 6;
+
+  /* 一枚扁圆云瓣的**轮廓** (只建路径, 不填不描): 半径微抖 —— 死椭圆会读成气泡。
+     ⚠ 云体与**云影**共用它 (见 buildCloudShadows) —— 两者必须同一轮廓, 否则影子对不上云。 */
+  function puffPath(ctx, x, y, rx, ry, jit) {
+    var n = 12, pts = [], i, a;
+    for (i = 0; i < n; i++) {
+      a = i / n * Math.PI * 2;
+      var k = 1 + (trng() - 0.5) * jit;
+      pts.push([x + Math.cos(a) * rx * k, y + Math.sin(a) * ry * k]);
+    }
+    ctx.beginPath();
+    ctx.moveTo((pts[n - 1][0] + pts[0][0]) / 2, (pts[n - 1][1] + pts[0][1]) / 2);
+    for (i = 0; i < n; i++) {
+      var p = pts[i], q = pts[(i + 1) % n];
+      ctx.quadraticCurveTo(p[0], p[1], (p[0] + q[0]) / 2, (p[1] + q[1]) / 2);
+    }
+    ctx.closePath();
+  }
+
+  /* 一枚扁圆云瓣: 上述轮廓 + 上白下阴 + 浓墨勾边 */
+  function cloudPuff(ctx, x, y, rx, ry, jit) {
+    puffPath(ctx, x, y, rx, ry, jit);
+    ctx.fillStyle = rgba(CLOUD_PAL.face, 0.98);
+    ctx.fill();
+    ctx.save();                        /* 阴面: 关在本瓣里, 免得糊到邻瓣上 */
+    ctx.clip();
+    var g = ctx.createLinearGradient(0, y - ry * 0.20, 0, y + ry * 1.05);
+    g.addColorStop(0, rgba(CLOUD_PAL.shade, 0));
+    g.addColorStop(1, rgba(CLOUD_PAL.shade, 0.52));
+    ctx.fillStyle = g;
+    ctx.fillRect(x - rx * 1.4, y - ry * 1.4, rx * 2.8, ry * 3.2);
+    ctx.restore();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = rgba(CLOUD_PAL.ink, 0.62);
+    ctx.stroke();
+  }
+
+  /* 开放卷云钩: 约 1 圈螺线, 外端自瓣边起、向内收 —— 别绕密 (会读成玫瑰心) */
+  function cloudCurl(ctx, x, y, r, dir, alpha) {
+    ctx.beginPath();
+    var steps = 22, i;
+    for (i = 0; i <= steps; i++) {
+      var t = i / steps;
+      var ang = t * 1.05 * Math.PI * 2 * dir + (dir > 0 ? 0.55 : -0.55);
+      var rr = r * (1 - t * 0.78);
+      var px = x + Math.cos(ang) * rr, py = y + Math.sin(ang) * rr * 0.94;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = rgba(CLOUD_PAL.ink, alpha == null ? 0.60 : alpha);
+    ctx.stroke();
+  }
+
+  /* 云尾: 自云头末端甩出的几道长弧 (行云走势) */
+  function cloudTail(ctx, x, y, len, dir) {
+    for (var k = 0; k < 4; k++) {
+      ctx.beginPath();
+      ctx.moveTo(x, y + k * 2.0);
+      ctx.quadraticCurveTo(x + dir * len * 0.55, y - 3.6 + k * 2.2, x + dir * len, y + 1.2 + k * 2.8);
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 1.5 - k * 0.24;
+      ctx.strokeStyle = rgba(CLOUD_PAL.ink, 0.32 - k * 0.055);
+      ctx.stroke();
+    }
+  }
+
+  /* 一个「云头」: 底座大瓣 + 上缘错落小瓣 + 1 枚卷钩。返回卷钩参数, 由调用方统一后画。 */
+  function cloudHead(x, y, r, dir, out) {
+    var n = 3 + (trng() * 3 | 0), i, a;
+    for (i = 0; i < n; i++) {                        /* 小瓣只铺**上缘** (π..2π 是上半) */
+      a = Math.PI * (1.02 + 0.96 * (i + 0.5) / n);
+      out.push({ x: x + Math.cos(a) * r * 0.68, y: y + Math.sin(a) * r * 0.54,
+                 rx: r * (0.28 + trng() * 0.20), ry: r * (0.26 + trng() * 0.18) });
+    }
+    out.push({ x: x - dir * r * 0.74, y: y + r * 0.22, rx: r * 0.46, ry: r * 0.38 });  /* 侧后一瓣 */
+    out.push({ x: x - dir * r * 0.30, y: y + r * 0.34, rx: r * 0.58, ry: r * 0.40 });  /* 下缘一瓣 */
+    out.push({ x: x, y: y, rx: r, ry: r * 0.80 });                                     /* 底座大瓣 */
+    return [x - dir * r * 0.10, y + r * 0.02, r * 0.44, dir];
+  }
+
+  /* 六种云型: 各异的云头串法 + 云尾 —— 保证上屏一眼可辨 */
+  function cloudRecipe(v) {
+    var W = CLOUD_W, H = CLOUD_H, cy = H * 0.50;
+    var puff = [], curls = [], tails = [], i, a;
+    if (v === 0) {                                   /* 长云: 三个云头横串 + 右长尾 */
+      curls.push(cloudHead(W * 0.25, cy + 3, H * 0.20, 1, puff));
+      curls.push(cloudHead(W * 0.47, cy - 3, H * 0.26, -1, puff));
+      curls.push(cloudHead(W * 0.67, cy + 2, H * 0.21, 1, puff));
+      tails.push([W * 0.80, cy + 6, W * 0.16, 1]);
+    } else if (v === 1) {                            /* 团云: 三个云头抱团 */
+      curls.push(cloudHead(W * 0.44, cy + 5, H * 0.26, 1, puff));
+      curls.push(cloudHead(W * 0.32, cy - 4, H * 0.21, -1, puff));
+      curls.push(cloudHead(W * 0.61, cy - 2, H * 0.21, 1, puff));
+    } else if (v === 2) {                            /* 双团: 一大一小云头 + 中间细云 */
+      curls.push(cloudHead(W * 0.65, cy + 1, H * 0.27, -1, puff));
+      curls.push(cloudHead(W * 0.25, cy + 6, H * 0.18, 1, puff));
+      for (i = 0; i < 4; i++) {
+        a = i / 4 * Math.PI * 2 + 1.1;
+        puff.push({ x: W * 0.44 + Math.cos(a) * W * 0.045, y: cy + 4 + Math.sin(a) * H * 0.075,
+                    rx: H * 0.062, ry: H * 0.052 });
+      }
+      tails.push([W * 0.34, cy + 12, W * 0.13, -1]);
+    } else if (v === 3) {                            /* 高云: 云头竖向叠 (拔起) */
+      curls.push(cloudHead(W * 0.44, H * 0.62, H * 0.23, 1, puff));
+      curls.push(cloudHead(W * 0.49, H * 0.34, H * 0.19, -1, puff));
+      curls.push(cloudHead(W * 0.38, H * 0.15, H * 0.12, 1, puff));
+      tails.push([W * 0.56, H * 0.72, W * 0.14, 1]);
+    } else if (v === 4) {                            /* 卷云带: 两个云头 + 两端长尾 (最古典) */
+      curls.push(cloudHead(W * 0.36, cy + 3, H * 0.23, 1, puff));
+      curls.push(cloudHead(W * 0.63, cy - 2, H * 0.22, -1, puff));
+      tails.push([W * 0.80, cy + 3, W * 0.15, 1], [W * 0.20, cy + 10, W * 0.13, -1]);
+    } else {                                         /* 小云: 一个云头 + 一枚伴瓣 */
+      curls.push(cloudHead(W * 0.46, cy + 1, H * 0.19, 1, puff));
+      puff.push({ x: W * 0.70, y: cy + 5, rx: H * 0.075, ry: H * 0.062 });
+      tails.push([W * 0.64, cy + 7, W * 0.12, 1]);
+    }
+    return { puff: puff, curls: curls, tails: tails };
+  }
+
+  function buildClouds() {
+    var out = [];
+    for (var v = 0; v < CLOUD_N; v++) {
+      trng = NL.mulberry32(31337 + v * 977);        /* 每变体独立种子 (与纸/噪声同规矩) */
+      var cv = makeCanvas(CLOUD_W * 2, CLOUD_H * 2);
+      var ctx = cv.getContext('2d');
+      ctx.scale(2, 2);
+      var rec = cloudRecipe(v), k, f;
+      for (k = 0; k < rec.tails.length; k++) {      /* 云尾在云头之下 (自头后甩出) */
+        f = rec.tails[k];
+        cloudTail(ctx, f[0], f[1], f[2], f[3]);
+      }
+      rec.puff.sort(function (p, q) { return p.ry - q.ry; });   /* 小瓣先画 ⇒ 大瓣压上层 */
+      for (k = 0; k < rec.puff.length; k++) {
+        f = rec.puff[k];
+        cloudPuff(ctx, f.x, f.y, f.rx, f.ry, 0.24);
+      }
+      for (k = 0; k < rec.curls.length; k++) {
+        f = rec.curls[k];
+        cloudCurl(ctx, f[0], f[1], f[2], f[3], 0.60);
+      }
+      out.push(cv);
+    }
+    return out;
+  }
+
+  /* ---------- 云影 (云投在土地上的阴影) ----------
+   * 「云在天上飘, 地上却没影子」会让云像贴纸浮在画面上。这里给每个云团再产一张
+   * **纯墨色 + 高斯模糊**的软影:
+   *   · 轮廓与云体**完全同源** (同种子同云型 ⇒ 逐瓣 puffPath 复用), 所以影随云形;
+   *   · 只模糊**轮廓填充**, 不带勾线/阴面 ⇒ 不会出现"第二个云"的错读;
+   *   · 与 buildClouds 等长, 索引即变体号, 由 main.js 云气层在云体**之前**偏移绘制。
+   * 2026-09-14 七版新增 (用户: "土地上面也没有阴影, 这个要有")。 */
+  var CLOUD_SHADOW = { col: [58, 56, 50], a: 0.40, blur: 7 };
+  function buildCloudShadows() {
+    var out = [];
+    for (var v = 0; v < CLOUD_N; v++) {
+      trng = NL.mulberry32(31337 + v * 977);   /* ⚠ 与 buildClouds 同种子 ⇒ 影子必与云体对齐 */
+      var cv = makeCanvas(CLOUD_W * 2, CLOUD_H * 2);
+      var ctx = cv.getContext('2d');
+      ctx.scale(2, 2);
+      var rec = cloudRecipe(v), k, f;
+      rec.puff.sort(function (p, q) { return p.ry - q.ry; });
+      ctx.save();
+      try { ctx.filter = 'blur(' + CLOUD_SHADOW.blur + 'px)'; } catch (e) { /* 不支持则退化为硬边软影 */ }
+      ctx.fillStyle = rgba(CLOUD_SHADOW.col, CLOUD_SHADOW.a);
+      for (k = 0; k < rec.puff.length; k++) {
+        f = rec.puff[k];
+        puffPath(ctx, f.x, f.y, f.rx, f.ry, 0.24);
+        ctx.fill();
+      }
+      ctx.restore();
+      out.push(cv);
+    }
+    return out;
+  }
+
   /* ---------- 灵脉灵气晕圈 (Canvas2D overlay 绘制) ----------
    * cx,cy: 中心格世界坐标; rgb: 灵根色; opts.level: 0大 1中 2小
    * (七星花连线/圆点/格底均已移除, 仅留淡晕圈) */
@@ -860,6 +1297,8 @@
     computeAvgColors: computeAvgColors,
     buildPaper: buildPaper,
     buildNoise: buildNoise,
+    buildClouds: buildClouds,
+    buildCloudShadows: buildCloudShadows,
     drawVeinFlower: drawVeinFlower
   };
 })(window);

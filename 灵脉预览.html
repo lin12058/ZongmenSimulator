@@ -506,6 +506,11 @@
   var SHENG = [2, 3, 1, 4, 0];            // 相生: 金生水 木生火 水生木 火生土 土生金
   var KE = [1, 4, 3, 0, 2];               // 相克: 金克木 木克土 水克火 火克金 土克水
   var DUAL = { '0|3': '雷', '1|2': '风', '0|2': '冰', '3|4': '暗' };  // 相冲/相合 → 异灵根
+  /* 异灵根精灵位顺序 (图集第 4 行 0..3 列 = 32..35)。
+     ⚠ 必须与 web/js/vein-skin.js 的 VeinSkin.variants **键序**逐位一致 ——
+       前端的调色板按同一序号取色, 顺序错位 = 雷画成冰的色。
+       契约断言: verify/check_vein_skin.mjs。 */
+  var VEIN_VARIANT_ORDER = ['雷', '风', '冰', '暗'];
   var ELEMENT_RGB = [
     [196, 176, 120], [104, 140, 86], [86, 116, 142], [176, 72, 50], [152, 120, 82]
   ];
@@ -524,6 +529,16 @@
 
   /* 邻居槽位 (轴坐标) 按 60°*k 排列: 0:东 1:东南 2:西南 3:西 4:西北 5:东北 */
   var NEIGH_SLOTS = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+
+  /* 灵脉占地 (2026-09-14 六版): **三档一律只占本格** ——
+     灵脉是「一根独立的灵峰」, 不是一个山脉群。早先按等级铺 7/3/1 格, 密排后连成
+     一片尖顶山簇, 实机读作「三角形山」, 与美术方向 (一峰独立 + 山脚化进地形) 不符。
+     等级**只影响前端高度倍率** (web/js/vein-skin.js levels[]), **不影响占地**。
+     纯函数 (只依赖 level 与该格相对灵脉中心的轴向偏移 dq,dr) ⇒ 跨区块/跨会话一致。
+     ⚠ level 参数保留: 「等级契约」由 verify/check_vein_skin.mjs 逐档断言占地 (三档同 1 格)。 */
+  function veinFootKeep(level, dq, dr) {
+    return dq === 0 && dr === 0;
+  }
 
   /* ---------- 命名词库 (觅长生风) ---------- */
   var NAME = {
@@ -557,14 +572,10 @@
   var regionCache = new Map();   // "i,j" -> 区域信息
   var settleCache = new Map();   // "i,j" -> 聚落数组
   var roadCache = new Map();     // "a|b" -> 道路
-  var roadTileIdx = new Set();   // 会话内已建路格 "q,r" 索引 (寻路复用: 通行权重 ROAD_W_ROAD)
-  /* A4: 路格 -> 引用它的「已缓存道路」条数。roadCache 有 ROAD_CAP 淘汰, 原先 roadTileIdx
-     只增不清 ⇒ 被淘汰的路的格子永久留在索引里 (幽灵路廊: 路已不在缓存却仍给 A* 折扣)。
-     改为引用计数: 用路对象的 tiles 反向清, 某格被最后一条引用它的路淘汰时才移出。 */
-  var roadTileRef = new Map();
-  /* ⚠ 仍具建路顺序依赖: A* 对「已建路」的代价=2 < 任何地形, 新路会主动并线到既有路廊;
-     建路顺序 = roadsNear 规范序 (hubBefore × 距离升序), 会话内确定, 不同访问序的会话
-     在批边界路形可能略异。resetRoads/init/configure 时随 roadCache 一并清空。 */
+  /* ⚠ B (2026-09-14) 起**无建路顺序依赖**: 每条边的折线只由「该边 + 静态地形」决定
+     (纯地形 A*, 不再把已建路格当 2 费高速路骑) ⇒ 扫描顺序 / 缓存冷热 / reload 都不改路形。
+     原先的 roadTileIdx (已铺路格索引) 与 roadTileRef (引用计数) 随复用一并移除:
+     它们的唯一读者就是 bfsRoad 的折扣分支。 */
   var commCache = new Map();     // "i,j" -> 群落 | null
   var veinNearCache = new Map(); // "q,r" -> 灵脉近邻 {d, v} | null
   var siteScoreCache = new Map();// "q,r" -> 选址打分 (纯函数, 只依赖地形/灵脉)
@@ -573,16 +584,12 @@
   var townCache = new Map();     // "聚落id" -> 足迹规划 {style, buildings, resources}
   var tradeCache = new Map();    // "i,j" -> 该区域格城镇的贸易边数组
   var skeletonCache = new Map(); // A2: "i,j" -> 骨架边 Set (纯函数: 只依赖邻域聚落, 与缓存冷热无关)
-  var roadFail = new Set();      // "a|b" -> 不可达聚落对 (重试 3 次仍失败才入内, 终身跳过)
-  var roadFailTrials = new Map(); // "a|b" -> 已尝试次数: 复用是路径依赖的 (路网变密后骑路可达性会变),
-                                  // null 失败不立即终身标记, 进重试队列 3 次后仍失败才转终身
-  /* 负缓存 (roadVer 戳): "a|b" -> 上次失败时的 roadVer。bfsRoad 对 (起点,终点,roadTileIdx) 是
-     纯函数, 而 roadVer 只在「真有新路落成」时自增 ⇒ 版本未变时重算必得同一结论, 可直接跳过。
-     这是 review A1「DI 拒绝边无负缓存」的收尾 (todo1-①): 热跑 (路建好后重扫) 的回退主因
-     就是这些「注定失败」的边每次扫描都被重新 A*。 */
-  var roadFailVer = new Map();
-  var diRetryQueue = [];         // DI 闸拒绝的边 {a,b,rkey}: 等路网变密后重试 (会话级 FIFO,
-                                 // 每次 roadsNear 限量消化; 重试仍超限则回队尾, 容量上限丢最旧)
+  /* "a|b" -> 该边「永久不建」。B 版起这是**派生量而非状态**: 纯地形 A* + DI 闸 + 骨架判定
+     全是 (该边, 静态地形) 的纯函数 ⇒ 一条边要么建、要么终身不建, 与建路进度/扫描顺序无关。
+     因此这三个表全部退役 —— 它们存在的唯一理由是「路网变密后骑路可达性会变」, 而骑路已取消:
+       · roadFailTrials (3 次重试后转终身)  · roadFailVer (roadVer 负缓存)
+       · diRetryQueue (DI 闸拒绝边重试队列) */
+  var roadFail = new Set();
   var demandCache = new Map();   // "i,j" -> 未排序需求边 (纯几何, 与中心无关; 排序每调用做)
   var DEMAND_CAP = 2048;
   /* P3: 地块级缓存固定容量 (Map 保持插入序)。超限时每次淘汰最旧 1 条,
@@ -597,9 +604,7 @@
   var SETTLE_CAP = 1024;   // 区域聚落数组
   var ROAD_CAP = 4096;     // A* 道路 (含 pts/tiles, 单条较大)
   var COMM_CAP = 1024;     // 群落
-  var ROADFAIL_CAP = 1024; // 不可达聚落对 (只影响重试频率)
-  var ROADFAILTRIALS_CAP = 1024; // A3: 重试计数表容量 (与 ROADFAIL_CAP 同档 —— 同一 "a|b" 键空间;
-                                 // 淘汰只让该边「多试一次」, 不改变可达性结论)
+  var ROADFAIL_CAP = 1024; // 不建的聚落对 (LRU 淘汰只是重算一次, 结论逐字节相同)
   var SITE_SCORE_CAP = 40000; // 选址打分 (勘测扫描逐格, 容量须覆盖视野内候选)
   var PROSPECT_CAP = 8192; // 勘测结果 (按锚点)
   var CENTER_CAP = 8192;   // 选中中心 (按锚点)
@@ -615,54 +620,16 @@
     s.add(key);
     if (s.size > cap) s.delete(s.values().next().value);
   }
-  /* 失败边记戳 (负缓存 roadFailVer: rkey -> 记戳时的 roadVer)。
-     容量与 roadFail 同档; 淘汰只让该边「被重试一次」, 不改变任何结果。 */
-  function failMark(rkey) { cacheSet(roadFailVer, rkey, roadVer, ROADFAIL_CAP); }
-  /* A3: 闸拒/失败边的重试计数 +1 —— 原来是裸 Map.set, 无上限且转正后不删 ⇒ 会话内只增不减。
-     现改为有界 (LRU: 先删后插以刷新新旧序) + 建成路时 trialClear 移除。淘汰只让该边「多试一次」。 */
-  function trialBump(rkey) {
-    var n = (roadFailTrials.get(rkey) || 0) + 1;
-    roadFailTrials.delete(rkey);
-    cacheSet(roadFailTrials, rkey, n, ROADFAILTRIALS_CAP);
-    return n;
-  }
-  function trialClear(rkey) { roadFailTrials.delete(rkey); }
-  /* A4: 道路入库 —— 与 ROAD_CAP 淘汰同步维护 roadTileIdx/roadTileRef。
-     cacheSet 只淘汰 road 对象, 会留下幽灵路格; 这里按引用计数回收: 某格被最后一条
-     引用它的已缓存道路淘汰时才从 roadTileIdx 移除 (共享路廊不误删)。
-     ⚠ 调用方必须保证 rkey 未在缓存 (三处建路点均已判 roadCache.get 为空)。 */
+  /* 道路入库: LRU 淘汰交给 cacheSet。路对象不再是「寻路输入」(复用已取消),
+     故无须再同步任何路格索引 —— 淘汰只损失一次重算, 重算结果逐字节相同。 */
   function roadSet(rkey, road) {
-    roadCache.set(rkey, road);
-    road.tiles.forEach(function (t) {
-      roadTileRef.set(t, (roadTileRef.get(t) || 0) + 1);
-      roadTileIdx.add(t);
-    });
-    while (roadCache.size > ROAD_CAP) {
-      var ok = roadCache.keys().next().value;
-      var old = roadCache.get(ok);
-      roadCache.delete(ok);
-      if (old && old.tiles) old.tiles.forEach(function (t) {
-        var n = (roadTileRef.get(t) || 0) - 1;
-        if (n <= 0) { roadTileRef.delete(t); roadTileIdx.delete(t); }
-        else roadTileRef.set(t, n);
-      });
-    }
+    cacheSet(roadCache, rkey, road, ROAD_CAP);
   }
 
   /* 道路版本号: roadCache 每新增一条 A* 道路即 +1。
      服务端据此为 tile 缓存做新鲜度校验 — onRoad 语义依赖 roadCache 热状态,
      只有「真有新路落成」才需要失效旧 tile 缓存 (比按区域包生成计数更精准)。 */
   var roadVer = 0;
-  /* DI 重试队列节流游标: 记录上次「消化一条老边」时的 roadVer。
-     重试的价值完全来自「路网变密」, 所以每建成 128 条新路才值得试 1 条老边 (见 roadsNear 末)。
-
-     实测 (±14 区域格冷启动 = 841 格, mapgen.js 单线程):
-       · 每次调用都消化 1 条 → drain 烧 216 次 A* (均 27.9ms, 主循环的 2.3 倍 —— FIFO
-         取出的多为大跨度老边), 只多建 7 条路, 且单区域峰值从 239ms 抬到 424ms;
-       · 每 128 条新路消化 1 条 → 总耗时 20015ms (改动前 34542ms, -42%),
-         峰值 239.1ms (改动前 249.0ms)。
-     ⇒ 阈值取 128: 既保住「路网变密后跨调用重试」的语义, 又让代价落到噪声以下。 */
-  var drainMark = 0;
 
   /* ---------- 基础工具 ---------- */
   function hash01(a, b, salt) {
@@ -705,11 +672,11 @@
     nDetail = new NL.SimplexNoise(rng);
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); roadTileIdx.clear(); roadTileRef.clear(); diRetryQueue.length = 0; demandCache.clear(); roadFailTrials.clear(); commCache.clear(); veinNearCache.clear();
+    roadCache.clear(); demandCache.clear(); commCache.clear(); veinNearCache.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     skeletonCache.clear();  // A2
     roadFail.clear();
-    roadVer = 0; drainMark = 0; roadFailVer.clear();
+    roadVer = 0;
   }
 
   /* ---------- 海拔场 (纯函数, 带缓存) ---------- */
@@ -817,11 +784,15 @@
     else biome = BIOME.GRASS;
 
     /* 灵脉格: 覆写显示用 biome (8..12 = 金木水火土灵脉格)
-       仅陆地出灵脉 —— 边界带被沉海的灵脉不再覆写, 否则会在海面上留"无根灵脉峰" */
+       仅陆地出灵脉 —— 边界带被沉海的灵脉不再覆写, 否则会在海面上留"无根灵脉峰"。
+       占地**三档一律只占本格** (2026-09-14 六版, 见 veinFootKeep()); 高度分档在前端
+       vein-skin.js levels。 */
     var vinfo = null;
     if (vn && vn.d <= 1 && e >= SEA_LEVEL) {
-      vinfo = { element: vn.v.element, variant: vn.v.variant,
-                level: vn.v.level, d: vn.d, name: vn.v.name };
+      if (veinFootKeep(vn.v.level, q - vn.v.q, r - vn.v.r)) {
+        vinfo = { element: vn.v.element, variant: vn.v.variant,
+                  level: vn.v.level, d: vn.d, name: vn.v.name };
+      }
     }
     var disp = vinfo ? 8 + vinfo.element : biome;
 
@@ -851,12 +822,23 @@
 
   /* ---------- 立体精灵分配 (超出格子的山/树/灵脉峰) ----------
    * 精灵索引 = 图集行*8+列:
+   *   第 4 行: 32..35 异灵根灵脉峰 (雷/风/冰/暗; 4..7 留空)
    *   第 5 行: 40/41 山地·两变体, 42/43 雪峰·两变体, 44..47 林地·四变体
    *   第 6 行: 48 沙丘岩石, 49 草丛, 50..54 金木水火土灵脉峰
-   *   第 7 行: 56/57 山地·横岭变体, 58/59 雪峰·横岭变体, 60/61 草地小山包, 62/63 草地孤树 */
+   *   第 7 行: 56/57 山地·横岭变体, 58/59 雪峰·横岭变体, 60/61 草地小山包, 62/63 草地孤树
+   * 灵脉峰取色/造型在**前端** (web/js/vein-skin.js): 本函数只负责「给哪个精灵位」。
+   * 灵脉峰**高度分档**也在前端 (vein-skin.js levels[]), 等级经实例通道 iElev 下发
+   * (buildChunk 里 `e: f.vein ? f.vein.level : f.e`); **占地**在本文件 veinFootKeep() (恒本格)。 */
   function propSpriteFor(f) {
     var b = f.disp != null ? f.disp : f.biome;
-    if (b >= 8) return b + 42;                          // 灵脉峰 (50+元素)
+    if (b >= 8) {
+      /* 异灵根灵脉 → 专用精灵位 (与五行峰同形, 换一套异灵根配色) */
+      if (f.vein && f.vein.variant != null) {
+        var vi = VEIN_VARIANT_ORDER.indexOf(f.vein.variant);
+        if (vi >= 0) return 32 + vi;
+      }
+      return b + 42;                                    // 五行灵脉峰 (50+元素)
+    }
     var v2 = (f.hash * 2) | 0;                          // 0/1 成对变体
     if (b === 6) {
       return (f.hash * 913.7) % 1 < 0.5 ? 40 + v2 : 56 + v2;   // 山峰全量渲染 (不按海拔取消)
@@ -955,8 +937,12 @@
         if (sp >= 0) {
           var off = (f.vein == null && (f.biome === 6 || f.biome === 7))
                   ? clusterOffset(f) : { ox: 0, oy: 0 };
+          /* ⚠ 第 4 个实例通道 (iElev) 对灵脉峰**载的是灵脉等级** (0大/1中/2小), 不是海拔 ——
+             前端 PROP_VS 按它取高度倍率 (web/js/vein-skin.js levels[]);
+             大世界山照旧传海拔 (前端 else-if 分支仍按海拔缩放)。 */
           propList.push({ x: f.x + off.ox, y: f.y + off.oy,
-                          sp: sp, hash: f.hash, e: f.e });
+                          sp: sp, hash: f.hash,
+                          e: (f.vein ? f.vein.level : f.e) });
         }
         if (f.x < bbox.x0) bbox.x0 = f.x;
         if (f.x > bbox.x1) bbox.x1 = f.x;
@@ -1539,17 +1525,22 @@
    * 路网拓扑 (roadsNear, Network-First 详见 docs/道路网络重构方案.md):
    *   ① 需求边 = 本格聚落 × 5x5 池的近似 RNG (被第三点支配的冗余边不入图,
    *      取代跳板剪枝; MST ⊆ RNG ⇒ 骨架连通, 孤岛不再出现);
-   *   ② 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序;
-   *   ③ 逐边 A*: 已建路格全局折扣 ROAD_W_ROAD=2 (不限走廊 ⇒ 分叉聚落共享干道);
-   *   ④ 绕行闸: DI = 步数/六边距 > ROAD_DI_MAX10/10 ⇒ 先试无折扣直连,
-   *      仍超限则骨架边 (Kruskal) 强制建, 非骨架放弃。
-   *   跳板池/支配判定全部全整数; 复用与闸门使可行性「路径依赖」(先建路的形状
-   *   影响后建路), 会话内严格确定。
+   *   ② 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序 ——
+   *      ⚠ 这个序只决定「谁先被算到」, 不再影响「算出来长什么样」(见 ③);
+   *   ③ 逐边 A*: **纯地形** (不把已建路格当折扣高速路) ⇒ 折线 = f(该边, 静态地形);
+   *   ④ 绕行闸: DI = 步数/六边距 > ROAD_DI_MAX10/10 ⇒ 骨架边 (Kruskal) 强制建
+   *      (连通优先), 非骨架不建。
+   *   跳板池/支配判定全部全整数。
+   *   ⚠ B 版 (2026-09-14) 起**顺序无关**: 原先「已建路格 2 费」让新路主动并线到既有路廊
+   *   (共享干道, 但代价是「谁先建」改变「建成什么样」) —— 实测同一 world 四种扫描顺序
+   *   得到 4 个不同路网指纹, 预览页传 cq/cr 与服务端不传即分叉。取消复用后四种顺序
+   *   1 个指纹、第二遍零新增、逐字节幂等。代价: 不再共享路廊 ⇒ 路格总数 +9.5%
+   *   (11780 vs 10768 @ seed-check ±14 格), 路条数 -3.1% (716 vs 739);
+   *   收益: 冷建一遍 ~13.3-15.6s vs ~22.0-24.9s (-37%), 且输出可复现。
    * A* 本体 (bfsRoad) 的三个剪枝:
    *   ① 放弃「跨大陆找路」—— 剪枝把搜索限制在城镇周边邻域:
    *        · 累计权重 > CFG.ROAD_COST_MAX 的分支不再扩展 (权重剪枝);
-   *        · 距起点层数 > 步数上限的格不入队 (步数剪枝; 复用模式上限自动放宽,
-   *          见 bfsRoad 注释);
+   *        · 距起点层数 > 步数上限的格不入队 (步数剪枝);
    *        · 剩余代价可采纳下界 使 g+h > 预算 的格直接跳过 —
    *          可采纳 ⇒ 不改变任何 ≤预算 路径的存在性与最优值, 只砍掉「注定失败」
    *          分支的无效扩散。
@@ -1695,13 +1686,12 @@
        未传 ⇒ 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序, 再按 rkey。
      边集纯几何 (与中心无关) ⇒ 按 "i,j" 缓存, 排序在副本上做。 */
   function scanDemandEdges(i, j) {
-    /* todo1-②: 复用模式步数上限 = COST_MAX ÷ min(ROAD_W_ROAD, 最低地形权重) (=60) 正是
-       bfsRoad 的硬早退条件 ("d0 > cap → null")。hexDist 是步数下界 ⇒ 超上限的聚落对在
-       生产路径 (roadsNear 始终传 roadTileIdx) 下恒不可达, 不该进需求图 —— 否则每次扫描
-       都要为它白跑一次最贵的必败 A* (实测冷建 617 次主循环 A* 里 226 次 = 37% 属此类)。
+    /* 步数上限 = ROAD_STEPS_MAX (B 版起生产寻路恒为纯地形): bfsRoad 的两个硬早退条件
+       「d0 > cap」与「d0 × 最低权重 > COST_MAX」退化为同一个 d0 > 40 (40×3=120=预算)。
+       hexDist 是步数下界 ⇒ 超上限的聚落对恒不可达, 不该进需求图 —— 否则每次扫描都要
+       为它白跑一次必败 A* (复用模式实测: 冷建主循环 A* 里 37% 属此类)。
        纯几何、与 cq/cr 无关 ⇒ 放进 demandCache 安全。 */
-    var minW0 = roadMinWeight(), rw0 = CFG.ROAD_W_ROAD | 0;
-    var stepCap0 = Math.floor((CFG.ROAD_COST_MAX | 0) / Math.max(1, rw0 < minW0 ? rw0 : minW0));
+    var stepCap0 = CFG.ROAD_STEPS_MAX | 0;
     var mine = settlementsFor(i, j), edges = [], edgeSeen = new Set();
     for (var s = 0; s < mine.length; s++) {
       var a = mine[s];
@@ -1756,29 +1746,31 @@
   }
 
   /* A* 寻路 (f = g + h, Dial 桶优先队列): 返回 [[q,r], ...] 或 null (超预算/不可达)
-     roadTiles (可选): 会话内已建路格索引 (Set \"q,r\")。传入后已铺路格每格只算
-     ROAD_W_ROAD(2) —— 全局折扣, 不限走廊: 新路顺路并线到既有路廊 (分叉聚落
-     共享干道); 绕行副作用由调用方的 DI 闸兜底。此时 h 的下界系数同步降为
-     min(地形最小权重, ROAD_W_ROAD) = 2, 保证可采纳。不传 = 纯地形寻路
-     (回归测试/跨实例确定性用), 函数名保留 bfsRoad: verify/w3_bfs_road.mjs 以此名调用 */
+     ⚠ B 版起**生产路径恒不传 roadTiles** (纯地形 ⇒ 顺序无关, 这是全链路确定性的地基)。
+     该可选参数只剩诊断用途 —— verify/trace_road.mjs 复刻已退役的「并线旧路廊」行为做
+     个案对比; 传了就会重新引入建路顺序依赖, 别在生产里用。
+     roadTiles: 会话内已建路格索引 (Set "q,r")。传入后已铺路格每格只算 ROAD_W_ROAD(2)
+     (全局折扣, 不限走廊), h 的下界系数同步降为 min(地形最小权重, ROAD_W_ROAD) = 2
+     以保证可采纳。函数名保留 bfsRoad: verify/w3_bfs_road.mjs 以此名调用 */
   function bfsRoad(sq, sr, tq, tr, roadTiles) {
     var maxCost = CFG.ROAD_COST_MAX | 0;
     var roadW = CFG.ROAD_W_ROAD | 0;
     var minW = roadMinWeight();
     var hMin = (roadTiles && roadW < minW) ? roadW : minW;   // 启发下界系数: 已铺路格更便宜
     var stepsTight = CFG.ROAD_STEPS_MAX | 0;                 // 40: 紧凑镜头 (搜索小)
-    var cap = roadTiles ? Math.floor(maxCost / Math.max(1, hMin)) : stepsTight;  // 复用模式: 60
+    var cap = roadTiles ? Math.floor(maxCost / Math.max(1, hMin)) : stepsTight;  // 诊断(复用): 60
     /* ⚠ 步数上限双语义: ROAD_STEPS_MAX(40) 是「每格最低 3 费」时代的隐含总长上限
-       (40×3=120=预算); 路格 2 费后骑路长径最多 120÷2=60 步, 复用模式上限自动放宽。
+       (40×3=120=预算); 路格 2 费后骑路长径最多 120÷2=60 步 —— 只有传 roadTiles 的
+       诊断路径才放宽。生产 (纯地形) 下 cap=stepsTight=40, 与「d0 × 最低权重 > COST_MAX」
+       等价 (40×3=120) ⇒ scanDemandEdges 的 40 格筛正是这个早退条件的镜像。
        代价预算才是真约束, 步数只是搜索限界。 */
     var d0 = hexDist(sq, sr, tq, tr);
     if (d0 > cap || d0 * hMin > maxCost) return null;   // 直线下界即超预算, 直接放弃
 
-    /* 两段式镜头 (复用模式性能优化): 弱启发 (hMin=2) × 60 步大镜头的单次 A* 可达
-       ~50ms; 先用紧凑镜头 40 搜索 —— 绝大多数对在此命中且即该镜头内最优; 未中
-       (骑路长径 / 真不可达) 再用 60 步重搜兜底。
-       ⚠ 有界次优: 第一段命中时, 41-60 步的更便宜骑路路径不会返回 —— 代价差有界
-       且 DI 闸兜底质量; 盲寻(纯地形)单段不受影响。 */
+    /* 两段式镜头 (仅 roadTiles 诊断路径): 弱启发 (hMin=2) × 60 步大镜头的单次 A* 可达
+       ~50ms; 先用紧凑镜头 40 搜索, 未中 (骑路长径 / 真不可达) 再用 60 步重搜兜底。
+       ⚠ 有界次优: 第一段命中时, 41-60 步的更便宜骑路路径不会返回 —— 只影响已退役的
+       复用模式; 生产 (纯地形) 走单段, 不受影响。 */
     function search(maxSteps) {
       var buckets = [];
       for (var b = 0; b <= maxCost; b++) buckets.push([]);
@@ -1846,13 +1838,14 @@
      流程:
        ① 需求边 = 本格聚落 × 5x5 池的近似 RNG (被第三点支配的冗余边不入图,
           取代旧跳板剪枝; MST ⊆ RNG ⇒ 骨架连通);
-       ② 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序 ——
-          干线先落成, 支线后续并线;
-       ③ 逐边 A* (已建路格全局折扣 ROAD_W_ROAD, 不限走廊 —— 分叉聚落共享干道);
-       ④ 绕行闸: DI = 步数/六边距 > ROAD_DI_MAX10/10 ⇒ 先试无折扣直连, 仍超限则
-          骨架边 (Kruskal) 强制建 (连通优先), 非骨架放弃并标 roadFail (不可达或不需要)。
+       ② 建网规范序: 端点 hub 等级高者先建 (干线先行), 同级距离升序;
+       ③ 逐边 A*: 纯地形 ⇒ 折线 = f(该边, 静态地形), 与建路进度/扫描顺序无关;
+       ④ 绕行闸: DI = 步数/六边距 > ROAD_DI_MAX10/10 ⇒ 骨架边 (Kruskal) 强制建
+          (连通优先), 非骨架并入 roadFail (不需要)。
      cq/cr (可选): 修路中心点 (玩家/点击位置) —— 需求边按到中心的距离升序计算,
      路网由内向外生长 (渐进加载); 未传 = 干线优先规范序。
+     ⚠ 中心点/预算只决定「这一刻先算哪些边」, 不决定「算出来什么样」: 收敛后
+     (预算够走完一遍) 路网与是否传 cq/cr 完全一致 —— B 版顺序无关性的推论 (E2 因此闭环)。
      maxNew: 本次调用允许新算的道路条数; 0 = 纯读缓存 (绘制帧用), 防止寻路卡帧 */
   function roadsNear(i, j, maxNew, cq, cr) {
     var budget = maxNew | 0;
@@ -1862,53 +1855,40 @@
     for (var s0 = 0; s0 < mine.length; s0++) if (mine[s0].type !== 'poi') { hasMine = true; break; }
     if (!hasMine) return [];
     var edges = demandEdgesFor(i, j, cq, cr);
-    var skel = null;                             // 骨架边集合 (DI 超限时懒计算)
-    var deferred = [];                           // DI 闸拒绝的边: 路网变密后可能达标, 循环末重试
-    var starved = false;                         // 主循环因预算耗尽中断: 本格视野内还有边没算 (todo1-②)
+    var skels = {};                              // 骨架边集合, 按「边的小 id 端所属格」缓存
+                                                 // (⚠ 必须按边归一, 不能按「当前在扫哪个格」取)
     var out = [];
     for (var e = 0; e < edges.length; e++) {
       var a = edges[e].a, b = edges[e].b, rkey = edges[e].rkey;
       if (roadFail.has(rkey)) continue;          // 不可达: 终身跳过
       var road = roadCache.get(rkey);
       if (!road) {
-        /* todo1-① 失败边不再由「扫描」重算: 重试的全部价值来自「路网变密」(见文末 drain
-           节流), 统一交给 DI 重试队列按 roadVer 增量节流即可。旧行为 (每次扫描重算) 正是
-           热跑回退的来源 —— 实测 222 条「地形/代价注定不可达」的边 (hexDist 16~55, 全部在
-           60 步预算内, 与「端点相距 70 格」的旧归因无关) 每次重扫都要白跑一遍最贵的 A*
-           (单次 p90 130~166ms), 而全部重试只多建 6 条路 (1.8%)。
-           ⚠ 本行同时修掉一个隐性不确定性: 旧行为下「同一格扫几遍」会改变路网 (323→329),
-           即输出依赖缓存冷热; 现在路网只由「扫描了哪些格」决定, 对外可复现。
-           退回旧行为 = 把本行条件换成 (roadFailVer.get(rkey) === roadVer)。 */
-        if (roadFailVer.has(rkey)) continue;
-        if (budget <= 0) { starved = true; continue; }   // 预算用尽: 本帧不算, 且标记「视野内没服务完」
+        /* roadFail 即权威负缓存 (见其声明处) —— 命中就说明这条边「永久不建」, 跳过即可,
+           不存在「重扫一遍可能变好」这回事 (结论是纯函数, 重算必得同一结论)。 */
+        if (budget <= 0) continue;                       // 预算用尽: 本帧不算 (下帧再来)
         budget--;
         /* 方向归一化: 端点固定按 id 序 (小→大), 使道路点列方向
            与「哪个聚落先发起建路」无关 —— 否则热缓存命中与冷生成
            会得到同一路径的相反点列, 破坏跨会话一致性。 */
         var pA = a, pB = b;
         if (b.id < a.id) { pA = b; pB = a; }
-        var path = bfsRoad(pA.q, pA.r, pB.q, pB.r, roadTileIdx);   // 已建路格 2 费: 并线旧路廊
-        if (!path) {
-          failMark(rkey);                           // 记戳: 之后只由 drain 节流重试
-          var tr2 = trialBump(rkey);
-          if (tr2 >= 3) setAdd(roadFail, rkey, ROADFAIL_CAP);      // 3 次仍无路: 终身不可达
-          else diRetryQueue.push({ a: a, b: b, rkey: rkey });      // 路网变密后骑路可能可达, 再试
-          continue;
-        }
+        /* B: 纯地形寻路 (不传 roadTiles) —— 折线只依赖「该边 + 静态地形」。这就是
+           「顺序无关」的充分条件: 同一对聚落无论何时、被哪个区域格、以什么顺序扫到,
+           A* 都从同一份地形出发 ⇒ 逐字节同一条路径。 */
+        var path = bfsRoad(pA.q, pA.r, pB.q, pB.r);
+        if (!path) { setAdd(roadFail, rkey, ROADFAIL_CAP); continue; }   // 纯地形无路: 终身不建
         /* 绕行闸: DI = 步数/六边距 ≤ ROAD_DI_MAX10/10 (整数比, 无浮点)。
-           超限 ⇒ 先试无折扣直连 (更直); 仍超限 ⇒ 骨架边强制建 (连通优先),
-           非骨架**不建且不标 roadFail** —— 建路顺序依赖: 现在绕行超限可能只是
-           路网还太稀, 密后重试即可达标; 记入 roadFail 会永久毒化该对 (实测)。 */
+           超限 ⇒ 骨架边 (Kruskal) 强制建 (连通优先, 接受迂回), 非骨架不建。
+           ⚠ B 版起这里判完即定终身: 折线已是纯地形的唯一解, 「路网变密后再试」的逻辑
+           不再可能改变结论 (骑路折扣正是被删掉的那条路径依赖), 故不再进重试队列。 */
         var steps = path.length - 1, d0hex = hexDist(a.q, a.r, b.q, b.r);
         if (steps * 10 > roadDI * d0hex) {
-          var direct = bfsRoad(pA.q, pA.r, pB.q, pB.r);
-          if (direct && (direct.length - 1) * 10 <= roadDI * d0hex) {
-            path = direct;                       // 无折扣直连更直且达标 → 用直连
-          } else {
-            if (skel === null) skel = skeletonEdgesFor(i, j);
-            if (!skel.has(rkey)) { failMark(rkey); deferred.push(edges[e]); continue; }
-            // 骨架边: 保留折扣路径 (连通优先, 接受迂回)
-          }
+          /* 骨架集必须按「边」归一: skeletonEdgesFor 的池是「参数格」的 5×5 邻域,
+             不同格给出不同骨架集 ⇒ 同一个 rkey 会得到两种答案 (取决于哪个区域格先扫到,
+             正是 E2/verify_map 顺序依赖的一个来源)。取该边**小 id 端**所属格 ⇒ 恒一致。 */
+          var pAp = pA.id.split('_'), spk = pAp[0] + ',' + pAp[1];
+          var sk = skels[spk] || (skels[spk] = skeletonEdgesFor(+pAp[0], +pAp[1]));
+          if (!sk.has(rkey)) { setAdd(roadFail, rkey, ROADFAIL_CAP); continue; }
         }
         var pts = [], tset = new Set();
         for (var pj = 0; pj < path.length; pj++) {
@@ -1920,92 +1900,10 @@
         road = { key: rkey, pts: pts, tiles: tset,
                  x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x),
                  y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
-        roadSet(rkey, road);                     // A4: 入库 + 引用计数 + 淘汰回收
-        trialClear(rkey);                        // A3: 建成 → 撤掉重试计数
+        roadSet(rkey, road);                     // 入库 (LRU 淘汰)
         roadVer++;                               // 新道路落成 → tile onRoad 缓存整体失效
       }
       out.push(road);
-    }
-    /* DI 闸延迟重试: 主循环里被拒的边, 此时本批新路的路格已入索引, 重寻常可直接达标 */
-    for (var d4 = 0; d4 < deferred.length && budget > 0; d4++) {
-      var de = deferred[d4];
-      if (roadFail.has(de.rkey) || roadCache.get(de.rkey)) continue;
-      if (roadFailVer.get(de.rkey) === roadVer) continue;  // 版本未变 (本格没建出新路) ⇒ 重试必得同一结论
-      budget--;
-      var da = de.a, db = de.b;
-      var qA = da.id < db.id ? da : db, qB = da.id < db.id ? db : da;
-      var p2 = bfsRoad(qA.q, qA.r, qB.q, qB.r, roadTileIdx);
-      if (!p2) continue;
-      if ((p2.length - 1) * 10 > roadDI * hexDist(qA.q, qA.r, qB.q, qB.r)) continue;   // 仍超限: 放弃 (下次调用路网更密再试)
-      var pts2 = [], ts2 = new Set();
-      for (var q4 = 0; q4 < p2.length; q4++) {
-        var w2 = tileToWorld(p2[q4][0], p2[q4][1]);
-        pts2.push({ x: w2.x + (hash01(p2[q4][0], p2[q4][1], 5) - 0.5) * 4,
-                    y: w2.y + (hash01(p2[q4][0], p2[q4][1], 6) - 0.5) * 4 });
-        ts2.add(p2[q4][0] + ',' + p2[q4][1]);
-      }
-      var road2 = { key: de.rkey, pts: pts2, tiles: ts2,
-                    x0: Math.min(da.x, db.x), x1: Math.max(da.x, db.x),
-                    y0: Math.min(da.y, db.y), y1: Math.max(da.y, db.y) };
-      roadSet(de.rkey, road2);                   // A4: 入库 + 引用计数 + 淘汰回收
-      trialClear(de.rkey);                       // A3: 建成 → 撤掉重试计数
-      roadVer++;
-      out.push(road2);
-    }
-    /* 本轮仍未达标的 DI 拒绝边 → 入会话级重试队列 (后续调用路网更密再试; 容量上限丢最旧) */
-    for (var d5 = 0; d5 < deferred.length; d5++) {
-      if (roadCache.get(deferred[d5].rkey)) continue;          // 重试轮已建成的无须入队
-      diRetryQueue.push(deferred[d5]);
-      if (diRetryQueue.length > 4096) diRetryQueue.shift();
-    }
-    /* DI 重试队列消化 —— 位置从「主循环之前」移到「主循环 + 延迟重试轮之后」,
-       且按 roadVer 节流 (每建成 128 条新路才试 1 条老边), 不再与主循环抢预算。
-
-       为什么必须让位: drain 里的边几乎全是「闸拒边」—— 因为已建路只收 ROAD_W_ROAD(2) 费,
-       寻路总能骑着旧路绕出一条路来 (所以永远不会进「!qp 终身拉黑」分支), 但那条路永远
-       步数/六边距 > 1.4, 于是被原样推回队列。原先只 push 不记账 ⇒ 队列自我补充、永不排空,
-       每次调用先在队首烧掉 8 条 A*。小预算 (预览页默认 1) 下等于每次先交过路费,
-       「当前视野该修的路」彻底排不上号。
-
-       三处配套: ① 闸拒边与寻路失败同账, 3 次即终身 roadFail ⇒ 队列有终止条件;
-                 ② 消化让到主循环之后 ⇒ 当前视野的路先吃满预算;
-                 ③ 按 roadVer 节流 ⇒ 只在路网真的变密时才值得重试, 峰值开销封顶。
-       建成路不入本格 out (属其端点所在格, 由那格的 roadsNear 从缓存返回);
-       队首是已建/已拉黑的项则静默丢弃。maxNew=0 (纯读路径) 时不消化, 保持零开销。 */
-    if (maxNew > 0 && !starved && diRetryQueue.length > 0 && roadVer - drainMark >= 128) {
-      drainMark = roadVer;
-      var dq = diRetryQueue.shift();
-      if (!roadFail.has(dq.rkey) && !roadCache.get(dq.rkey)) {
-        var qa = dq.a.id < dq.b.id ? dq.a : dq.b, qb = dq.a.id < dq.b.id ? dq.b : dq.a;
-        var qp = bfsRoad(qa.q, qa.r, qb.q, qb.r, roadTileIdx);
-        if (!qp) {
-          failMark(dq.rkey);
-          var tr3 = trialBump(dq.rkey);
-          if (tr3 >= 3) setAdd(roadFail, dq.rkey, ROADFAIL_CAP);   // 3 次仍无路: 终身不可达
-          else diRetryQueue.push(dq);
-        } else if ((qp.length - 1) * 10 > roadDI * hexDist(qa.q, qa.r, qb.q, qb.r)) {
-          failMark(dq.rkey);
-          /* 闸拒: 与上面「寻路失败」同账 —— 骑旧路总能找到路但永远超限,
-             不记账则本分支永不终止 (实测 77% 的 drain A* 卡死于此, 产出 0)。 */
-          var tr4 = trialBump(dq.rkey);
-          if (tr4 >= 3) setAdd(roadFail, dq.rkey, ROADFAIL_CAP);
-          else diRetryQueue.push(dq);
-        } else {
-          var dpts = [], dts = new Set();
-          for (var dk = 0; dk < qp.length; dk++) {
-            var dw = tileToWorld(qp[dk][0], qp[dk][1]);
-            dpts.push({ x: dw.x + (hash01(qp[dk][0], qp[dk][1], 5) - 0.5) * 4,
-                        y: dw.y + (hash01(qp[dk][0], qp[dk][1], 6) - 0.5) * 4 });
-            dts.add(qp[dk][0] + ',' + qp[dk][1]);
-          }
-          var droad = { key: dq.rkey, pts: dpts, tiles: dts,
-                        x0: Math.min(dq.a.x, dq.b.x), x1: Math.max(dq.a.x, dq.b.x),
-                        y0: Math.min(dq.a.y, dq.b.y), y1: Math.max(dq.a.y, dq.b.y) };
-          roadSet(dq.rkey, droad);                   // A4: 入库 + 引用计数 + 淘汰回收
-          trialClear(dq.rkey);                       // A3: 建成 → 撤掉重试计数
-          roadVer++;
-        }
-      }
     }
     return out;
   }
@@ -2173,24 +2071,22 @@
     commCache.clear(); veinNearCache.clear();
     elevCache.clear(); fieldCache.clear();
     regionCache.clear(); settleCache.clear();
-    roadCache.clear(); roadTileIdx.clear(); roadTileRef.clear(); diRetryQueue.length = 0; demandCache.clear(); roadFailTrials.clear(); roadFail.clear();
+    roadCache.clear(); demandCache.clear(); roadFail.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     skeletonCache.clear();  // A2
-    roadVer = 0; drainMark = 0; roadFailVer.clear();
+    roadVer = 0;
   }
 
   /* 当前道路版本号 (供宿主做 tile 缓存新鲜度校验) */
   function roadVersion() { return roadVer; }
 
   /* E1: 统一「清空道路状态」入口 (预览页「清空道路缓存」按钮 / 宿主需强制重算路网时调用)。
-     原先预览页只调 roadCache.clear() + 自己重置定时器 ⇒ roadTileIdx/roadFail/roadFailTrials/
-     diRetryQueue/roadFailVer/roadVer 全部残留: 新路沿幽灵路廊走、onRoad 缓存不失效。
-     这里把「与道路相关的全部派生状态」一次性归零 (不动地形/聚落/贸易等缓存)。 */
+     把「与道路相关的全部派生状态」一次性归零 (不动地形/聚落/贸易等缓存) —— 漏清任一项
+     都会造成「新路沿幽灵状态走」或「tile onRoad 缓存不失效」。B 版派生状态只剩两项。 */
   function resetRoads() {
-    roadCache.clear(); roadTileIdx.clear(); roadTileRef.clear();
-    roadFail.clear(); roadFailTrials.clear(); roadFailVer.clear();
-    diRetryQueue.length = 0;
-    roadVer = 0; drainMark = 0;
+    roadCache.clear();
+    roadFail.clear();
+    roadVer = 0;                                 // 归零 ⇒ 宿主的 tile onRoad 缓存整体失效
   }
 
   /* ---------- 导出 ---------- */
@@ -2253,6 +2149,12 @@
     ELEMENTS: ELEMENTS,
     ELEMENT_RGB: ELEMENT_RGB,
     VARIANT_RGB: VARIANT_RGB,
+    /* 异灵根精灵位顺序 (32..35)。前端 web/js/vein-skin.js 的 variants 键序必须逐位一致,
+       由 verify/check_vein_skin.mjs 断言 —— 顺序错位 = 雷画成冰的颜色。 */
+    VEIN_VARIANT_ORDER: VEIN_VARIANT_ORDER,
+    /* 灵脉占地 (三档一律只占本格) —— 供 verify/check_vein_skin.mjs
+       断言「等级契约」用 (与前端 vein-skin.js levels[] 配对)。 */
+    veinFootKeep: veinFootKeep,
     SEA_LEVEL: SEA_LEVEL,
     /* 边界衰减: 预览页/客户端画"灵气边界圈"必须用 spiritEdgeWorld(),
        不得各自硬编码半径 —— 否则会出现"圈内是海、圈外有山"的错位 */
@@ -2725,16 +2627,25 @@ function getSettlements(i, j){
   /* ============================================================
    * 5. 立体构件 (全部走 frame 投影 → 自然带朝向与遮挡)
    * ============================================================ */
-  /* 5.1 六边格基座: 与地图网格同朝向同半径的淡色格面 + 极淡墨边
-      —— 这是"六边形网格感"的来源; opts.tint 取地皮底色 */
+  /* 5.1 六边格基座 = 建筑的「场地」: 与地图网格同朝向同半径的地皮色块 + 墨边
+     2026-09-14 七版加强 (用户: "建筑背景应该有一个场地, 避免 svg 太浅被背景覆盖"):
+       · 地皮色块不透明度默认 0.32 (旧 0.22 太淡, 浅色墙/茅顶会直接糊进群系底纹);
+       · 墨边降到 detail>=1 就画 (旧仅 detail>=2), 让"这块地有边界"一眼可读;
+       · 六边**之外**再铺一圈渐隐柔光 —— 建筑与地形之间有一层过渡, 不再硬切。
+     opts.tint 取地皮底色 (LANDUSE_TINT); halo=false 可关柔光 (小尺寸省一层)。 */
   function hexPlate(S, o) {
     o = o || {};
-    var B = S.B, r = S.R * (o.rMul == null ? 0.98 : o.rMul);
+    var B = S.B, r = S.R * (o.rMul == null ? 1.0 : o.rMul);
     var pts = hexPts(S.cx, S.cy, r);
-    B.poly(pts, o.tint || STONE, o.a == null ? 0.22 : o.a);
-    if (S.detail >= 2) {
+    if (o.halo !== false && S.detail >= 2) {
+      var g0 = S.g(0, 0);
+      B.radial(g0[0], g0[1], r * 1.18, o.haloCol || '#efe6d2',
+        o.haloA == null ? 0.28 : o.haloA, r * 1.18, r * 1.18 * KY);
+    }
+    B.poly(pts, o.tint || STONE, o.a == null ? 0.32 : o.a);
+    if (S.detail >= 1) {
       B.line(pts.concat([pts[0]]), { w: o.lw || Math.max(0.5, r * 0.045), c: o.lc || INK4,
-        a: o.la == null ? 0.34 : o.la });
+        a: o.la == null ? 0.40 : o.la });
     }
   }
   /* 5.2 墙: 一段竖直墙面 (由局部线段 a→b + 高度区间 [h0,h1] 定义) */
@@ -3617,6 +3528,47 @@ function getSettlements(i, j){
     }
   };
 
+  /* --- 压水 (2026-09-14 新增) ---
+   * 水面上的建筑不再画房子, 改画「栈桥」: 水面即被桥面覆盖。
+   * 本 kind 只由前端按「格是水」派生 (main.js drawBuildings), 不在 mapgen 的
+   * BUILDINGS/CORE_KIND 里 ⇒ 不进 KIND_LIST, 与「26 种 = 服务端全集」的对齐不被打破。
+   * 朝向沿用建筑朝向 (朝水面), 桥面即沿该方向横跨本格。 */
+  KINDS['栈桥'] = function (S) {
+    waterFan(S, { u: 0, v: 0.95, r: 1.35, hw: 1.15, n: 4, a: 0.26 });
+    /* 桥面 (地面系, 跨满本格) */
+    gpQuad(S, -0.30, -0.98, 0.30, 0.98, '#c6b794', 0.95);
+    gpWash(S, 0, 0, 0.62, WOOD, 0.10);
+    /* 桥板横纹 */
+    var i, n = S.detail >= 3 ? 9 : 5;
+    for (i = 0; i < n; i++) {
+      var pv = -0.90 + (i / (n - 1)) * 1.80;
+      ink(S, [S.p(-0.30, pv, 0.05), S.p(0.30, pv, 0.05)],
+        { w: 0.85, c: EARTH, a: 0.40, n: 1, fly: false, j: 0.3 });
+    }
+    /* 两侧栏杆: 立柱 + 压顶横木 */
+    var sgn, k;
+    for (sgn = -1; sgn <= 1; sgn += 2) {
+      for (k = 0; k < 4; k++) {
+        var pv2 = -0.72 + k * 0.48;
+        ink(S, [S.p(sgn * 0.32, pv2, 0.05), S.p(sgn * 0.32, pv2, 0.34)],
+          { w: 1.35, c: EARTH, a: 0.62, n: 1, fly: false, j: 0.3 });
+      }
+      ink(S, [S.p(sgn * 0.32, -0.78, 0.34), S.p(sgn * 0.32, 0.78, 0.34)],
+        { w: 1.5, c: INK2, a: 0.52, n: 1, fly: false, j: 0.45 });
+      /* 桥面边梁 */
+      ink(S, [S.p(sgn * 0.30, -0.98, 0.03), S.p(sgn * 0.30, 0.98, 0.03)],
+        { w: 1.6, c: INK, a: 0.60, n: 2, fly: false, j: 0.4 });
+    }
+    /* 桥墩: 两端入水的木桩 (只画两根, 免得密排连线) */
+    ink(S, [S.p(-0.24, 0.86, 0.04), S.p(-0.24, 0.86, -0.26)], { w: 1.7, c: EARTH, a: 0.70, n: 1, fly: false, j: 0.3 });
+    ink(S, [S.p(0.24, 0.86, 0.04), S.p(0.24, 0.86, -0.26)], { w: 1.7, c: EARTH, a: 0.70, n: 1, fly: false, j: 0.3 });
+    /* 桥下水纹 */
+    if (S.detail >= 2) {
+      ink(S, [S.p(-0.88, 0.42, 0), S.p(-0.52, 0.30, 0)], { w: 0.8, c: AZURE, a: 0.32, n: 1, fly: false, j: 0.5 });
+      ink(S, [S.p(0.54, -0.34, 0), S.p(0.92, -0.24, 0)], { w: 0.8, c: AZURE, a: 0.32, n: 1, fly: false, j: 0.5 });
+    }
+  };
+
   /* --- 良田 --- */
   KINDS['农田'] = function (S) {
     /* 俯视田块: 长边沿朝向 → 4 垄 + 田埂 + 水光 + 禾苗 */
@@ -4110,10 +4062,10 @@ function getSettlements(i, j){
     if (!spec.face) S.setFace(resolveFace(spec.kind, S, spec.probe));
     else S.setFace(spec.face);
     var fn = KINDS[spec.kind] || KINDS['民房'];
-    /* 六边格基座 (网格感) + 落影 */
+    /* 六边格基座 = 「场地」(网格感 + 地皮色 + 墨边 + 柔光) + 落影 */
     if (spec.plate !== false) {
       hexPlate(S, { tint: spec.tint || LANDUSE_TINT[KIND_TERRAIN[spec.kind]] || STONE,
-        a: spec.plateA == null ? 0.20 : spec.plateA });
+        a: spec.plateA == null ? 0.32 : spec.plateA });
     }
     if (detail >= 2) {
       var g0 = S.g(0, 0.06);
@@ -5046,7 +4998,16 @@ function draw(){
     }
     /* 贸易网络（§四）: 相邻城镇 盈余→缺口 虚线 */
     if (cbs.trade.checked){
-      var trg = indexRange(RM);
+      /* E4: 贸易边由「发起端 (小 id 方) 的属格」发射 (tradeEdgesFor 内 a.id > b.id 归一化,
+         每对只发射一次), 而 TRADE_REACH=40 ≈ 2.2 个区域格 (REGION_M=18) ⇒
+         视野内某区域格的「对端」, 其发起端可能落在视野外的区域格里。
+         只扫可见区域格 ⇒ 这类「一端在画面里」的边整条漏画。
+         故向四周多扫 3 圈 (= ceil(reach/REGION_M), 覆盖任意朝向的 reach 对);
+         id 归一化已保证同一对不会被两个端点各画一次, 扩窗不会产生重复虚线。 */
+      var TRADE_SCAN_PAD = 3;
+      var rgv = indexRange(RM);
+      var trg = { iMin: rgv.iMin - TRADE_SCAN_PAD, iMax: rgv.iMax + TRADE_SCAN_PAD,
+                  jMin: rgv.jMin - TRADE_SCAN_PAD, jMax: rgv.jMax + TRADE_SCAN_PAD };
       for (var ti = trg.iMin; ti <= trg.iMax; ti++){
         for (var tj = trg.jMin; tj <= trg.jMax; tj++){
           var edges = [];
@@ -5353,9 +5314,9 @@ roadCellsEl.onchange = function(){ syncRoadLabels(); scheduleRoads(); draw(); };
 roadBudgetEl.oninput = syncRoadLabels;
 
 roadClearBtn.onclick = function(){
-  /* E1: 走引擎侧统一入口 —— 原实现只清 roadCache, 残留 roadTileIdx/roadFail/
-     roadFailTrials/diRetryQueue/roadFailVer/roadVer, 导致新路沿幽灵路廊走、
-     onRoad 缓存不失效。resetRoads() 一次性归零全部「道路派生状态」。 */
+  /* E1: 走引擎侧统一入口 —— 原实现只清 roadCache, 而道路派生状态 (roadVer 等) 残留,
+     导致新路沿幽灵状态走 / onRoad 缓存不失效。resetRoads() 一次性归零全部「道路派生状态」
+     (B 版起只剩 roadCache + roadFail + roadVer 三项, 见引擎 resetRoads 注释)。 */
   if (MapGen.resetRoads) MapGen.resetRoads();
   else if (MapGen.roadCache) MapGen.roadCache.clear();
   roadCenter = null;
