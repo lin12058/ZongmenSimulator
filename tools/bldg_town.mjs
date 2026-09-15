@@ -158,15 +158,18 @@ list.forEach((it) => {
       `L${(ex - fx * hs * 2 - nx * hs).toFixed(1)} ${(ey - fy * hs * 2 - ny * hs).toFixed(1)}Z"` +
       ` fill="${ac}" fill-opacity="0.9"/>`;
   }
+  const bOnWater = (() => { const f = MG.fields(b.q, b.r); return !!f && f.biome <= 1; })();
   bodySvg += BI.svgBody({
     kind: b.kind, cx: it.x, cy: it.y, R, q: b.q, r: b.r,
     variant: v, tier: b.tier, face: it.fi.face, water: it.fi.water,
     detail: 3, plate: true, plateA: 0.20,
-    /* A (2026-09-15): 渔村 → 走 KINDS_FISH 渔家画法 (吊脚楼/渔获仓)。
-       生产代码同一判据 = main.js `isFish: it.st.type === 'fishing'`。 */
-    fishVillage: st.type === 'fishing',
+    /* A (2026-09-15) → A2 (2026-09-16 用户定案): 渔村**或水面格** → 走 KINDS_FISH 渔家画法。
+       ⚠ 镜像判据 —— 生产代码真源 = main.js drawBuildings:
+       `fishVillage: WATER_OLD ? isFish : (isFish || onWater)`; 引擎侧水面格地皮 = '渔家'
+       (mapgen.js growTownFootprint: `lu === '水岸' && f.biome <= BIOME.OCEAN`)。 */
+    fishVillage: st.type === 'fishing' || bOnWater,
     /* R5b: 建筑格是水 → 生产代码会垫干栏木台 (水上人家)。地类真值取自引擎。 */
-    onWater: (() => { const f = MG.fields(b.q, b.r); return !!f && f.biome <= 1; })()
+    onWater: bOnWater
   });
   if (!NO_LABEL) {
     /* 名牌带浅底描边 (paint-order=stroke), 密集聚落里也压不糊 */

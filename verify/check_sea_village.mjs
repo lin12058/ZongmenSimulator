@@ -46,6 +46,10 @@ const FISH_KINDS = new Set(['村口', '祠堂', '码头', '渔船坞', '渔亭',
    民居类应占多数, 这里把该比例钉死。 */
 const HOUSE_KINDS = new Set(['民房', '仓库']);
 const PIER_KINDS = new Set(['码头', '渔船坞', '渔亭']);
+/* A2 (2026-09-16 用户定案): 水面格允许的 kind = 渔家池 (民房/仓库/码头/渔船坞/渔亭)
+   ∪ 核心建筑 (中心格恰在水上时, 见 CORE_KIND)。**不含** 农田/矿场/伐木场 等纯陆地建造。 */
+const FW_OK = new Set(['民房', '仓库', '码头', '渔船坞', '渔亭',
+  '官衙', '集市', '宗祠', '祠堂', '村口', '宗门大殿', '祖师殿']);
 
 console.log('== R5 海上渔村 ==');
 let nFish = 0, nLand = 0;
@@ -108,6 +112,44 @@ check('渔村水工设施不占多数 (码头/渔船坞/渔亭 ≤ 45%)', pierSh
   `实测 ${(pierShare * 100).toFixed(1)}% (${nPier}/${nBuild})`);
 check('没有「一座民居都没有」的渔村', zeroHouse === 0,
   `异常 ${zeroHouse} 座 / 共 ${nFish} 座`);
+/* ============================================================
+ * A2 (2026-09-16 用户定案): 「你把中心格子这个判定去掉，只要是水里面的建筑必须有这些」
+ *   ⇒ 水面格判 '渔家' 不再看聚落 type。这里对**非渔**聚落单独断言: 它们的水面格
+ *     也必须出「水上民居」(而不是旧口径的"清一色水工 = 一片栈桥")。
+ * ⚠ 与上面 R5 段互补: 上面只管 type==='fishing' 的渔村; 本段只管**非渔**聚落。
+ * ============================================================ */
+let nfw = 0, nfwHouse = 0, nfwPier = 0, nfwBad = 0, nfwSettle = 0, nfwSettleHouse = 0;
+const nfwKinds = new Set();
+for (const seed of SEEDS) {
+  MG.init(seed);
+  for (let i = -RSPAN; i <= RSPAN; i++) {
+    for (let j = -RSPAN; j <= RSPAN; j++) {
+      for (const st of MG.settlementsFor(i, j)) {
+        if (st.type === 'poi' || st.type === 'fishing') continue;
+        const foot = MG.growTownFootprint(st.id, st.type, st.q, st.r);
+        let hasW = false, hasH = false;
+        for (const b of foot.buildings) {
+          if (MG.fields(b.q, b.r).biome > BIOME.OCEAN) continue;    // 只看水面格 (浅海)
+          hasW = true; nfw++; nfwKinds.add(b.kind);
+          if (HOUSE_KINDS.has(b.kind)) { nfwHouse++; hasH = true; }
+          if (PIER_KINDS.has(b.kind)) nfwPier++;
+          if (!FW_OK.has(b.kind)) nfwBad++;
+        }
+        if (hasW) { nfwSettle++; if (hasH) nfwSettleHouse++; }
+      }
+    }
+  }
+}
+check('A2 非渔聚落也有水面格建筑 (去掉「中心格判定」后覆盖到集镇/村落)', nfwSettle > 0,
+  `含水面格的非渔聚落 ${nfwSettle} 座`);
+check('A2 非渔水面格建筑种类 ⊆ 渔家池 ∪ 核心建筑 (不越权到农田/矿场等)', nfwBad === 0,
+  `越界 ${nfwBad} (已见 ${[...nfwKinds].join(' ')})`);
+const nfwHouseShare = nfw ? nfwHouse / nfw : 0;
+check('A2 非渔水面格以水上民居为主 (民房/仓库 ≥ 40%, 不是"一片栈桥")', nfwHouseShare >= 0.40,
+  `实测 ${(nfwHouseShare * 100).toFixed(1)}% (${nfwHouse}/${nfw}; 水工 ${nfwPier})`);
+check('A2 确实存在「带水上民居的非渔聚落」(不是只有水工)', nfwSettleHouse > 0,
+  `带水上民居的非渔聚落 ${nfwSettleHouse} 座 / 共 ${nfwSettle} 座`);
+console.log(`  非渔水面格: 民居 ${nfwHouse} / 水工 ${nfwPier} / 共 ${nfw}  (聚落 ${nfwSettle} 座)`);
 if (samples.length) { console.log('  例:'); samples.forEach((s) => console.log('    ' + s)); }
 console.log(`\n  抽样: 渔村 ${nFish} 座 / 陆聚落 ${nLand} 座`);
 console.log(`  渔村构成: 民居 ${nHouse} / 水工 ${nPier} / 其他(核心) ${nBuild - nHouse - nPier}  (共 ${nBuild} 格)`);

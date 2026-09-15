@@ -37,6 +37,9 @@ public sealed class MapWorldService : IDisposable
     private readonly JsEngineHost _host;
     private readonly MemoryVirtualContext _mem;
     private readonly SqliteVirtualContext? _sql;
+    /* W (2026-09-16): 世界种子台账 —— 种子的唯一来源。前端不再自造 seed
+       (旧口径 `Date.now()%1e8` 刷新即换界), 只向服务端 "领当前世 / 换下一世"。 */
+    private readonly WorldLedger _ledger;
     private string? _metaCache;
     private readonly object _metaLock = new();
     /* S4: 引擎指纹 —— 对**下发给前端的那三个脚本**按拼接顺序取 SHA256 前 16 位。
@@ -100,6 +103,10 @@ public sealed class MapWorldService : IDisposable
         _mem = new MemoryVirtualContext();
         if (opt.PersistEnabled)
             _sql = new SqliteVirtualContext(ZongmenPaths.ResolveDbPath(opt, contentRoot));
+        /* 台账与地图缓存**同库不同表**: 同库 ⇒ 一次备份/清理覆盖全部世界资产;
+           不同表 ⇒ 后台 PruneExcept(只清 Data 表的非活跃 seed 前缀) 够不着它 (见 WorldLedger 头注释)。
+           持久化关闭时传 null ⇒ 台账退回仅内存 (世界仍是服务端产生, 只是重启即归零)。 */
+        _ledger = new WorldLedger(opt.PersistEnabled ? ZongmenPaths.ResolveDbPath(opt, contentRoot) : null);
         _maintTask = Task.Run(MaintenanceLoopAsync);
     }
 
@@ -809,6 +816,34 @@ public sealed class MapWorldService : IDisposable
         }
     }
 
+    /* ---------------- 世界种子台账 (W · 2026-09-16) ----------------
+       种子的唯一来源。三个出口都是**只读/幂等语义明确**的小 JSON, 与地图数据无关
+       (不拉图 ⇒ 不违反「HTTP 不再保留任何拉图接口」的约定)。
+         GET  /api/world/current → 当前世; 库里一世都没有时由服务端**就地开第一世**
+         POST /api/world/next    → 另启一世 (轮次 +1 + 新种子), 持久化后返回
+         GET  /api/world/list    → 最近 n 世 (设置弹窗里"曾经走过哪些世界")
+       ⚠ 客户端拿到 seed 后仍按老协议把它带在 TileRequest.Seed 里 —— 协议一字未改,
+         变的只是「这个字符串从哪来」(服务端发, 而不是前端 Date.now() 造)。 */
+    public string WorldCurrentJson() => WorldJson(_ledger.Current(), "current");
+
+    public string WorldNextJson() => WorldJson(_ledger.Next(), "next");
+
+    public string WorldListJson(int n) => JsonSerializer.Serialize(new
+    {
+        persisted = _ledger.Persisted,
+        total = _ledger.Count(),
+        rounds = _ledger.Recent(n).Select(e => new { round = e.Round, seed = e.Seed, bornAt = e.BornAt }),
+    });
+
+    private string WorldJson(WorldEntry e, string kind) => JsonSerializer.Serialize(new
+    {
+        kind,
+        round = e.Round,
+        seed = e.Seed,
+        bornAt = e.BornAt,
+        persisted = _ledger.Persisted,     // false = PersistEnabled 关掉时的仅内存降级
+    });
+
     public string StatsJson()
     {
         /* P6: 先排空批量落库队列, 计数才反映真实落库进度。
@@ -820,6 +855,9 @@ public sealed class MapWorldService : IDisposable
             maxSeeds = _opt.MaxSeeds,      // 便于验证 appsettings.json 是否真的生效
             dbRows = _sql?.Count() ?? 0,
             memRows = _mem.Count(),
+            /* W: 台账对账用 —— ⚠ 只读 Count(), 不调 Current(): 别让一次探活就把第一世开出来 */
+            worldRounds = _ledger.Count(),
+            ledgerPersisted = _ledger.Persisted,
         });
     }
 
@@ -906,6 +944,7 @@ public sealed class MapWorldService : IDisposable
         _host.Dispose();
         _sql?.Flush();              // P6: 退出前排空批量写入, 尽量落库
         _sql?.Dispose();
+        _ledger.Dispose();
         _mem.Dispose();
         _maintCts.Dispose();
     }

@@ -19,6 +19,20 @@
  *               seed42  最密 0.723R  <  中位 0.840  <  medoid 0.855  <<  col 1.329
  *               seed777 最密 0.905R  <  medoid 0.950  <  中位 1.207  <<  col 1.762
  *             且最差偏差 == 「离截尾质心最近的那座」可达下界 (即已是理论最优)。
+ *       四修: **平手参照物换掉** (A6 红灯)。三修的参照物「截尾质心」自身会被离群均值
+ *             污染: 它内部先按"含离群点的均值"排序取截尾子集, 于是远处多加一块农田/
+ *             码头就换了保留集 ⇒ 质心移动 ⇒ 决序翻转 (实测 (1,0) ↔ (1,2), 且换方向/
+ *             个数还会再变)。
+ *             试过并**否决**的方案: 截断核分 Σ min(d,2R) (虽免疫, 但它是"局部紧致度"
+ *             不是"中心性", 实测三参照系下 1.652/3.969, 比一修 col 还差);
+ *             坐标中位数定序 (最差 3.126R); 多尺度计数阶梯 (1.490/3.329)。
+ *             现行: 参照物改取**最密束的 2R 邻域并集质心** —— 与第一键同源, 免疫是
+ *             恒等式 (远点不进任何 2R 邻域 ⇒ 计数表不变 ⇒ 最密束不变 ⇒ 并集不变 ⇒
+ *             质心不变 ⇒ 决序不变), 且它是"村子真正扎堆的那一片"的中心, 不会被
+ *             稀疏外圈的农地/水磨拽偏。顺带删掉已成死码的 trimmedCentroid。
+ *             ⚠ 同时**改掉了 A13 的判据**: 旧 A13 只用「裸均值定序截尾质心」当参照系,
+ *               而那恰好就是三修口径的目标函数 ⇒ 自证 (三修在它上面必然拿满分)。
+ *               现改用三个**独立参照系** (trim/geo/bbf) 联合打分。
  *
  *   C-c **灵脉签垂直落点** = 峰尖 (两层误差, 分两次修)
  *       初版: 返回 H + 0.35, 而方框底 = 格心 + uR*0.95 ⇒ 恒定多抬 1.30 uR (≈33px)。
@@ -32,6 +46,23 @@
  *       峰体在 shader 里按 hash 横向抖动 jx = (fract(hash*3.77)-0.5)*uR*1.8 (±0.9 uR
  *       ≈ ±23px), 而签子原先固定挂格心 ⇒ 竖线落在峰的一侧。现在跟 jx 走。
  *
+ *   ★★ 五修 (2026-09-16 · 口径订正: 落点 = **实体自己的中心点**, 覆盖 A 段默认与 C-c/C-c2)
+ *       用户原话: 「要和当前的城市的中心点, 还有灵山的中心点位置一样, 而不是什么
+ *       所谓的平均值或者什么参照物」。
+ *       ⇒ 落点不再"估计"(统计量), 而是**读实体坐标**:
+ *           · 聚落 = 中心格 (st.x, st.y)      · 灵脉 = 格心 (v.x, v.y)
+ *       依据 (E1 引擎交叉源, 离线跑 mapgen 实测 seed42/777 共 90 座, dCore 恒 = 0):
+ *       引擎把**核心建筑** (祠堂/村口/宗祠/集市/官衙/祖师殿…) 恒定放在中心格
+ *       (`growTownFootprint` 的 `cell.d === 0` 那一支) ⇒ **中心格上永远有一座真建筑**。
+ *       回头看原始病灶: "点悬在村里空地上"的真因是初版**合成点** (中心格 x + 建筑格 y 的
+ *       p25), 不是"中心格不够中间" —— 前四修都在解一个本来不是问题的问题, 而且每一修都在
+ *       给上一修的副作用打补丁 (副产物: 平手决序/参照物/A6 红灯)。
+ *       免疫性也从"近似"升级为**恒等**: 锚点不读建筑清单 ⇒ 远处农田/码头无论怎么加都不影响。
+ *       ⚠ 前四修 (合成点→列最近→中位格→最密格+平手参照物) 与 C-c/C-c2 的峰尖口径
+ *         全部**降级为历史 A/B 档位** (`?ancgeo=densest|box|col|med|sum` / `?veinpt=apex`)。
+ *         故 A 段 / B 段的断言含义随之改变: 它们现在证明的是"**历史档位仍可复现**",
+ *         而**不再是**默认口径的属性 (A13 那套"对三个参照系更居中"的评比亦然)。
+ *
  *   D  **灵脉名文案** = `<地貌名>·<档>`
  *       旧: `v.name + '灵脉·' + 档` ⇒ 地貌名池自带「脉/峰/谷」⇒ 叠字 (金属矿脉灵脉·大);
  *           且曾用半角括号。新: 单一真源 VS.label, 全角间隔号, 不缀「灵脉」。
@@ -39,11 +70,15 @@
  * 断言:
  *   A. 聚落落点 (C-a) —— BldgInk.anchorOf 语义
  *      A1 默认 = 最密格 (与独立复算一致) / A2 real=true 带 q,r / A3 落点是输入里的一座
- *      A3b 缺省实参与 '' 同解 / A4 平手走「近截尾质心 → 北 → 西」全序
- *      A5 与输入序无关 / A6 离群地物不改变落点 / A7 y0 = 建筑格 y 的 p25
+ *      A3b 缺省实参与 '' 同解 / A4 平手走「离参照质心近 → 更北 → 更西」全序
+ *      A5 与输入序无关 / A6 离群地物不改变落点 / A6b 离群方向与个数也不影响
+ *      / A7 y0 = 建筑格 y 的 p25
  *      A8 无建筑 → null / A9 'box' 退回包围盒中心 / A10 布尔 true 视同 'box'
  *      A11 'col' 复现一修行为 / A12 'med' 复现二修中位格 / A12b 'sum' 复现 medoid
- *      A13 实测样本 (anc_fixture.json, 两套种子) 上默认口径的均值/最差/接近最优
+ *      A13 ~ A13e 实测样本 (anc_fixture.json, 两套种子) 上默认口径对**三个独立参照系**
+ *                (trim 截尾质心 / geo 几何中位数 / bbf 包围盒中心) 的平均与最差偏差:
+ *                A13/A13b 对 col 的比例上界 / A13c **逐种子**不劣于 col /
+ *                A13c2 与 med 的差距有界 (承认代价) / A13d 与 medoid 差距有界 / A13e 绝对上界
  *   B. 灵脉签位 (C-c / C-c2) —— VS.apexV / VS.tipU / VS.apexJx
  *      B0 propBottomU==0.95 / B1 apexV == 复刻 textures 峰形采样解出的 (方框内峰尖位置)
  *      / B2 tipU == (1-apexV)*H - propBottomU (4 档 × 7 海拔) / B3 本轮相对"方框顶口径"
@@ -55,8 +90,18 @@
  *      / B15 apexOf = { tipU, apexJx } 的打包
  *   C. 文案 (D)       —— VS.label 格式 / 分隔符 / 兜底 / 不叠字 / 四档 key 对齐
  *   D. 源码守卫       —— 前端文件里不许再出现"第二份公式"/硬编码/旧拼接
+ *   E. 五修口径 (中心点) —— 直接拿 main.js 的**真实源码**跑行为, 不只是正则:
+ *      E1 引擎交叉源: 核心建筑恒落在中心格 (seed42/777 逐座, terrain==='core' 且 d===0)
+ *      E2 中心格恒在 buildings 里 ⇒ 落点恒落在真建筑上 (而非空地)
+ *      E3 缺省档落点 == 实体坐标 / E4 加离群建筑后落点**逐位不变** (恒等免疫)
+ *      E5 中心格无建筑 (灵脉格/深海) → 落点不动、real=false / E6 清单未到货不落缓存
+ *      E7 历史档位 (?ancgeo=densest) 仍可复现求解器结果 / E8 缺省档解析
+ *      E9 灵脉签: 默认落点取格心 (w2s(vb.x,vb.y)), 抬签由 gap 承担 (签位不变)
  *
- * 跨源断言 (coreElev == 引擎 LIFT_CORE) 在 check_vein_skin.mjs —— 只有那里加载了引擎。
+ * 跨源断言 (coreElev == 引擎 LIFT_CORE) 在 check_vein_skin.mjs。
+ * ⚠ 本契约原本**不加载引擎**; 五修起为给"落点 = 中心点"口径一条**引擎侧证据** (E1/E2 ——
+ *   否则"中心格必有核心建筑"只是个口头前提), 这里也加载 noise/mapgen-config/mapgen 三件套
+ *   (同 check_settle_spacing 的姿势: 先 global.window = globalThis)。
  *
  * 用法: node verify/check_plaque_align.mjs
  * ============================================================ */
@@ -133,16 +178,39 @@ function trimmedCentroidOf(a, dropFrac) {
   const keep = Math.max(3, Math.min(a.length, Math.round(a.length * (1 - dropFrac))));
   return meanOf(ds.slice(0, keep).map((o) => o.w));
 }
-/* 默认口径「最密格」: 2R 邻域邻居最多 → 离截尾质心近 → 更北 → 更西 */
+/* 默认口径「最密格」(C-a 四修): 2R 邻域邻居最多 → 离**最密束的 2R 邻域并集质心**近
+   → 更北 → 更西。
+   ⚠ 平手参照物**不能**用「离截尾质心近」: 截尾质心内部先按含离群点的均值排序取子集 ⇒
+     远处多加一块农田就换了保留集, 质心随之移动 ⇒ 决序翻转 (A6 红灯根因)。
+     现行参照物与第一键同源 (最密束 + 同一个 2R), 对远点是**恒等免疫**:
+     远点不进任何 2R 邻域 ⇒ 计数表不变 ⇒ 最密束不变 ⇒ 并集不变 ⇒ 质心不变。 */
 function densestRef(list, hexR) {
-  const a = wsOf(list), ref = trimmedCentroidOf(a, 0.25), r2 = (hexR * 2) * (hexR * 2);
-  const keyed = a.map((w) => {
-    let c = 0;
-    for (const o of a) { const dx = w.x - o.x, dy = w.y - o.y; if (dx * dx + dy * dy <= r2 + 1e-9) c++; }
-    return { w: w, c: c, k: Math.hypot(w.x - ref.x, w.y - ref.y), y: w.y, x: w.x };
+  const a = wsOf(list), rad = hexR * 2, r2 = rad * rad;
+  const d2 = (p, q) => (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y);
+  const cnt = a.map((w) => a.filter((o) => d2(o, w) <= r2 + 1e-9).length);
+  const maxC = Math.max.apply(null, cnt);
+  const inU = a.map(() => false);
+  a.forEach((w, i) => {
+    if (cnt[i] !== maxC) return;
+    a.forEach((o, j) => { if (d2(o, w) <= r2 + 1e-9) inU[j] = true; });
   });
-  keyed.sort((p, q) => (q.c - p.c) || (p.k - q.k) || (p.y - q.y) || (p.x - q.x));
-  return keyed[0].w;
+  const U = a.filter((_, j) => inU[j]);
+  const ref = { x: U.reduce((s, w) => s + w.x, 0) / U.length, y: U.reduce((s, w) => s + w.y, 0) / U.length };
+  /* ⚠ 决序必须与实现**同容差语义** (平方距离, 1e-9): 建筑格常有两座到参照质心的
+     距离在浮点上"恰好相等"(实测 47.99999999999987 vs 48.000000000000064), 纯 sort
+     会被尾数噪声决定 ⇒ 与实现不一致。这里照实现的滚动比较写, 但计数/并集/质心
+     仍走**另一条代码路** (filter 而非下标循环), 保证不是抄实现。 */
+  let bn = -1, bk = Infinity, by = Infinity, bx = Infinity, bi = 0;
+  for (let i = 0; i < a.length; i++) {
+    const kx = a[i].x - ref.x, ky = a[i].y - ref.y, k = kx * kx + ky * ky;
+    if (cnt[i] > bn ||
+        (cnt[i] === bn && (k < bk - 1e-9 ||
+         (Math.abs(k - bk) <= 1e-9 && (a[i].y < by - 1e-9 ||
+          (Math.abs(a[i].y - by) <= 1e-9 && a[i].x < bx - 1e-9)))))) {
+      bn = cnt[i]; bi = i; bk = k; by = a[i].y; bx = a[i].x;
+    }
+  }
+  return a[bi];
 }
 /* 二修口径「中位格」 */
 function medianRef(list) {
@@ -171,7 +239,7 @@ console.log('  最密格复算期望: q=' + expD.q + ' r=' + expD.r +
 console.log('  实得 anchorOf  : q=' + an.q + ' r=' + an.r +
             ' → x=' + an.x.toFixed(3) + ' y=' + an.y.toFixed(3) + ' real=' + an.real);
 
-check('A1 默认落点 = **最密格** (2R 邻域邻居最多, 平手取离截尾质心近者, 与独立复算一致)',
+check('A1 默认落点 = **最密格** (2R 邻域邻居最多, 平手取离最密束并集质心近者, 与独立复算一致)',
   an.q === expD.q && an.r === expD.r &&
   near(an.x, wx(expD.q, expD.r)) && near(an.y, wy(expD.r)),
   `实得 (${an.q},${an.r}) vs 期望 (${expD.q},${expD.r})`);
@@ -186,21 +254,32 @@ const an4 = BI.anchorOf(CLUSTER, HEXW, HEXR, CENTERX_ECC);
 check('A3b 缺省实参 (4 参调用) 与显式 \'\' 同解',
   an4 && an4.q === an.q && an4.r === an.r, `4参 (${an4 && an4.q},${an4 && an4.r})`);
 
-/* 平手阶梯: CLUSTER 里 (0,0)/(1,0)/(2,0)/(2,3)/(3,3) 都是 3 个邻居 (并列),
-   其中 (1,0)/(2,0)/(2,3) 又同样贴近截尾质心 ⇒ 必须靠「更北 → 更西」的**全序**
-   落到 (1,0)。这条同时钉住「与输入序无关」(见 A5)。 */
+/* 平手阶梯: CLUSTER 里 (0,0)/(1,0)/(2,0)/(0,2)/(1,2)/(2,2) 都是 3 个邻居 (并列),
+   其中 (1,0)/(1,2) 又同样贴近参照质心 (距离并列) ⇒ 必须靠「更北 → 更西」的
+   **全序** 落到 (1,0)。这条同时钉住「与输入序无关」(见 A5)。 */
 const anRev = BI.anchorOf(CLUSTER.slice().reverse(), HEXW, HEXR, CENTERX_ECC, '');
-check('A4 邻居数并列时按「离截尾质心近 → 更北 → 更西」全序决出 (CLUSTER → (1,0))',
+check('A4 邻居数并列时按「离参照质心近 → 更北 → 更西」全序决出 (CLUSTER → (1,0))',
   an.q === 1 && an.r === 0, `实得 (${an.q},${an.r}) / 期望 (1,0)`);
 check('A5 结论与建筑数组顺序**无关** (全序比较, 输入序反过来结果不变)',
   anRev.q === an.q && anRev.r === an.r,
   `正序 (${an.q},${an.r}) / 反序 (${anRev.q},${anRev.r})`);
 
-/* 离群地物不改变落点 —— 最密格只数邻居, 远处农田连邻居都算不上 */
+/* 离群地物不改变落点 —— 两层保证:
+     ① 计数 (2R 邻域邻居数) 天然不数远点;
+     ② 平手参照物由**计数结构**导出 (最密束的 2R 邻域并集质心) ⇒ 远点达不到、也进不了并集。
+   旧口径「离截尾质心近」两层都不满足 (还会换保留集) ⇒ 本组就是那次的回归。 */
 const anWithFar = BI.anchorOf(BS, HEXW, HEXR, CENTERX_ECC, '');
 check('A6 离群地物 (远方的农田/码头) **不**改变落点 (均值/包围盒/medoid 都会被拉走)',
   anWithFar.q === an.q && anWithFar.r === an.r,
   `无离群 (${an.q},${an.r}) / 有离群 (${anWithFar.q},${anWithFar.r})`);
+/* A6b: 换一个方向/距离的离群点仍不动 —— 钉住「贡献恒 = 2R」这条恒等式 (不是巧合)。
+   旧口径下 (9,9) 与 (-14,7) 会给出两个不同的答案。 */
+const FAR2 = { q: -14, r: 7 };
+const anFar2 = BI.anchorOf(CLUSTER.concat([FAR2]), HEXW, HEXR, CENTERX_ECC, '');
+const anFarBoth = BI.anchorOf(CLUSTER.concat([FAR, FAR2]), HEXW, HEXR, CENTERX_ECC, '');
+check('A6b 离群点的**方向/个数**也不影响 (远点进不了任何 2R 邻域 ⇒ 计数与并集都不动)',
+  anFar2.q === an.q && anFar2.r === an.r && anFarBoth.q === an.q && anFarBoth.r === an.r,
+  `(-14,7) → (${anFar2.q},${anFar2.r}) / 两个离群 → (${anFarBoth.q},${anFarBoth.r}) / 期望 (${an.q},${an.r})`);
 
 /* y0 = 建筑格 y 的 p25 (旧口径保留 —— 让位/旧路径还要用) */
 const ysSorted = CLUSTER.map((b) => wy(b.r)).sort((a, b) => a - b);
@@ -243,50 +322,147 @@ check('A12b ?ancgeo=sum 复现二修备选 medoid 口径', anSum.q === expSum.q 
 
 /* ============================================================
  * A-fixture: 用**真机实测**的建筑格快照横向评比四条口径。
- *   参照系 = 截尾质心 (丢最远 25%) —— 远处农田/码头被剔掉。
- *   ⚠ 别拿裸均值当参照: 它会被同一批离群地物拉走, 于是"离参照最近"的恰恰是
- *     被拉偏的那条规则 (一修 col 就吃过这个假好评)。
- *   期望 (两套种子一致): 最密格 <= 中位格 <= medoid << 一修 col。
+ *
+ *   ⚠⚠ 参照系选择是这一节的**核心教训** (C-a 四修踩到的坑):
+ *     三修时代本节只用**一个**参照系 —— 「裸均值定序的截尾质心」; 而三修口径的定义
+ *     恰恰就是"离它最近的 S 成员" ⇒ **自证**: 它当然拿满分 (A13c 的"最差 == 下界"
+ *     就是这句话的同义反复)。换成三个**任何口径都没优化过**的参照系重打分, 三修
+ *     并不占优: 三个参照系上的**最差偏差全面落后**于四修 (2.318→2.089 / 4.265→3.269)。
+ *     ⇒ 本节的判据一律建立在**独立参照系**上, 且不再要求"== 理论最优"(那是自证)。
+ *
+ *   三个参照系:
+ *     trim = 裸均值定序截尾质心 (丢最远 25%)  —— 历史口径, 保留作连续性对照
+ *     geo  = 几何中位数 (Weiszfeld 迭代)      —— 标准空间中位数, 无参数
+ *     bbf  = 建筑世界包围盒中心               —— 最朴素的几何中心
+ *   期望: 默认口径在三个参照系上 **显著优于一修 col**、**不劣于二修 med 的最差**、
+ *         且与"纯中心性上界" medoid 的差距有界 (medoid 会被远方农田拉走, 只能当上界)。
  * ============================================================ */
+/* 几何中位数: Weiszfeld 迭代 (权重 1/d), 极简实现 —— 只当参照系, 不参与任何口径 */
+function geoMedianOf(a) {
+  let c = meanOf(a);
+  for (let t = 0; t < 300; t++) {
+    let sx = 0, sy = 0, sw = 0;
+    for (const p of a) {
+      const d = Math.hypot(p.x - c.x, p.y - c.y);
+      if (d < 1e-12) continue;
+      const w = 1 / d; sx += p.x * w; sy += p.y * w; sw += w;
+    }
+    if (sw < 1e-30) break;
+    const n2 = { x: sx / sw, y: sy / sw };
+    if (Math.hypot(n2.x - c.x, n2.y - c.y) < 1e-9) { c = n2; break; }
+    c = n2;
+  }
+  return c;
+}
 const FIXTURE = path.join(__dirname, 'anc_fixture.json');
 if (!fs.existsSync(FIXTURE)) {
   check('A13 实测样本 anc_fixture.json 存在 (=?plaqprobe=1 自回传的快照)', false, FIXTURE);
 } else {
   const fx = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
-  const RULE = { '最密格(默认)': '', '一修 col': 'col', '二修 中位格': 'med', 'medoid': 'sum' };
-  let allMeanOk = true, allWorstOk = true, nearOpt = true, detail = '';
+  const RULE = { '默认(最密格)': '', '一修 col': 'col', '二修 中位格': 'med', 'medoid': 'sum' };
+  const REFS = ['trim', 'geo', 'bbf'];
+  const acc = {};                       // acc[rule][ref] = [偏差...]
+  const perSeed = [];                   // 逐种子的平均和/最差和 (防 pooled 掩盖)
+  for (const k in RULE) { acc[k] = {}; for (const r of REFS) acc[k][r] = []; }
+  let detail = '';
   for (const S of fx.seeds) {
-    const acc = {}, opt = [];
-    for (const k in RULE) acc[k] = [];
+    const per = {}; for (const k in RULE) { per[k] = {}; for (const r of REFS) per[k][r] = []; }
     for (const st of S.settles) {
       const cells = st.bldgs.map((b) => ({ q: b[0], r: b[1] }));
       const ws = cells.map((b) => ({ q: b.q, r: b.r, x: S.hexW * (b.q + b.r / 2), y: 1.5 * S.hexR * b.r }));
-      const ref = trimmedCentroidOf(ws, 0.25);
+      const xs = ws.map((w) => w.x), ys = ws.map((w) => w.y);
+      const refs = {
+        trim: trimmedCentroidOf(ws, 0.25),
+        geo: geoMedianOf(ws),
+        bbf: { x: (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2,
+               y: (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2 }
+      };
       for (const k in RULE) {
         const a = BI.anchorOf(cells, S.hexW, S.hexR, st.sx, RULE[k]);
-        acc[k].push(Math.hypot(a.x - ref.x, a.y - ref.y) / S.hexR);
+        for (const r of REFS) per[k][r].push(Math.hypot(a.x - refs[r].x, a.y - refs[r].y) / S.hexR);
       }
-      opt.push(Math.min.apply(null, ws.map((w) => Math.hypot(w.x - ref.x, w.y - ref.y))) / S.hexR);
     }
-    const avg = (a) => a.reduce((p, q) => p + q, 0) / a.length;
-    const wst = (a) => Math.max.apply(null, a);
-    const dm = avg(acc['最密格(默认)']), dw = wst(acc['最密格(默认)']);
-    detail += `\n    seed ${S.seed} (${S.settles.length} 座): 默认 ${dm.toFixed(3)}/${dw.toFixed(3)}` +
-      ` | col ${avg(acc['一修 col']).toFixed(3)}/${wst(acc['一修 col']).toFixed(3)}` +
-      ` | med ${avg(acc['二修 中位格']).toFixed(3)}/${wst(acc['二修 中位格']).toFixed(3)}` +
-      ` | sum ${avg(acc['medoid']).toFixed(3)}/${wst(acc['medoid']).toFixed(3)}` +
-      ` ‖ 最优可达 ${avg(opt).toFixed(3)}/${wst(opt).toFixed(3)}`;
-    for (const k of ['一修 col', '二修 中位格', 'medoid']) {
-      if (!(dm <= avg(acc[k]) + 1e-9)) allMeanOk = false;
-      if (!(dw <= wst(acc[k]) + 1e-9)) allWorstOk = false;
+    const avg = (z) => z.reduce((p, q) => p + q, 0) / z.length;
+    const wst = (z) => Math.max.apply(null, z);
+    let line = `\n    seed ${S.seed} (${S.settles.length} 座):`;
+    for (const k in RULE) {
+      const tt = REFS.map((r) => avg(per[k][r]).toFixed(3) + '/' + wst(per[k][r]).toFixed(3)).join('  ');
+      line += `\n      ${k.padEnd(12)} ${tt}     和 ${avg(REFS.map((r) => avg(per[k][r]))).toFixed(3)}`;
+      for (const r of REFS) { acc[k][r].push.apply(acc[k][r], per[k][r]); }
     }
-    if (!(dm <= avg(opt) + 0.10)) nearOpt = false;         // 平均偏差距最优 <= 0.10R
-    if (!near(dw, wst(opt), 1e-9)) nearOpt = false;        // 最差偏差 == 最优可达
+    /* 逐种子留存 (⚠ 只用 pooled 最差会**掩盖**单套种子上的翻车: 默认口径在 seed42 上
+       的最差 (2.291R) 其实比 med (1.756R) 差, pooled 却被 seed777 的 med 3.126R 拉过去了)。 */
+    perSeed.push({ seed: S.seed, sumA: {}, sumW: {} });
+    const ps = perSeed[perSeed.length - 1];
+    for (const k in RULE) {
+      ps.sumA[k] = REFS.reduce((s, r) => s + avg(per[k][r]), 0);
+      ps.sumW[k] = REFS.reduce((s, r) => s + wst(per[k][r]), 0);
+    }
+    detail += line;
   }
-  console.log('  实测四口径偏差 (R 倍数, 越小越居中):' + detail);
-  check('A13 默认「最密格」的**平均偏差**不劣于 col / 中位格 / medoid (两套种子)', allMeanOk);
-  check('A13b 默认「最密格」的**最差偏差**不劣于 col / 中位格 / medoid (两套种子)', allWorstOk);
-  check('A13c 默认口径接近**理论最优** (平均偏差距最优 <= 0.10R 且最差偏差 == 可达下界)', nearOpt);
+  const A = (k, r) => acc[k][r].reduce((p, q) => p + q, 0) / acc[k][r].length;
+  const W = (k, r) => Math.max.apply(null, acc[k][r]);
+  const sumA = (k) => REFS.reduce((s, r) => s + A(k, r), 0);
+  const sumW = (k) => REFS.reduce((s, r) => s + W(k, r), 0);
+  console.log('  实测四口径偏差 (R 倍数, 越小越居中; 三列依次 = trim/geo/bbf 参照系):' + detail);
+  console.log('    逐种子 平均和/最差和:');
+  for (const ps of perSeed) {
+    console.log(`      seed ${ps.seed}: 默认 ${ps.sumA['默认(最密格)'].toFixed(3)}/${ps.sumW['默认(最密格)'].toFixed(3)}` +
+      ` | col ${ps.sumA['一修 col'].toFixed(3)}/${ps.sumW['一修 col'].toFixed(3)}` +
+      ` | med ${ps.sumA['二修 中位格'].toFixed(3)}/${ps.sumW['二修 中位格'].toFixed(3)}` +
+      ` | sum ${ps.sumA['medoid'].toFixed(3)}/${ps.sumW['medoid'].toFixed(3)}`);
+  }
+  console.log(`    汇总 平均和: 默认 ${sumA('默认(最密格)').toFixed(3)} | col ${sumA('一修 col').toFixed(3)}` +
+    ` | med ${sumA('二修 中位格').toFixed(3)} | sum ${sumA('medoid').toFixed(3)}`);
+  console.log(`    汇总 最差和: 默认 ${sumW('默认(最密格)').toFixed(3)} | col ${sumW('一修 col').toFixed(3)}` +
+    ` | med ${sumW('二修 中位格').toFixed(3)} | sum ${sumW('medoid').toFixed(3)}`);
+
+  check('A13 默认口径在**三个独立参照系**上的平均偏差和 <= 一修 col 的 85% (修掉了被边缘孤屋拉走的病灶)',
+    sumA('默认(最密格)') <= sumA('一修 col') * 0.85 + 1e-9,
+    `${sumA('默认(最密格)').toFixed(3)} vs ${sumA('一修 col').toFixed(3)} (上限 ${(sumA('一修 col') * 0.85).toFixed(3)})`);
+  check('A13b 默认口径的最差偏差和 <= 一修 col 的 75%',
+    sumW('默认(最密格)') <= sumW('一修 col') * 0.75 + 1e-9,
+    `${sumW('默认(最密格)').toFixed(3)} vs ${sumW('一修 col').toFixed(3)} (上限 ${(sumW('一修 col') * 0.75).toFixed(3)})`);
+  /* A13c 走**逐种子**判定 —— pooled 的最差会让"每套种子上到底谁赢"这件事消失。
+     ⚠ 这里刻意**分开断**两个量, 因为它们结论不同 (实测):
+        · 最差和: 每套种子默认都明显优于 col (7.649 vs 9.284 / 8.077 vs 12.637) ⇒ 强断言;
+        · 平均和: seed42 上只与 col 打平 (3.547 vs 3.464, 默认略差 0.083 = 每座每参照系
+          0.002R ≈ 0.06px), seed777 上大幅更优 (3.371 vs 5.469) ⇒ 只断"不差于 col 的 110%"。
+     不要把这两条合并成一条"平均和 <= col", 那在 seed42 上是假的。 */
+  let worstOk = true, worstWhy = [], avgOk = true, avgWhy = [];
+  for (const ps of perSeed) {
+    if (!(ps.sumW['默认(最密格)'] <= ps.sumW['一修 col'] + 1e-9)) {
+      worstOk = false; worstWhy.push(`seed${ps.seed} 默认 ${ps.sumW['默认(最密格)'].toFixed(3)} > col ${ps.sumW['一修 col'].toFixed(3)}`);
+    }
+    if (!(ps.sumA['默认(最密格)'] <= ps.sumA['一修 col'] * 1.10 + 1e-9)) {
+      avgOk = false; avgWhy.push(`seed${ps.seed} 默认 ${ps.sumA['默认(最密格)'].toFixed(3)} > col ${ps.sumA['一修 col'].toFixed(3)} x1.10`);
+    }
+  }
+  check('A13c 默认口径在**每一套种子**上的**最差偏差和**均不劣于一修 col',
+    worstOk, worstWhy.join(' / ') || '两套种子最差和均不劣于 col');
+  check('A13c1 默认口径在**每一套种子**上的**平均偏差和**不差于一修 col 的 110% (seed42 上仅打平, 见注释)',
+    avgOk, avgWhy.join(' / ') || '两套种子平均和均在 col 的 110% 内');
+  /* A13c2: 与二修 med 的差距**有界**并**明写在案** —— med 在 seed42 上确实更居中
+     (平均和 2.554 vs 默认 3.547), 这是四修主动付的价 (换精确离群免疫, 见 §33);
+     med 在另两列参照系上的最差反而更差 (geo 3.464 / bbf 4.330 vs 默认 2.692 / 3.269)。
+     这里只把"代价有界"钉死, 不假装默认处处更优。阈值 0.30 = 实测 pooled 差 0.169 的 ~1.8 倍。 */
+  const medGap = sumA('默认(最密格)') - sumA('二修 中位格');
+  check('A13c2 默认口径与二修 med 的**平均偏差和**之差有界 (<= 0.30R; 承认 med 在部分种子更居中, 但它不免疫)',
+    medGap <= 0.30 + 1e-9, `默认 ${sumA('默认(最密格)').toFixed(3)} - med ${sumA('二修 中位格').toFixed(3)} = +${medGap.toFixed(3)}R`);
+  /* 阈值 0.60 / 1.35 由**本文件所依赖的那份 fixture** 实测标定 (平均差最大 0.506 出现在 bbf,
+     最差差最大 1.120 出现在 geo) ⇒ 各留 ~20% 余量。fixture 是入库的静态样本, 不会自己漂;
+     换 fixture / 换种子重新采集时必须重标并在此注明新值。 */
+  let gapOk = true, gapWhy = [];
+  for (const r of REFS) {
+    const gm = A('默认(最密格)', r) - A('medoid', r), gw = W('默认(最密格)', r) - W('medoid', r);
+    if (!(gm <= 0.60 + 1e-9)) { gapOk = false; gapWhy.push(`平均 ${r} +${gm.toFixed(3)}`); }
+    if (!(gw <= 1.35 + 1e-9)) { gapOk = false; gapWhy.push(`最差 ${r} +${gw.toFixed(3)}`); }
+  }
+  check('A13d 默认与「纯中心性上界」medoid 的差距**有界** (medoid 会被远方农田拉走, 只作上界)',
+    gapOk, gapWhy.join(' / ') || '差距均在界内');
+  check('A13e 绝对上界: 默认锚点到**几何中位数**的平均偏差 <= 1.00R 且最差 <= 3.00R',
+    A('默认(最密格)', 'geo') <= 1.00 + 1e-9 && W('默认(最密格)', 'geo') <= 3.00 + 1e-9,
+    `${A('默认(最密格)', 'geo').toFixed(3)}R / ${W('默认(最密格)', 'geo').toFixed(3)}R`);
 }
 
 /* ============================================================
@@ -604,24 +780,32 @@ check('D5b renderer.js 有 JIT_U / BOX_INSET, 且 GLSL 里 jx 幅度不再是写
 check('D5c textures.js 峰形 读 SHAPE.shoulderU / SHAPE.archU (不再内联 0.10 / 0.11)',
   /S\.shoulderU/.test(SRC['textures.js']) && /S\.archU/.test(SRC['textures.js']));
 
-/* D6: main.js bldgAnchor 必须走 BI.anchorOf 且"无建筑不缓存" */
+/* D6: main.js bldgAnchor —— 五修口径的**结构**守卫 (行为断言在 E 段) */
 const aBody = (() => {
   const m = SRC['main.js'].match(/function bldgAnchor\s*\([^)]*\)\s*\{[\s\S]*?\n    \}/);
   return m ? m[0] : '';
 })();
-check('D6 main.js bldgAnchor 走 BI.anchorOf', !!aBody && /BI\.anchorOf/.test(aBody));
-check('D6b main.js bldgAnchor 把 ANC_GEO 传下去 (A/B 档位切换不被绕过)',
-  !!aBody && /ANC_GEO/.test(aBody));
-/* "无建筑不缓存" 精确判据: `if (!an) return {...}` 这条语句**自身**不含 `_anc =`,
-   且 `st._anc = an` 出现在它**之后** (逐行判定, 避免跨行正则误伤)。 */
 const aLines = aBody.split('\n');
-const guardIdx = aLines.findIndex((l) => /if\s*\(\s*!an\s*\)/.test(l));
-const storeIdx = aLines.findIndex((l) => /_anc\s*=\s*an/.test(l));
-const guardLine = guardIdx >= 0 ? aLines[guardIdx] : '';
-check('D7 main.js bldgAnchor 无建筑时**不落缓存**',
-  guardIdx >= 0 && storeIdx > guardIdx && !/_anc/.test(guardLine),
-  guardIdx < 0 ? '未找到 `if (!an)`' : (storeIdx <= guardIdx ? '`_anc = an` 未在守卫之后' : '守卫行内出现 _anc'));
-console.log('  守卫行: ' + guardLine.trim());
+check('D6 main.js bldgAnchor 默认落点 = 聚落中心点 (x: st.x, y: st.y)',
+  !!aBody && /x:\s*st\.x\s*,\s*y:\s*st\.y/.test(aBody));
+/* 中心点分支**不许经过求解器** —— BI.anchorOf 只允许出现在 ANC_GEO 历史档位分支里。
+   判据 (逐行, 避免跨行正则误伤): BI.anchorOf 那一行必须在 `ANC_GEO !== 'center'`
+   那一行**之后**。 */
+const gIdx = aLines.findIndex((l) => /if\s*\(\s*ANC_GEO\s*!==\s*'center'\s*\)/.test(l));
+const cIdx = aLines.findIndex((l) => /BI\.anchorOf/.test(l));
+check('D6b 中心点分支不调用求解器 (BI.anchorOf 只在 ANC_GEO 历史档位分支内)',
+  gIdx >= 0 && cIdx > gIdx,
+  gIdx < 0 ? "未找到 `if (ANC_GEO !== 'center')`" : 'BI.anchorOf 出现在守卫之前/缺失');
+check('D6c 默认档位解析 = center (缺省 ?ancgeo= 时)',
+  /if\s*\(\s*!q\.has\('ancgeo'\)\s*\)\s*return\s*'center'/.test(SRC['main.js']));
+/* "清单未到货不落缓存" 精确判据 (五修: 位置恒对, 只有 real 可能错 ⇒ 仍要等清单到货)。
+   逐行判定: 缓存写入那一行**自带** `bl && bl.length` 守卫。 */
+const storeL = aLines.findIndex((l) => /st\._anc\s*=\s*rec/.test(l));
+const guardLine = storeL >= 0 ? aLines[storeL] : '';
+check('D7 建筑清单未到货时**不落缓存** (否则 real 会永久停在 false)',
+  storeL >= 0 && /if\s*\(\s*bl\s*&&\s*bl\.length\s*\)/.test(guardLine),
+  storeL < 0 ? '未找到 `st._anc = rec`' : '缓存写入未被 bl.length 守卫');
+console.log('  缓存行: ' + guardLine.trim());
 
 /* D8: drawNameBanner 引线终点 == 落点 (同 x, 线从 bottomY 连到 anchorY) */
 const dBody = (() => {
@@ -634,6 +818,110 @@ check('D8 drawNameBanner 引线: moveTo(x,bottomY) → lineTo(x,anchorY), 圆点
   /arc\(\s*x\s*,\s*anchorY\s*,/.test(dBody));
 check('D9 drawNameBanner 签底 = anchorY - lead - gap ⇒ 点不动、只抬签',
   !!dBody && /bottomY\s*=\s*anchorY\s*-\s*lead\s*-\s*\(\s*opt\.gap\s*\|\|\s*0\s*\)/.test(dBody));
+
+/* ============================================================
+ * E. 五修口径: 落点 = 实体自己的**中心点** (2026-09-16)
+ * ------------------------------------------------------------
+ * 用户原话: 「要和当前的城市的中心点, 还有灵山的中心点位置一样, 而不是什么所谓的
+ *   平均值或者什么参照物」。⇒ 落点不"估计", 直接读实体坐标。
+ * E1/E2 是**引擎侧证据** (否则"中心格必有核心建筑"只是口头前提);
+ * E3~E7 直接跑 main.js 的**真实源码** (抽 `var ANC_GEO = …` + `function bldgAnchor`,
+ *   注入 geo / BI / location 三个外部依赖) —— 与 check_faction.mjs 同姿势, 测上屏那份。
+ * ============================================================ */
+console.log('\n== 匾额契约 E: 落点 = 实体中心点 (五修) ==');
+
+const ENG = path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js');
+let MG = null;
+try {
+  for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js']) {
+    (0, eval)(fs.readFileSync(path.join(ENG, f), 'utf8'));
+  }
+  MG = global.MapGen;
+} catch (e) { MG = null; }
+
+if (!MG || !MG.settlementsFor || !MG.growTownFootprint) {
+  check('E1 引擎可加载 (noise/mapgen-config/mapgen 三件套)', false,
+    MG ? '缺 settlementsFor / growTownFootprint' : '加载异常');
+} else {
+  let tot = 0, nCore = 0, noCore = 0, offCell = 0, inList = 0;
+  for (const seed of ['42', '777']) {
+    MG.init(seed);
+    for (let i = -10; i <= 10; i++) {
+      for (let j = -10; j <= 10; j++) {
+        for (const st of MG.settlementsFor(i, j)) {
+          if (st.type === 'poi') continue;
+          tot++;
+          const bl = MG.growTownFootprint(st.id, st.type, st.q, st.r).buildings;
+          const core = bl.filter((b) => b.terrain === 'core')[0];
+          if (!core) { noCore++; continue; }
+          nCore++;
+          if (core.q === st.q && core.r === st.r) offCell += 0; else offCell++;
+          if (bl.some((b) => b.q === st.q && b.r === st.r)) inList++;
+        }
+      }
+    }
+  }
+  check('E1 引擎的**核心建筑**恒落在聚落中心格 (seed42/777 共 ' + tot + ' 座, d===0)',
+    tot > 60 && nCore === tot && offCell === 0 && noCore === 0,
+    'core 存在 ' + nCore + ' / 不在中心格 ' + offCell + ' / 无 core ' + noCore);
+  check('E2 中心格恒在 buildings 清单里 ⇒ 落点恒落在**真建筑**上 (不是空地)',
+    inList === nCore, inList + ' != ' + nCore);
+}
+
+/* ---- E3~E7: 跑 main.js 真实源码 ---- */
+const ancSrc = (() => {
+  const m1 = SRC['main.js'].match(/var ANC_GEO = \(function \(\) \{[\s\S]*?\}\)\(\);/);
+  const m2 = SRC['main.js'].match(/function bldgAnchor\s*\([^)]*\)\s*\{[\s\S]*?\n    \}/);
+  return (m1 && m2) ? (m1[0] + '\n' + m2[0] + '\nreturn bldgAnchor;') : '';
+})();
+const anchorFn = (search) => new Function('geo', 'BI', 'location', ancSrc)(
+  { hexW: HEXW, hexR: HEXR },
+  { anchorOf: (b, w, r, cx, md) => BI.anchorOf(b, w, r, cx, md) },
+  { search: search });
+const mkSt = (q, r, bldgs) => ({ id: 'x', q: q, r: r, x: wx(q, r), y: wy(r), buildings: bldgs });
+
+if (!ancSrc) {
+  check('E3 能从 main.js 抽出 ANC_GEO + bldgAnchor 源码', false);
+} else {
+  const A = anchorFn('');
+  const s1 = mkSt(0, 0, [{ q: 0, r: 0 }, { q: 1, r: 0 }, { q: 2, r: 0 }, { q: 0, r: 2 }]);
+  const a1 = A(s1);
+  check('E3 缺省档: 落点 == 实体中心坐标 (不再被建筑清单左右)',
+    near(a1.x, wx(0, 0)) && near(a1.y, wy(0)) && a1.real === true,
+    'x=' + a1.x + ' y=' + a1.y + ' real=' + a1.real);
+  /* 恒等免疫 (不是旧 A6 的"近似免疫"): 锚点根本不读清单 ⇒ 加多远都不变 */
+  const s2 = mkSt(0, 0, [{ q: 0, r: 0 }, { q: 1, r: 0 }, { q: 2, r: 0 }, { q: 0, r: 2 }, { q: 9, r: 9 }]);
+  const a2 = A(s2);
+  check('E4 加一块远处农田后落点**逐位不变** (恒等免疫)',
+    a2.x === a1.x && a2.y === a1.y && a2.real === a1.real);
+  /* 中心格是灵脉格/深海 ⇒ 引擎不落核心建筑: 点仍扎中心点, 只是 real=false */
+  const s3 = mkSt(0, 0, [{ q: 1, r: 0 }, { q: 2, r: 0 }, { q: 0, r: 2 }]);
+  const a3 = A(s3);
+  check('E5 中心格无建筑 → 落点不动、real=false (签子少抬一档)',
+    near(a3.x, wx(0, 0)) && near(a3.y, wy(0)) && a3.real === false);
+  check('E6 建筑清单未到货 → **不落缓存** (到货后 real 能翻真)',
+    (() => { const z = mkSt(0, 0, []); A(z); return z._anc === undefined; })() &&
+    (() => { const z = mkSt(0, 0, [{ q: 0, r: 0 }]); A(z); return !!z._anc && z._anc.real === true; })());
+  /* 历史档位没被删掉: densest 仍复现求解器 (最密格) */
+  const AL = anchorFn('?ancgeo=densest');
+  const cl = [{ q: 0, r: 0 }, { q: 1, r: 0 }, { q: 2, r: 0 }, { q: 0, r: 2 }, { q: 1, r: 2 }, { q: 2, r: 2 }];
+  const sL = mkSt(0, 0, cl);
+  const aL = AL(sL), aRef = BI.anchorOf(cl, HEXW, HEXR, sL.x, '');
+  check('E7 ?ancgeo=densest 仍复现历史求解器 (最密格) 结果',
+    !!aL && !!aRef && aL.q === aRef.q && aL.r === aRef.r,
+    (aL && aRef) ? ('densest ' + aL.q + ',' + aL.r + ' vs ref ' + aRef.q + ',' + aRef.r) : 'null');
+  const sC = mkSt(0, 0, cl);
+  const aC = anchorFn('?ancgeo=col')(sC), aCol = BI.anchorOf(cl, HEXW, HEXR, sC.x, 'col');
+  check('E7b ?ancgeo=col 仍复现一修口径 (A/B 对拍没被绕过)',
+    !!aC && !!aCol && aC.q === aCol.q && aC.r === aCol.r);
+}
+/* ---- E8/E9: 灵脉签 (源码守卫 —— 绘制闭包不便抽出, 故只钉结构) ---- */
+check('E8 灵脉签默认档 = center (?veinpt=apex 才回到峰尖口径)',
+  /get\('veinpt'\)\s*===\s*'apex'\s*\?\s*'apex'\s*:\s*'center'/.test(SRC['main.js']));
+check('E9 灵脉签默认落点 = 灵脉格心 w2s(vb.x, vb.y); 抬签改由 gap 承担 (签位不变)',
+  /apex \? w2s\(vb\.x \+ \(vb\.jxU \|\| 0\) \* geo\.hexR, vb\.y\) : w2s\(vb\.x, vb\.y\)/.test(SRC['main.js']) &&
+  /apex \? ps3\.y - lift : ps3\.y/.test(SRC['main.js']) &&
+  /gap: apex \? 0 : lift/.test(SRC['main.js']));
 
 console.log('\n========== 结果: ' + (failures ? failures + ' 项失败' : '全部通过 ✔') + ' ==========');
 process.exit(failures ? 1 : 0);

@@ -256,9 +256,19 @@ console.log('\n== 渔村皮肤契约 G: 源码守卫 ==');
   /* 导出 */
   check('G4 BldgInk 导出 KINDS_FISH (离线看板/契约可查)', /KINDS_FISH:\s*KINDS_FISH/.test(SRC_INK));
   /* main.js 调用点 */
-  check('G5 main.js drawBuildings 传 fishVillage: isFish (接口真的接上了)',
-    /fishVillage:\s*isFish/.test(SRC_MAIN));
+  check('G5 main.js drawBuildings 传 fishVillage (A2: 水面格也接上了 —— isFish || onWater)',
+    /fishVillage:\s*WATER_OLD\s*\?\s*isFish\s*:\s*\(isFish\s*\|\|\s*onWater\)/.test(SRC_MAIN));
   check('G6 main.js isFish 判据 == type===\'fishing\'', /var isFish\s*=\s*it\.st\.type\s*===\s*'fishing'/.test(SRC_MAIN));
+  /* A2 (2026-09-16 用户定案): 水面格按本体 kind 画, 栈桥降级为白名单兜底 */
+  check('G9 A2: 栈桥降级为「水面本就有画法」的白名单兜底 (不再一律改写)',
+    /var bridge\s*=\s*onWater\s*&&\s*!isFish\s*&&\s*\(WATER_OLD\s*\|\|\s*!WATER_KIND\[b\.kind\]\)/.test(SRC_MAIN) &&
+    /var WATER_KIND\s*=\s*\{[^}]*'民房'\s*:\s*1/.test(SRC_MAIN));
+  check('G10 A2: 地盘环水陆都画 (plateAt 不再被 if(!bridge) 跳过)',
+    !/if\s*\(!bridge\)/.test(SRC_MAIN) && /BI\.plateAt\(ctx/.test(SRC_MAIN));
+  check('G11 A2: `?water=old` A/B 档位在册 (可同机位还原旧口径取证)',
+    /var WATER_OLD\s*=/.test(SRC_MAIN) && /water=old/.test(SRC_MAIN) &&
+    /bridge\s*=\s*onWater\s*&&\s*!isFish\s*&&\s*\(WATER_OLD/.test(SRC_MAIN) &&
+    /fishVillage:\s*WATER_OLD\s*\?/.test(SRC_MAIN) && /!\s*bridge\s*\|\|\s*!\s*WATER_OLD/.test(SRC_MAIN));
   /* 远视图标独立 */
   check('G7 ICON_FN.fishing 指向独立的 drawFishing (不再复用 drawVillage)',
     /fishing:\s*drawFishing/.test(SRC_MAIN) && /function drawFishing\s*\(/.test(SRC_MAIN));

@@ -2088,12 +2088,24 @@
    *   hexW,hexR  几何常量 —— 世界坐标公式 x = hexW*(q + r/2), y = 1.5*hexR*r
    *              (与 mapclient.tileToWorld / 本文件 DIRS 注释同一式)
    *   centerX    聚落中心格的世界 x (st.x) —— 只在 mode='col' 用 (A/B 对拍)
-   *   mode       ''      → 最密格 (默认, 三修; 见 centerPiece)
+   *   mode       ''      → 最密格 (三/四修; ⚠ 2026-09-16 五修起**不再是默认**, 见下)
    *              'med'   → 中位格 (二修口径, 留作 A/B 对拍)
    *              'sum'   → 中位建筑 medoid (分布更内, 但对离群地皮更敏感)
    *              'box'   → 建筑世界包围盒中心 (?ancgeo=box, 旧 A/B 差分)
    *              'col'   → 离中心列最近 (?ancgeo=col, 一修行为, 只留给契约对拍)
    *              ⚠ 布尔 true 视同 'box' (兼容 ?ancgeo=1 的老调用)
+   *
+   * ⚠⚠ 2026-09-16 五修: **线上默认落点已经不再经过本函数**。
+   *   用户口径: 「要和当前的城市的中心点位置一样, 而不是什么所谓的平均值或者什么参照物」。
+   *   ⇒ main.js 的 bldgAnchor 默认**直接取聚落中心点** (st.x, st.y), 零求解器。
+   *   为什么这就够 (离线跑引擎实测 seed42/777 共 90 座, dCore 恒 = 0):
+   *     引擎把**核心建筑** (祠堂/村口/宗祠/集市/官衙/祖师殿…) 恒定放在聚落**中心格**
+   *     (mapgen.js growTownFootprint 的 `cell.d === 0` 那一支) ⇒ 中心格上永远有一座真建筑,
+   *     它本来就是这村子的中心; 于是锚点对建筑清单 (含远处农田/码头等离群地物) **恒等免疫**
+   *     —— 因为它根本不读清单, 也就不需要平手决序/参照物。
+   *   下面几档 (含 '' 最密格) 全部降级为 **历史 A/B 档位** (`?ancgeo=densest|med|sum|box|col`);
+   *   保留是为了对照与复现, **不是线上默认**。前四修的教训: 都是在"用统计量去猜中心",
+   *   每一修都在给上一修的副作用打补丁 —— 而中心本来就是给定的。
    * 返回: { x, y, q, r, y0, real } | null (无建筑时 null, 由调用方兜底且**不要缓存**)
    *   y0 = 建筑格 y 的 p25 (旧路径与"让位"逻辑还要用)。
    * ============================================================ */
@@ -2122,9 +2134,17 @@
     return { x: m.x, y: m.y, q: m.q, r: m.r, y0: y0, real: true };
   }
 
-  /* 「建筑群里最像村庄中心的那**一座**」的求解器 (C-a 三修) —— 三条口径:
-       ''    (默认) **最密格**: 2·hexR 邻域内建筑数最多的那座, 并列按
-             「离截尾质心近 → 更北 → 更西」的全序决出。对远处农田/码头免疫。
+  /* 「建筑群里最像村庄中心的那**一座**」的求解器 (C-a 四修) —— 三条口径:
+       ''    **最密格**: 2·hexR 邻域内建筑数最多的那座, 并列按「离**最密束的 2R 邻域
+             并集质心**近 → 更北 → 更西」的全序决出 (见下方平手参照物那段注释)。
+             对远处农田/码头 **恒等免疫** (远点不进任何 2R 邻域)。
+             ⚠ 平手键试过并**否决**过两条: ①「离截尾质心近」—— 参照物自身被离群均值
+               污染 ⇒ A6 红灯 (实测 (1,0)↔(1,2) 翻转); ②「截断核分 Σ min(d,2R)」——
+               虽免疫, 但它衡量的是"局部紧致度"而非"中心性", 三独立参照系下 1.652/3.969
+               比一修 col 还差 (交接单曾建议用它 ⇒ 实测否决)。
+       ⚠⚠ 2026-09-16 五修: '' 已**不再是线上默认** (降级为 `?ancgeo=densest` 对拍档)。
+             线上默认只在 main.js 的 bldgAnchor 里直接取**聚落中心点** (st.x, st.y),
+             本函数整支只作历史对照与 A/B —— 见 anchorOf 头部那段说明。
        'med' 中位格: 分别取建筑 x / y 的**中位数**得"中位点", 再取离它最近的
              那座真实建筑。对离群值免疫, 但聚落呈"细长/拐角"时中位点会落到
              两簇之间, 最近的那座可能偏在一侧。
@@ -2159,47 +2179,56 @@
       }
       return ws[mi];
     }
-    /* 默认: 最密格。半径 2·hexR (村庄邻里尺度); r2 用平方比较省一次开方。 */
+    /* 默认: 最密格。半径 2·hexR (村庄邻里尺度); r2 用平方比较省一次开方。
+       第一趟: 邻居计数 (含自身) + 记下最大计数 maxC。 */
     var rad = (hexR > 0 ? hexR : 1) * 2, r2 = rad * rad;
-    var ref = trimmedCentroid(ws, 0.25);
-    var bn = -1, bk = Infinity, by = Infinity, bx = Infinity, bi3 = 0;
+    var cs = new Array(n), inU = new Array(n), maxC = 0;
     for (i = 0; i < n; i++) {
       var c = 0;
       for (j = 0; j < n; j++) {
         var gx = ws[i].x - ws[j].x, gy = ws[i].y - ws[j].y;
         if (gx * gx + gy * gy <= r2 + 1e-9) c++;
       }
-      var kx = ws[i].x - ref.x, ky = ws[i].y - ref.y, k = kx * kx + ky * ky;
-      /* 逐级比较: 邻居数多 > 离截尾质心近 > 更北 > 更西 —— **全序** ⇒ 结果与输入序无关 */
-      if (c > bn ||
-          (c === bn && (k < bk - 1e-9 ||
+      cs[i] = c; inU[i] = false;
+      if (c > maxC) maxC = c;
+    }
+    /* 平手参照物 = 「最密束 (计数 == maxC) 的 2R 邻域**并集**」的质心。
+       ⚠ 这个参照物对远方农田/码头**逐值免疫**, 而且不是近似而是恒等式:
+         ① 远点不在任何候选的 2R 内 ⇒ 计数表逐值不变;
+         ② ⇒ 最密束逐元素不变;  ③ ⇒ 并集不变 (并集判据也只查 2R 内) ⇒ 质心不变;
+         ④ ⇒ 平手决序不变。全程没有出现任何"会被远点拉走的统计量"。
+       对照 (C-a 四修前的 A6 红灯根因): 旧口径「离截尾质心近」在第 ①' 步就崩 ——
+         截尾质心先用**含离群点的均值**排序取保留集 ⇒ 远处多加一块农田就换了保留集,
+         质心随之移动 ⇒ 决序翻转 (实测 (1,0) ↔ (1,2), 且换方向/个数还会再变)。
+       为什么参照物取「最密束的 2R 邻域并集」而不是「全部建筑」: 并集本身就是
+         "这个村子真正扎堆的那一片", 它既扛得住远方地物, 又不会被稀疏外圈的
+         农地/水磨把质心拽偏 —— 与第一键 (邻域计数) 同源于同一个 R。 */
+    for (i = 0; i < n; i++) if (cs[i] === maxC) {
+      for (j = 0; j < n; j++) {
+        var ux = ws[i].x - ws[j].x, uy = ws[i].y - ws[j].y;
+        if (ux * ux + uy * uy <= r2 + 1e-9) inU[j] = true;
+      }
+    }
+    var cx = 0, cy = 0, cu = 0;
+    for (j = 0; j < n; j++) if (inU[j]) { cx += ws[j].x; cy += ws[j].y; cu++; }
+    if (cu) { cx /= cu; cy /= cu; }
+    /* 第二趟: 邻居数多 > 离参照质心近 > 更北 > 更西 —— **全序** ⇒ 与输入序无关 */
+    var bn = -1, bk = Infinity, by = Infinity, bx = Infinity, bi3 = 0;
+    for (i = 0; i < n; i++) {
+      var kx = ws[i].x - cx, ky = ws[i].y - cy, k = kx * kx + ky * ky;
+      if (cs[i] > bn ||
+          (cs[i] === bn && (k < bk - 1e-9 ||
            (Math.abs(k - bk) <= 1e-9 && (ws[i].y < by - 1e-9 ||
             (Math.abs(ws[i].y - by) <= 1e-9 && ws[i].x < bx - 1e-9)))))) {
-        bn = c; bi3 = i; bk = k; by = ws[i].y; bx = ws[i].x;
+        bn = cs[i]; bi3 = i; bk = k; by = ws[i].y; bx = ws[i].x;
       }
     }
     return ws[bi3];
   }
 
-  /* 截尾质心: 先取全体均值, 再丢掉离它最远的 dropFrac 比例, 对剩下的取均值 ——
-     远处农田/码头在这一步被剔掉, 留下的就是"房子真正扎堆的地方"。
-     只用于「最密格」同分时的择优 (不是锚点本身, 免得又引入一个会被离群拉走的量)。 */
-  function trimmedCentroid(ws, dropFrac) {
-    var i, n = ws.length, mx = 0, my = 0, ex, ey;
-    for (i = 0; i < n; i++) { mx += ws[i].x; my += ws[i].y; }
-    mx /= n; my /= n;
-    var ds = [];
-    for (i = 0; i < n; i++) {
-      ex = ws[i].x - mx; ey = ws[i].y - my;
-      ds.push({ i: i, d: ex * ex + ey * ey });
-    }
-    ds.sort(function (a, b) { return a.d - b.d; });
-    var keep = Math.max(3, Math.round(n * (1 - dropFrac)));
-    if (keep > n) keep = n;
-    var sx = 0, sy = 0;
-    for (i = 0; i < keep; i++) { sx += ws[ds[i].i].x; sy += ws[ds[i].i].y; }
-    return { x: sx / keep, y: sy / keep };
-  }
+  /* (C-a 四修) 原 `trimmedCentroid` 已删 —— 它是「最密格」平手时的参照物, 但内部
+     先用**含离群点的均值**排序取截尾子集 ⇒ 远处多加一块农田就会翻转决序 (A6 红灯)。
+     现在参照物与第一键同源 (最密束的 2R 邻域并集质心), 不需要任何会被拉走的统计量。 */
   /* o = { biome(q,r) -> 0..7 或 -1(未知), hexW, hexR, ringMax=3 } */
   function faceSolver(o) {
     var biome = o.biome, hw = o.hexW, h15 = 1.5 * o.hexR;

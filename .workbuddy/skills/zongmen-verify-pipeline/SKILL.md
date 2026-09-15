@@ -522,11 +522,18 @@ tasklist | grep -i zongmen || echo "无进程"
    可靠姿势 = **全程 Node 绝对路径**：
 
    ```bash
-   N="C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2-3/node.exe"
-   "$N" -e "const {execFileSync}=require('child_process');const G='C:/Program Files/Git/cmd/git.exe';console.log(execFileSync(G,['status','--porcelain'],{cwd:'D:/codes/宗门模拟器demo',encoding:'utf8'}));"
+   N="$HOME/.workbuddy/binaries/node/versions/22.22.2-3/node.exe"
+   "$N" -e "const {execFileSync}=require('child_process');const G='C:/Program Files/Git/cmd/git.exe';console.log(execFileSync(G,['status','--porcelain'],{cwd:process.cwd(),encoding:'utf8'}));"
    ```
 
    - git 绝对路径：`C:/Program Files/Git/cmd/git.exe`（备选 PortableGit `.../binaries/PortableGit/versions/1.2.0/cmd/git.exe`）。
+   - ⚠ **2026-09-16 环境订正（本机已换环境，本文里写死的绝对路径全部失效）**：
+     · 用户名不再是 `Administrator` ⇒ 一律改用 **`$HOME`**（node / python / dotnet 三处均已实测可用）。
+       写死用户的路径会得到 `... No such file or directory`，看着像"本机没装"。
+     · **`dotnet` 不在 `C:/Program Files/dotnet/`，而在 `$HOME/.dotnet/dotnet`**（SDK 8.0.425）。
+     · 仓库目录也换过名：现在是 **`D:/codes/ZongmenSimulator`**（旧文里的 `宗门模拟器demo` 已不存在）。
+     · Bash shim 仍缺 `ls/cd/dirname/head/tail` ⇒ 先 `export PATH="/c/Program Files/Git/usr/bin:$PATH"` 再 `cd`。
+     · `grep`/`grep -c` 无匹配时返回 1 ⇒ 放在 `&&` 链中间会把整条链断掉（本轮踩过：以为后续命令失败，其实只是没匹配）。
    - 长输出**写盘再 Read**；`| tail` / `| head` 用不了（管道目标不存在）⇒ 用 `node -e` 截取。
    - 需要显式 PATH 时：`export PATH="/c/Program Files/Git/cmd:/c/Program Files/Git/bin:$PATH"`，**再** `cd`（否则连 `cd` 都失败）。
    - ⚠ `git -c core.quotepath=false status` 的 `-c` 必须写在子命令**之前**（`git -c ... status`，写后面报 `unknown switch c`）。
@@ -546,7 +553,7 @@ N="C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2-3/node.exe"
 "$N" verify/check_preview_draw.mjs              # 期望 32 通过 / 0 失败
 "$N" verify/check_preview_settle_road.mjs       # 期望 305 条（多圈收敛 7 圈）
 "$N" verify/check_vein_skin.mjs                 # 前端灵脉配色/形状/等级契约（现 42 项）
-"$N" verify/check_plaque_align.mjs              # 匾额/名牌落点对齐（C-a 真建筑格 / C-c 签位=峰尖 / D 文案）· 39 项
+"$N" verify/check_plaque_align.mjs              # 匾额/名牌落点对齐（C-a 中心点 / C-c 签位 / D 文案）· 79 项
 "$N" verify/check_fish_skin.mjs                 # 渔村皮肤（A）· 44 项，含 stub canvas 真跑 spriteOf 验缓存不串图
 "$N" verify/check_faction.mjs                   # 归属势力底图（B）· 72 项，抠 main.js 真源码 eval + 真跑 plateAt
 "$N" verify/w5_sprite_range.mjs
@@ -585,11 +592,16 @@ curl -s --noproxy "*" http://127.0.0.1:8150/api/map/stats
    - 修法：起实例时带 `Zongmen__MaxSeeds=64`（并换新 `DbPath`，旧库里的 seed 也会占名额）。
 1. `Options.FindRoot` 自 ContentRoot（= exe 目录）**向上找含 `web/index.html` 的目录** ⇒ 从 `verify/_vmsrv` 起步会命中仓库根，**自动用仓库 `web/` 与 `Engine/js`**，不用拷资产。
 2. 跑完 **kill 该实例 + 删 `verify/_vmsrv`**（46 个文件 / 约 292MB），最后 `git status` 与 `git status --ignored verify/` 双净。
-3. 探端口用 `net.connect` 确认起来/关闭；**别用 `taskkill /IM`**（会连带杀用户实例）。按命令行精确定位才安全（`wmic` 在本机可用）：
+3. 探端口用 `net.connect` 确认起来/关闭；**别用 `taskkill /IM`**（会连带杀用户实例）。按**端口归属的 PID + 镜像名**精确定位才安全：
    ```bash
-   wmic process where "name='dotnet.exe'" get processid,commandline /format:csv | tr -d '\r' | grep -i 'vmsrv' | awk -F',' '{print $NF}'
-   # 再对拿到的 PID 逐个 taskkill /F /PID <pid>
+   # ① 先取占用端口的 PID（netstat 在 System32，绝对路径更稳）
+   C:/Windows/System32/netstat.exe -ano | grep -E ':8150\b' | grep -i listening
+   # ② 验镜像名确实是 dotnet.exe（防误杀同端口别的进程）
+   C:/Windows/System32/tasklist.exe /FI "PID eq <pid>" /FO CSV /NH
+   # ③ 再 taskkill /F /PID <pid>
+   C:/Windows/System32/taskkill.exe /PID <pid> /F
    ```
+   ⚠ **`wmic` 自 2026-09-16 起已被本机安全策略列入程序黑名单**（`WMIC.exe` → sandbox 拦截，**不可批准、不可绕道**；`Get-CimInstance Win32_Process` 同理需绕 wmic 的旧姿势已失效）⇒ 一律改用上面 `netstat -ano` + `tasklist` 两段式。仍**不要**用 `taskkill /IM dotnet.exe`（会连带杀用户的 8140）。
 4. ⚠ **别在回归跑动中去清 `%TEMP%/wb-*`**：那批目录里就有正在跑的 Chrome profile，删了会当场假红（实测 `check_calc_local` 一次红 4 条，单跑立刻 11/11 绿）。要清就等跑完。
 5. 然后都传该端口：
 
@@ -873,3 +885,252 @@ meta 给浏览器、CSS 给渲染引擎，两条都写才稳。
 3. **查环境**：`/api/map/stats` 的 `liveSeeds == maxSeeds`？`%TEMP%/wb-*` 堆了多少？端口上是哪个构建（meta 有没有新字段）？
 
 > 本次收口的最终验收：**`--base=<隔离实例>` 全量 22 条，红 0**（离线 18 + live 4）。
+
+---
+
+## 32. 判据的「参照系」不能是被测规则自己的目标函数（2026-09-16 匾额锚点四修 · 自证陷阱）
+
+`check_plaque_align.mjs` 的 A13 一节原本只用**一个**参照系 —— 「裸均值定序的截尾质心」，
+而那正是当时默认口径（三修「最密格」）的**目标函数**（定义就是"离它最近的 S 成员"）。
+于是它必然拿满分 —— A13c 断的「最差偏差 **==** 可达下界」其实是**同义反复**，什么都没验到。
+
+换成三个**任何候选都没优化过**的参照系重打分（33 座实测，逐座口径一致）：
+
+| 口径 | trim 截尾质心 | geo 几何中位数 | bbf 包围盒中心 | 和(平均) | 和(最差) | A6 离群免疫 |
+|------|---------------|----------------|----------------|----------|----------|-------------|
+| 三修 mean-key | 0.839/1.756 | 0.693/2.318 | 1.206/4.265 | **2.739** | 8.339 | ✗ 8/8 全败 |
+| 一修 col | 1.605/4.715 | 1.300/4.458 | 1.562/3.464 | 4.467 | 12.637 | — |
+| 二修 med | 1.074/2.843 | 0.861/3.464 | 1.356/4.330 | 3.290 | 10.637 | — |
+| medoid sum | 0.915/2.021 | 0.483/1.572 | 0.960/2.250 | 2.358 | 5.842 | — |
+| **四修 plateau（现行）** | 1.109/2.385 | 0.883/2.692 | 1.466/3.269 | **3.459** | 8.346 | ✓ 8/8 |
+
+（每格 = 平均偏差/最差偏差，单位 R；三修与四修用**同一套容差语义的滚动比较**测，见 32.1）
+
+**结论**：换参照系后三修并不占优，它只是在"自己那个量"上最优。
+四修用 **+0.24R 的平均居中（≈6px/座）** 换到了**精确**的离群免疫，**最差和基本持平**（8.346 vs 8.339）。
+
+> 教训：**写"质量"断言前先问一句 —— 被测规则有没有可能把这个量放进自己的目标函数？**
+> 会 ⇒ 这个参照系作废，换一个**没有任何候选能优化**的量（几何中位数 / 包围盒中心 / 坐标中位数）。
+> 单参照系的第二个副作用更隐蔽：它会**通吃**恰好与它同构的那条规则，让劣口径（如 medoid 的
+> 纯中心性、col 的偏心）看起来更差或更好，掩盖真实排序。
+> 现行判据 = 「相对劣口径 col 的比例上界（85%/75%）」+「与纯中心性上界 medoid 的差距有界
+> （平均 ≤0.60R / 最差 ≤1.35R，含约 20% 余量）」+「绝对上界（到几何中位数 ≤1.00R/≤3.00R）」。
+> ⚠ 阈值是按**入库的静态 fixture** 标定的 —— 换种子重采 `anc_fixture.json` 必须重标并注明新值。
+
+### 32.1 复算判据必须与实现**同容差语义**（否则 2e-13 的尾数就能翻案）
+
+建筑格常有两座到参照质心的距离在浮点上**恰好相等**（实测 `47.99999999999987` vs
+`48.000000000000064`，差 **2e-13**，真值都是 48）。实现用的是
+`k < bk - 1e-9` 的**容差滚动比较**；判据复算若写成纯 `sort((a,b)=>a.k-b.k)`，就会被尾数噪声决出胜者
+⇒ 同一输入两个答案（实测 **5/33 座不一致**，偏差平均被拉开 0.06R）。
+
+- 定法：**复算照实现写同容差语义**（同一个滚动比较），但计数 / 并集 / 质心仍走**另一条代码路**
+  （`filter` 而非下标循环）⇒ 既保证一致，又不是抄实现。
+- 排查手法：把「滚动比较」与「排序比较」并列打出来，两者不同即暴露此类问题
+  （`impl=(29,-27) / 排序=(29,-26)` 一眼就能认出是 2e-13 级别的 tie）。
+
+---
+
+## 33. 「离群免疫」要的是**恒等式**，不是"更鲁棒"（2026-09-16 锚点 A6 红灯）
+
+A6 = 远处加一块农田/码头，锚点必须**逐值不动**。试过并**否决**的方案（同一 fixture，trim 参照系，33 座）：
+
+| 平手参照物方案 | 免疫 | 平均/最差 (R) | 否决理由 |
+|---|---|---|---|
+| 裸均值定序截尾质心（三修） | ✗ 8/8 | 0.839/1.756 | 内部先用**含离群点的均值**排序取保留集 ⇒ 换保留集 |
+| 坐标中位数定序 | ✓ 8/8 | 1.045/3.126 | 中位数不是好中心（最差 3.126R） |
+| 逐轴 Winsorized 25% 均值 | ✗ 8/8 | 0.896/1.756 | 裁掉的**点数随 n 变** ⇒ 保留窗口跟着变，仍非恒等 |
+| 中位数起手 + 4 轮重裁迭代 | ✗ 8/8 | ≈裸均值 | ⚠ **收敛回裸均值的不动点** ⇒ 与裸均值逐值相同，白做 |
+| 截断核分 Σ min(d,2R) | ✓ 8/8 | 1.652/3.969 | 它是"局部紧致度"不是"中心性"，比一修 col 还差 |
+| 多尺度计数阶梯 c(2R)→c(R)→c(R/2)→c(R/4) | ✓ 8/8 | 1.421/3.329 | 同上，偏紧致度 |
+| **最密束 2R 邻域并集质心（四修现行）** | ✓ 8/8 | 1.049/2.179 | 采纳（实现容差语义下 1.109/2.385） |
+
+**可复用的判据**：免疫只能来自「远点落在**所有**中间量的定义域之外」这条**恒等链** ——
+远点不进任何候选的 2R 邻域 ⇒ **计数表逐值不变** ⇒ **最密束逐元素不变** ⇒ **并集不变**
+（并集判据也只查 2R）⇒ **质心不变** ⇒ **决序不变**。
+任何"鲁棒统计量"（截尾 / 中位数 / Winsorized / 迭代重裁）都只是**减小**影响，不是消除 ——
+平手恰好卡在噪声量级上时照样翻。
+
+**压测协议（照抄即可）**：合成簇 `CLUSTER`（8 座，基准锚点必须恒为 `(1,0)`）+ 8 个方向的远点
+（`(9,9) (-14,7) (0,-21) (31,-3) (-6,40) (22,22) (-30,-30) (5,-18)`），逐个单独加、
+再**八个一起加**，全部都不得改变结果。契约里落地为 **A6 + A6b** 两条。
+
+---
+
+## 34. 数值探针优先：读不了 PNG 时的几何验收（2026-09-16）
+
+几何对齐（标签引线落点）这类事，**截图目测是最不可靠的路径**：本机 Read PNG 会等比缩小、
+目测坐标误差 >60px、`--headless=new` 还忽略 `--window-size`。改用**产品自己挂的数值探针**：
+
+- **`?plaqprobe=1`**（`main.js` 尾部 `window.__plaqProbe`）自回传 JSON：含**原始建筑格 `bldgs`**、
+  每个聚落的落点/偏差 `dCentR`、每条灵脉的 `topU`/`jxU`，并自动 POST 到 `/api/debug/snap`。
+  ⇒ 拿它当 A13 fixture 的输入（`verify/anc_fixture.json`），**离线复算**所有几何断言。
+- `?mmprobe=1`（小地图）同理，按时间点采 probe。
+- ⚠ `capture=1` 落的是**共享** `verify/capture.png` ⇒ 实机自截必须**串行**；截前预热 `capmin=N`。
+- 落地原则：**能写成"探针数值 + 离线复算"的断言，就不要写成"像素阈值"** —— 前者可归因、可 diff、可入基线。
+
+### 34.1 几何常量要以「画师的多边形采样」为准，别从公式/注释反推
+
+本轮 `VS.apexV()` 第一版按 `shoulder/arch/topSeg` 的注释公式推导，**符号写反**
+（拱比肩抬得多 ⇒ `yApex = mainBase - mainH*(1-(archU-shoulderU))` 是错的，真值更低），
+实机表现 = 灵脉签圆点悬空 ≈27px。
+
+- 定法：**照 `textures.js` 的 `veinPeakPts()` 建点循环真跑一遍取 min-y**，与闭式实现**交叉验证**
+  （`check_plaque_align` 的 **B1** 就是"两路必须逐值一致"，B1b 再钉住量级区间）。
+- 一般化：**画师的那段多边形代码才是真源**；推导式与注释随时可能过期，交叉验证才是防线。
+
+## 35. 用户说「要中心点」时，别再把它解成统计量（2026-09-16 匾额锚点五修）
+
+**症状**：同一个「落点对不上」修了三轮，每轮换一个更"稳"的统计口径（合成点 → 离中心列
+最近 → 中位格 → 最密格 + 平手参照物 + 离群免疫恒等式证明）。第四轮用户直接给判据：
+> 「要和当前的城市的中心点，还有灵山的中心点位置一样，而不是什么所谓的平均值或者什么参照物」
+
+**教训**：用户说的是「**某个东西的中心点**」时，先问一句 —— **那个中心点在数据里是不是已经存在？**
+本项目里两处都早已存在，而且在明面上：
+- 聚落：`mapgen.js growTownFootprint` 把**核心建筑**（祠堂/村口/宗祠/集市/官衙/祖师殿…）
+  恒定放在中心格（`cell.d === 0` 那一支）⇒ **中心格上永远有一座真建筑**。
+- 灵脉：`v.x/v.y` 就是格心，地盘色环（`hexPath(v.x, v.y, …)`）与灵脉花都画在那里。
+
+⇒ 落点 = **读实体坐标**，一行代码。而前面三轮 + 我这轮 T1 的全部机器（求解器 / 平手全序 /
+离群免疫恒等式）都是在"用统计量去猜一个本来就给定的值" ——
+**统计量不是错，是解错了题**；每一修都在给上一修的副作用打补丁。
+
+**怎么早发现（本次真正省时间的动作）**：动手前花 5 分钟做一次**「这个量有没有权威定义」的检索** ——
+`grep` 引擎里**生成该实体的那段代码**（`grow*` / `pick*` / `*Of`），看构造里有没有
+「中心 / 核心 / core / origin」字样。本次 `mapgen.js:958 cell.d === 0 → core` 就在明面上。
+
+**验证这个口径的姿势**：离线跑引擎 `MG.init(seed)` + `MG.settlementsFor(i,j)` +
+`MG.growTownFootprint(st.id, st.type, st.q, st.r)`，逐座断言 `core.terrain === 'core' &&
+core.q === st.q && core.r === st.r` —— 本次 seed42/777 共 **465 座全部成立** (契约 E1/E2)。
+
+**副产品**：改成中心点后，「离群免疫」从**近似**升级为**恒等**（锚点根本不读建筑清单），
+A6 红灯与 A13 参照系之争一并消失 —— **换对口径，比打补丁便宜**。
+
+### 35.1 定新口径时把旧口径**降级为 A/B 档位**，不要删
+删掉求解器会丢掉"历史档位仍可复现"的回归能力。本次 `?ancgeo=densest|box|col|med|sum` /
+`?veinpt=apex` 全留。注意 `check_plaque_align` 的 **A 段/B 段是直接调 `BI.anchorOf` 断言**的
+（不经过 main.js 的默认值）⇒ 换默认值**不会**让它们假红，但它们也**钉不住**新默认。
+所以必须补 **E 段**：抽 main.js 的**真实源码**（`var ANC_GEO = …` + `function bldgAnchor`）
+用 `new Function('geo','BI','location', src)` 注入依赖后**真跑行为**（同 `check_faction.mjs` 姿势）。
+**只有源码行为断言才算钉住口径，正则只能防回归。**
+
+### 35.2 临时独立实例：`FindRoot` 决定 `/api/debug/snap` 的落盘目录
+用 `Zongmen__WebDir / EngineJsDir / DbPath` 起**仓库外**的临时实例（免得往仓库塞构建目录）时：
+落盘路径 = `Path.Combine(ZongmenPaths.FindRoot(contentRoot), "verify", "capture.png")`，
+而 `FindRoot` 是从 **exe 目录向上找 `web/index.html`** ⇒ 仓库外起实例时**找不到仓库根**，
+探针会落到 `<exe目录>/verify/capture.png`。
+⚠ 后果：`verify/live_cap.mjs`（只盯仓库的 `verify/capture.png`）**必然报超时**，
+但探针**其实已经写出来了** —— 去 exe 目录旁边那条路径读，别以为探针没触发。
+（少踩法：按老办法建在 `verify/_vmsrv`（在仓库内 ⇒ FindRoot 命中仓库根），
+或起完实例先 `mkdir <exe目录>/verify`。）
+
+### 35.3 ⚠ 后台进程**活不过一个回合**（本机实测）
+本会话起的后台实例/服务，**在回合结束后被回收**。症状极具迷惑性：同一回合内实机探针正常回传，
+下一回合再跑**全部超时**，`net.connect` 显示端口 CLOSED ⇒ 看起来像"产品坏了"。
+⇒ **起实例 + 跑实机判据必须放在同一个回合里**；跨回合先 `net.connect` 探活再决定要不要重启，
+**不要直接怀疑代码**。同理 `present_files` 给的 localhost URL 也可能在回合后失效 ——
+要用户长期看，就让他自己起 8140。
+
+## 36. 源码守卫的**否定**断言：去注释器必须认识**正则字面量**（2026-09-16 世界种子台账 W）
+
+- 病征：新写的两条否定守卫「main.js 里不得再有 `Date.now() % 100000000`(前端自造种子的指纹)」
+  **假红** —— 那串数字只出现在**文档注释**里（注释里引用旧实现是正常的，本该被剥掉）。
+- 根因：仓库里 `check_fish_skin` / `check_faction` / `frontend_smoke` 各自复制的那份"去注释器"
+  只认引号。而 main.js 的 `esc()` 里有 **`/[&<>"]/g`** —— 字符类里那个 `"` 被当成**字符串开头**
+  ⇒ 之后整段状态错位、**块注释不再被剥掉**。
+  · 症状特征：**否定**断言假红；**肯定**断言不受影响（状态错位只表现为"该剥的没剥"，
+    不会删代码 —— 所以以前的守卫一直没暴露这个 bug）。
+- 修法（已落进 `verify/check_settings_store.mjs` 与 `verify/check_world_ledger.mjs` 各自的副本）：
+  遇到 `/` 时，按「上一个有效字符能否结束表达式」判定它是不是**正则起始**
+  （`/[&<>"]/g` 的前一字符是 `(` ⇒ 正则；`a / b` 的前一字符是标识符 ⇒ 除号），
+  是正则就整体吃掉（含 `[...]` 字符类与 `\/` 转义）再继续。
+- 戒条：写「不得出现 X」这类守卫前，先确认 **X 只可能出现在代码里**；若 X 是文档里会引用的
+  旧实现，必须走去注释版，且**先用一条必过的正样本证明去注释器真的生效**
+  （本轮靠"打印 stripped 长度 + 打印命中处上下文"一眼看出注释没被剥）。
+
+## 37. A/B 档位改造后，引用该表达式的**判据要同步改**（2026-09-16 G5/G9 假红）
+
+- 病征：`check_fish_skin` 的 G5/G9 报红，而被测代码是对的。上一次会话给「水面格按本体 kind 画」
+  加了 `?water=old` A/B 档位：
+  · `var bridge = onWater && !isFish` → `... && (WATER_OLD || !WATER_KIND[b.kind])`
+  · `fishVillage: isFish` → `WATER_OLD ? isFish : (isFish || onWater)`
+  而 G5/G9 的正则还钉着**上一版形态** ⇒ 断言测的是"历史实现"。
+- 口径（与 §35.1 同源）：把旧口径**降级为 A/B 档位**是对的，但同一回合必须把**引用该表达式的
+  判据**改成"新默认 + A/B 开关"的形态，例如
+  `/fishVillage:\s*WATER_OLD\s*\?\s*isFish\s*:\s*\(isFish\s*\|\|\s*onWater\)/`
+  —— 一条正则同时钉住两档，既不丢历史也不放过漂移。
+- 自查：任何一次 `?xxx=old` 式档位改造后，`grep -rn 'xxx' verify/*.mjs` 看有多少条正则钉着旧形态。
+- ⚠ **同机并行改同一工作区**：本会话观察到**另一个会话在并行编辑本仓库**（执行中文件被改，
+  导致后台回归读到的是"改前"的文件、红绿对不上）。⇒ 看到"莫名红"先 `git status` 对时间线，
+  别急着改代码；自己也只做**小步定点 Edit**，不要整文件重写（否则会覆盖别人正在做的事）。
+
+## 38. 世界种子改由服务端产生（W · 2026-09-16）——改这类"注入点"必查清单
+
+用户口径：「seed 由服务器统一产生，不能通过前端产生了，存在 sqlite 里面」。
+- 落点：`Storage/WorldLedger.cs`（**独立表 `World(Round,Seed,BornAt)`**）+ `GET /api/world/current`
+  + `POST /api/world/next` + `GET /api/world/list`；前端 boot 改 `await worldFetch('/api/world/current')`，
+  「另启一世」= POST next。
+- ⚠ **表必须独立，不能塞进 `Data(Key,Value)`**：后台维护任务会调
+  `SqliteVirtualContext.PruneExcept(活跃 seed 前缀)`，其 DELETE 语义是"删掉所有 Key 不匹配
+  `w:<16位>:` 的行" ⇒ 台账行会被**静默删掉**（世界忘了自己第几世，且不报错）。
+- ⚠ **`?seed=` 必须保留**为调试覆盖（`verify/*.mjs` 的定点验收全依赖它）：命中时按"外部世界"
+  处理——不入账、不显示轮次。删掉它等于废掉整条验证管线。
+- ⚠ **拿不到种子时不要回落前端造**：那会把"服务端不可用"伪装成"正常开局"，且造出的世界不在
+  台账里。直接 `showFatal`（前端造种子正是本轮要根除的行为）。
+- 判据：`check_world_ledger.mjs`（**live**，会真实开一世 ⇒ 只对隔离实例跑）+
+  `check_settings_store.mjs`（offline，真跑 `web/js/store.js`：默认值/白名单/幂等/订阅/坏 JSON/
+  无 localStorage 降级/节流 + 弹窗复选框与 schema 键集合对齐）。
+- ⚠ 前端设置的状态**只住在 `ZMStore`**（localStorage，键 `zongmen.settings.v1`）：弹窗复选框
+  只往 store 写，渲染变量由 `S.settings.on(applySettings)` 单向下发。别再回到"按钮 class 即状态"
+  （加一个开关要改三处、刷新即丢）。`frontend_smoke` 的「静态置脏契约」逐名扫描
+  `showVeins/showLabels` ⇒ **别改这两个变量名**（会静默丢掉那条守卫）。
+
+## 39. 新增/改名"全局状态"与"源码守卫"的相互作用（2026-09-16 实测，四条真实红）
+
+本轮把右上角 7 个按钮收成 1 枚齿轮 + `ZMStore`（localStorage）后，源码守卫连报 **4 条真红**；
+每条都不是"逻辑错"，而是"新代码踩了守卫的**形状假设**"。加任何全局状态/开关/计数器前先看本节。
+
+1. **⚠ 未声明的计数变量 = 整页 fatal，而**只有**「真页面无 JS 异常」抓得到。**
+   本轮给灵脉签加计数器 `statVeinBanner`，在 3 处赋值却**漏了 `var`** ⇒ main.js 是 `'use strict'`
+   ⇒ 首次赋值抛 `Uncaught ReferenceError: statVeinBanner is not defined`。
+   `frontend_smoke`（纯源码守卫）**全绿**，只有 `check_mm_ui` 的「探针页无 JS 异常」红。
+   ⇒ 每加一个计数/状态变量，先 `grep "var <名>"` 复核；纯静态守卫查不出未声明变量。
+   （定位手法：`check_mm_ui` 会把 iframe 的 `error` 事件原文打出来。）
+
+2. **`frontend_smoke`「静态置脏契约」扫的是**原文（含注释）**。**
+   它用 `/classList\.toggle\('off'/g` 扫 main.js；我在**注释**里写了
+   `按钮 \`classList.toggle('off')\`` ⇒ 命中 → 该处 400 字内无 `StaticDirty(` ⇒ 报 `off@L37`。
+   ⇒ 注释里别写这个**完整字面量**（去掉 `classList.` 前缀、写成 `toggle('off')` 就不会命中）。
+   ⚠ 别为此去改"先剥注释"——改共享守卫的形状风险大于收益。
+
+3. **`frontend_smoke`「解码字段契约」把 `st.` 硬编码为 `parsePlaceEntity` 的聚落结构。**
+   写 `var st = S.settings.all(); … st.veins/…` ⇒ 被判成"读了不存在的线路字段"
+   （报 `main.js:st.veins|st.clouds|st.nameRegion|st.nameSettle|st.nameVein`）。
+   ⇒ 读设置值的局部变量**别叫 `st`**（用 `sv`/`cur`）；`resp`/`cm`/`lr` 同理都是禁区名。
+
+4. **`check_calc_local` 的 3s 闸门 vs 慢引擎（既有隐患，非本轮引入，值得修）。**
+   `main.js armCalc()` 是 `E1.load().then(settle, settle)` + `setTimeout(settle, 3000)` 看门狗，
+   而 `settle` 首行 `if (CALC.settled) return`。若**看门狗先触发**（引擎脚本到货晚于 3s），
+   `CALC.settled=true` 且此刻引擎尚未 ready ⇒ `CALC.local` 被钉在 false；之后 `load()` 真 resolve
+   时 `settle` 已成 no-op ⇒ **本会话永远走服务端下发（mask=31），「前端自算」静默失效**。
+   实测证据（把 `p.calc` 打进 FAIL 文案）：
+   `{"ready":true,"seed":"20260915","hashStale":false,"lastError":""}` 却 `local:false`
+   —— **引擎到了、指纹也没漂，就是没人再判一次**。
+   ⇒ 修法（待用户拍板）：`load().then` 里"settle 返回 false 且 ok 时补一次 `calcRefresh()`"。
+   ⇒ 本轮**未改**（`armCalc` 不在本次 diff 内，属既有/他人工作，不越界）。
+
+### 39.1 把"服务端问题"与"浏览器/时序问题"一刀切开（通用手法）
+- `check_calc_local` 只认**位置参数 URL**（`argv.find(s=>/^https?:/)`），**不认 `--base=`**
+  ⇒ `node verify/check_calc_local.mjs --base=127.0.0.1:8150` 会**静默打 8140**（`check_mm_ui` 同）。
+  `run_regression` 内部是**位置传** `BASE_URL` 的，所以 runner 里是对的。
+- 引擎脚本下发可**脱离浏览器**独立验证（~30 行 Node）：连 `ws://<base>/ws/map` → 发
+  `frame[0]=1` + `PB.encodeLogin({account,token:'demo'})` → 发 `frame[0]=PB.FRAME.SCRIPT` +
+  `PB.encodeScriptRequest({name:''})` → 应回 `FRAME.SCRIPT`（`name:"engine"`，实测
+  **~53KB gz / ~124KB 文本**）。两侧都在 ⇒ 病灶在浏览器/时序，别去改服务端。
+- 观察窗太短会把"慢"误判成"没有"：`check_calc_local … --wait=30000`（默认 7000）后
+  `ready`/`hexOk`/逐位比对**全绿、只差 `local`** —— 这一步把病灶从"引擎没来"收窄到"没人重判"。
+- ⚠ 并行 Edit 的坑本轮**复现 2 次**：同一批发 2 条 Edit，**只落 1 条**、回执却全报成功
+  ⇒ 一次只改一处，改完逐条 `grep` 复核（别信回执）。
+
+
+

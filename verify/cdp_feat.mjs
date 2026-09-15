@@ -165,9 +165,11 @@ async function main() {
   const feat = await evalJs('JSON.stringify(window.__feat ? window.__feat() : null)');
   const spots = await evalJs('JSON.stringify(window.__spots ? window.__spots() : null)');
   const fatal = await evalJs('/后端世界服务不可用/.test(document.body.innerText||"")');
-  const hud = await evalJs(`(function(){var o=[];['btnBanners','btnClouds','btnVeins'].forEach(function(id){
+  /* 2026-09-16: 右上角那排开关已收进设置弹窗 (齿轮) ⇒ HUD 只量齿轮与弹窗的几何。
+     开关的**状态**不再住在按钮 class 里, 读 window.__feat().settingsStore (见 feat 段)。 */
+  const hud = await evalJs(`(function(){var o=[];['btnGear','settingsWrap','settingsBox'].forEach(function(id){
       var el=document.getElementById(id); if(!el){o.push(id+':absent');return;}
-      var r=el.getBoundingClientRect(); o.push(id+':'+Math.round(r.left)+','+Math.round(r.top)+','+Math.round(r.width)+','+Math.round(r.height)+(/\boff\b/.test(el.className)?'[off]':''));});
+      var r=el.getBoundingClientRect(); o.push(id+':'+Math.round(r.left)+','+Math.round(r.top)+','+Math.round(r.width)+','+Math.round(r.height)+(/\bhidden\b/.test(el.className)?'[hidden]':''));});
       return o.join(' ');})()`);
 
   stage.at = 'screenshot';

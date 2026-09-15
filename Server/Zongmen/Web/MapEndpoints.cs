@@ -26,6 +26,19 @@ public static class MapEndpoints
 
         app.MapGet("/api/map/fields", (string seed, int q0, int q1, int r0, int r1) =>
             Results.Text(svc.GetFieldGridJson(seed, q0, q1, r0, r1), "application/json; charset=utf-8"));
+
+        /* ---- 世界种子台账 (W · 2026-09-16) ----
+           种子是服务端资产: 客户端只能「领当前世 / 求下一世」, 不能自己造 —— 于是多端同世界、
+           刷新不掉世、重启不换界。⚠ 这三个端点不返回任何地图数据, 不进速率限制语义边界。 */
+        app.MapGet("/api/world/current", () =>
+            Results.Text(svc.WorldCurrentJson(), "application/json; charset=utf-8"));
+
+        /* POST 而非 GET: 有副作用 (轮次 +1 并落库), 不能被浏览器/代理预取或缓存重放 */
+        app.MapPost("/api/world/next", () =>
+            Results.Text(svc.WorldNextJson(), "application/json; charset=utf-8"));
+
+        app.MapGet("/api/world/list", (int? n) =>
+            Results.Text(svc.WorldListJson(n is > 0 and <= 200 ? n.Value : 20), "application/json; charset=utf-8"));
     }
 
     /* 调试钩子: 接收前端自截图 PNG, 保存到 verify/capture.png 供自动化截图验证 */

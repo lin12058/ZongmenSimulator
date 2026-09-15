@@ -28,16 +28,130 @@
   /* 「点选」标记 (2026-09-14 九版): 玩家点击哪一格, 哪一格就落一枚朱砂圈 (取代原先
      「黑色加粗六边框」+ 「本宗自动择宗」两套东西)。null = 未点选 (开局图上没有任何标记)。 */
   var selMark = null;
+
+  /* ============================================================
+   * 显示开关 —— 唯一真源 = ZMStore (web/js/store.js, localStorage 持久化)
+   * ------------------------------------------------------------
+   * 2026-09-16 用户定案: 「右上角改成一个齿轮, 点开后有弹窗, 显示是否显示名字之类的,
+   *   存在 localStorage 里面方便下次读取」。
+   * 旧口径: `var showVeins = true` + 按钮靠 toggle('off') 类名表达状态 —— 状态住在**按钮外观**里,
+   *   刷新即丢, 且"加一个开关要改三处"(HTML 按钮/变量/绑定)。现在: schema 在 store.js 一处,
+   *   本文件只做「store → 渲染变量」的单向映射 (applySettings), 弹窗里的复选框由 data-zm 绑定。
+   * ⚠ 变量名沿用旧的 (showVeins/showLabels/showBanners) —— frontend_smoke 的「静态层置脏契约」
+   *   逐名扫描它们, 改名会静默丢掉那条守卫。语义:
+   *     showVeins   ← veins       灵脉层 (峰体/地盘色环/晕圈/七星花)
+   *     showLabels  ← nameRegion  区域名 (山川注记淡字; 旧「注记」按钮)
+   *     showBanners ← nameSettle  聚落名 (纸签)
+   *     showVeinName← nameVein    灵脉名 (纸签, 签面敷五行色) —— 新增: 灵脉签与村名常打架, 分开关
+   *     showClouds  ← clouds      云气层
+   * ============================================================ */
+  var S = window.ZMStore;
+  if (!S) throw new Error('缺少 web/js/store.js (全局存储组件) — index.html 里必须在本文件之前加载');
   var showVeins = true, showLabels = true;
+  var showBanners = true, showVeinName = true, showClouds = true;
+  /* headless 调试参数 (与 nofade/nobldg 同族, 只做 A/B 差分用):
+       nobanner=1 → **所有**地名纸签关掉 (聚落名 + 灵脉名; 旧语义, 验收脚本在用)
+       nocloud=1  → 云气关掉 (check_cloud_zoom 的同机位 A/B 靠它)
+     ⚠ 它们的优先级**高于** localStorage: 调试参数必须是可复现的确定态, 不能被上一次
+       会话里手点出来的偏好污染。 */
+  var NO_BANNER_URL = new URLSearchParams(location.search).get('nobanner') === '1';
+  var NO_CLOUD_URL = new URLSearchParams(location.search).get('nocloud') === '1';
   /* 建筑层开关 (headless 视觉验证用, 与 nofade/capture 同族):
      nobldg=1 → 不画建筑层, 同机位可与开启态做逐像素 A/B, 判定
      「建筑确实画上去了 / 画在哪里」。日常游玩不传此参数。 */
   var NO_BLDG = new URLSearchParams(location.search).get('nobldg') === '1';
-  /* 地名匾额 / 云气层 —— 独立开关, 各自带 headless 调试参数 (nobanner=1 / nocloud=1),
-     便于同机位 A/B 差分确认「确实画上去了」。 */
-  var showBanners = new URLSearchParams(location.search).get('nobanner') !== '1';
-  var showClouds = new URLSearchParams(location.search).get('nocloud') !== '1';
   var BANNER_MAX = 90;          // 单帧匾额上限 (战略视图下防刷屏)
+
+  /* ============================================================
+   * 设置: ZMStore (真源) → 渲染变量 (单向) + 齿轮弹窗
+   * ============================================================ */
+  var settingsOpen = false;
+  function applySettings() {
+    /* ⚠ 局部名故意用 sv 而非 st: frontend_smoke 的「解码字段契约」把 `st.` 硬编码为
+       parsePlaceEntity 产出的聚落结构, 复用 st 会被判成"读了不存在的线路字段"(真实红)。 */
+    var sv = S.settings.all();
+    showVeins = sv.veins;
+    showLabels = sv.nameRegion;
+    showBanners = sv.nameSettle;
+    showVeinName = sv.nameVein;
+    showClouds = sv.clouds;
+    /* 调试参数压过持久化偏好 —— 见上面 NO_BANNER_URL 的注释 (调试态必须可复现) */
+    if (NO_BANNER_URL) { showBanners = false; showVeinName = false; }
+    if (NO_CLOUD_URL) showClouds = false;
+    syncSettingInputs();
+    /* 开关只改渲染变量、不碰相机 ⇒ 必须显式置脏: 否则相机静止时 staticNeedsRedraw()
+       返回 false, 点了弹窗里的复选框要等下次平移才生效 (旧的按钮开关就踩过这个坑)。 */
+    forceStaticDirty();
+  }
+  /* 把 store 的当前值刷到弹窗复选框上 (单向镜面)。
+     ⚠ 绝不反向"从 HTML 读初值": 那会让 index.html 里的 checked 默认值变成第二真源,
+       且两处互写必抖。UI 只是 store 的显示层。 */
+  function syncSettingInputs() {
+    var box = $('settingsBox');
+    if (!box) return;
+    var sv = S.settings.all();
+    var ins = box.querySelectorAll('input[data-zm]');
+    for (var i = 0; i < ins.length; i++) {
+      var k = ins[i].getAttribute('data-zm');
+      if (Object.prototype.hasOwnProperty.call(sv, k)) ins[i].checked = !!sv[k];
+    }
+  }
+  function openSettings(open) {
+    var wrap = $('settingsWrap');
+    if (!wrap) return;
+    settingsOpen = !!open;
+    if (settingsOpen) syncSettingInputs();
+    wrap.classList.toggle('hidden', !settingsOpen);
+    $('btnGear').classList.toggle('on', settingsOpen);
+  }
+  /* 另启一世的按钮文案/禁用态 (领种子期间不给连点 —— 每次点击都是一次真实开界 + 落库) */
+  function regenBusy(busy) {
+    var b = $('btnRegen');
+    if (!b) return;
+    b.disabled = !!busy;
+    b.textContent = busy ? '正在开辟…' : '另 启 一 世';
+  }
+  function setMsg(t) {
+    var m = $('setMsg');
+    if (m) m.textContent = t ? String(t) : '';
+  }
+
+  /* ============================================================
+   * 世界 (W · 2026-09-16): 种子由**服务端**统一产生并存 SQLite
+   * ------------------------------------------------------------
+   * 旧口径: 前端 `String(Date.now() % 100000000)` 自造种子 —— 刷新即换界, 多端各看各的世界,
+   *   服务端只能被动接受任意字符串当 seed (种子从来不是"资产", 只是一次请求的参数)。
+   * 新口径: 客户端只「领当前世」(GET /api/world/current) 或「求下一世」(POST /api/world/next);
+   *   服务端把每一世写进 db/zongmen.sqlite 的 World 表 ⇒ 刷新不掉世、重启不换界、多端同世界。
+   * ⚠ `?seed=` 保留为**调试覆盖** (verify/*.mjs 的定点验收全靠它, 不能删): 命中时按
+   *   "外部世界"处理 —— 不入账、不显示轮次, 弹窗里标成「URL 覆盖 (未入账)」。
+   * ============================================================ */
+  var worldRound = 0;          // 0 = 未入账 (URL 覆盖)
+  var worldSrc = '';
+  function worldFetch(url, method) {
+    return fetch(url, { method: method || 'GET', cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      });
+  }
+  /* 把世界事实落到 UI 三处: 弹窗的轮次/种子/来历 + 题名下那行小字 + 齿轮 tooltip */
+  function setWorldInfo(w) {
+    worldRound = (w && w.round) ? w.round : 0;
+    worldSrc = (w && w.src) ? w.src : ((w && w.kind) || '');
+    var seed = (w && w.seed) || '-';
+    var rEl = $('setRound'), sEl = $('setSeed'), srcEl = $('setSeedSrc'), eEl = $('eraRound');
+    if (rEl) rEl.textContent = worldRound ? ('第 ' + worldRound + ' 世') : '未入账';
+    if (sEl) sEl.textContent = seed;
+    if (srcEl) {
+      srcEl.textContent = worldSrc === 'url' ? 'URL 覆盖 (未入账)'
+        : ((w && w.persisted === false) ? '服务端 · 仅内存' : '服务端台账');
+    }
+    if (eEl) eEl.textContent = worldRound ? (' · 第 ' + worldRound + ' 世') : '';
+    var g = $('btnGear');
+    if (g) g.title = '设置 · 显示项 / 世界' + (worldRound ? ('（第 ' + worldRound + ' 世 · 种子 ' + seed + '）') : '');
+  }
+
   /* 地表让位开关 (headless A/B 用): noyield=1 → 不做「覆盖格抹平」, 同机位可
      逐像素对照「路/建筑处的树·山确实被抹掉了」。日常游玩不传。 */
   var NO_YIELD = new URLSearchParams(location.search).get('noyield') === '1';
@@ -69,19 +183,36 @@
      绿=聚落中心 st.x/y · 黄=聚落格 tileToWorld(q,r) · 青=锚点(默认中位建筑) ·
      橙点=每个建筑格 · 品红=灵脉格心 · 青点=灵脉峰尖(签子实际落点)。日常游玩不传。 */
   var PLAQ_DBG = new URLSearchParams(location.search).get('plaqdbg') === '1';
-  /* 聚落牌匾锚点规则的 A/B (headless 对拍用):
+  /* 聚落牌匾锚点规则的 A/B (headless 对拍用) —— **全部是历史档位**, 只留给对拍:
        ?ancgeo=1|box → 建筑包围盒中心 (初版)      ?ancgeo=col → 离聚落中心列最近 (一修)
        ?ancgeo=med   → 中位格 (二修)              ?ancgeo=sum → medoid (二修备选)
-       默认 (C-a 三修 2026-09-16)  = **最密格** (2R 邻域邻居最多, 平手取近截尾质心者)。
-     ⚠ 包围盒/列最近/medoid 都会被离群地皮(农田/码头)或偏心的选址格带偏,
-       见 BI.anchorOf 注释里的两种子实测对比表。 */
+       ?ancgeo=densest (或 `?ancgeo=` 空值) → 最密格 (三/四修, 2026-09-16 之前的默认)
+       **默认 (C-a 五修 2026-09-16) = 城市中心点** —— 直接读实体坐标 (st.x, st.y), 无求解器。
+     ⚠ 用户口径 (2026-09-16): 「要和当前的城市的中心点位置一样, 而不是什么所谓的平均值
+       或者什么参照物」。前四修全都在"用统计量去猜中心", 每一修都在给上一修的副作用打补丁
+       (合成点 → 列最近 → 中位格 → 最密格+平手参照物); 中心本来就是**给定的**, 不是估的。
+     ⚠ 为什么中心点就够: 引擎把**核心建筑** (祠堂/村口/宗祠/集市/官衙/祖师殿…) 恒定放在
+       聚落中心格 (mapgen.js growTownFootprint 的 `cell.d === 0` 那一支) ⇒ 中心格上永远
+       有一座真建筑 —— 它就是这聚落的中心, 也解释了"点悬在空地上"的原始病灶。
+       于是锚点对建筑清单 (含远处农田/码头等离群地物) **恒等免疫**: 它根本不读清单。 */
   var ANC_GEO = (function () {
-    var v = new URLSearchParams(location.search).get('ancgeo');
+    var q = new URLSearchParams(location.search);
+    if (!q.has('ancgeo')) return 'center';               // 缺省 = 城市中心点
+    var v = q.get('ancgeo');
     if (v === '1' || v === 'box') return 'box';
     if (v === 'col') return 'col';
     if (v === 'med') return 'med';
     if (v === 'sum') return 'sum';
-    return '';
+    if (v === '' || v === 'densest') return 'densest';
+    return 'center';
+  })();
+  /* 灵脉签落点口径 (同一次口径订正):
+       'center' (默认) = **灵山中心点** = 灵脉格心 (v.x, v.y) —— 地盘色环与灵脉花就画在这里;
+       'apex'          = C-c 二修旧行为 (跟精灵抖动 + 抬到看得见的峰尖), 只留给对拍。
+     ⚠ 两种档位下**签子本身的位置不变**: 签底一律抬到峰尖之上 (gap = topU*hexR*z),
+       区别只在**圆点/引线终点** —— 中心点档的引线因此要从签底一路连到峰体中心。 */
+  var VEIN_PT = (function () {
+    return new URLSearchParams(location.search).get('veinpt') === 'apex' ? 'apex' : 'center';
   })();
 
   /* ---------- 宗门录 (左上角水墨面板) ----------
@@ -741,6 +872,22 @@
     }
     return null;
   }
+  /* 灵脉签的五行淡染 (2026-09-16 用户: 「灵脉的牌匾要有对应的颜色, 稍微淡一点附在原来的
+     牌匾上面」)。
+     ★ 读法: 纸签本体**不动** (纸色 + 手撕边 + 双线内框 + 墨字全部保留), 五行色以「薄染」
+       叠在纸面之上 —— 「附在原来的牌匾上面」的字面实现。
+     ★ 「稍微淡一点」不是靠调低那一个 alpha 值, 而是**两道着色**:
+         · 先把本色向纸色提亮 (paperMix) —— 直接拿饱和的元素色低透叠上去会发脏 (纸变"污")，
+           提亮后是"染过的纸"而非"盖了块颜色";
+         · 再分上下两段渐变 (顶淡底浓), 让签子仍像一块有光照的纸。
+       签脚色条与描边则用**本色** (不提亮): 那才是"对应的颜色"的落款处, 远看第一眼认的就是它。 */
+  var VEIN_PAPER = [247, 239, 219];     // 签面纸色 (与 drawNameBanner 的 fillStyle 同源)
+  var VEIN_WASH_MIX = 0.40;             // 向纸色提亮的比例 (0=本色, 1=纯纸色)
+  var VEIN_WASH_A0 = 0.30, VEIN_WASH_A1 = 0.46;   // 签顶/签底的不透明度
+  function mixRGB(a, b, k) {            // k=0 → a, k=1 → b
+    return [a[0] + (b[0] - a[0]) * k | 0, a[1] + (b[1] - a[1]) * k | 0, a[2] + (b[2] - a[2]) * k | 0];
+  }
+
   function drawNameBanner(ctx, x, anchorY, text, opt) {
     opt = opt || {};
     var chars = String(text == null ? '' : text).split('');
@@ -792,22 +939,33 @@
     ctx.fillStyle = 'rgba(247,239,219,0.95)';
     ctx.fill();
     ctx.shadowColor = 'rgba(0,0,0,0)'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-    /* 灵脉签: 纸面薄敷一层灵根本色 (既分五行, 又不与聚落的白签混同) */
+    /* 灵脉签: 纸面薄敷一层灵根本色 —— 分两道, 见文件上方 VEIN_PAPER / VEIN_WASH_* 注释。
+       ① 提亮后的五行色整签渐变薄染 (附在纸签之上, 不换掉纸签本身);
+       ② 本色描边 (外框墨线染上本色) + 签脚本色色条 (落款处), 远看仍是一块纸牌。
+       ⚠ 两次 fill()/stroke() 复用同一个当前路径 (translate/rotate 之后建的), 中间不得
+         再 beginPath —— 否则染的就不是签面了。 */
     if (opt.tint) {
-      ctx.fillStyle = 'rgba(' + opt.tint[0] + ',' + opt.tint[1] + ',' + opt.tint[2] + ',0.17)';
+      var wRgb = mixRGB(opt.tint, VEIN_PAPER, VEIN_WASH_MIX);
+      var ws = 'rgba(' + wRgb[0] + ',' + wRgb[1] + ',' + wRgb[2] + ',';
+      var wash = ctx.createLinearGradient(0, -bh, 0, 0);
+      wash.addColorStop(0, ws + VEIN_WASH_A0 + ')');
+      wash.addColorStop(1, ws + VEIN_WASH_A1 + ')');
+      ctx.fillStyle = wash;
       ctx.fill();
     }
-    ctx.strokeStyle = 'rgba(72,58,40,0.60)';
+    var edge = opt.tint ? mixRGB(opt.tint, [72, 58, 40], 0.52) : null;
+    ctx.strokeStyle = edge ? 'rgba(' + edge[0] + ',' + edge[1] + ',' + edge[2] + ',0.66)'
+                           : 'rgba(72,58,40,0.60)';
     ctx.lineWidth = Math.max(1, fs * 0.085);
     ctx.stroke();
     /* 内框细线 (与面板同族的"双线画框") */
     ctx.strokeStyle = 'rgba(120,98,66,0.28)';
     ctx.lineWidth = Math.max(0.6, fs * 0.05);
     ctx.strokeRect(-bw * 0.5 + fs * 0.20, -bh + fs * 0.20, bw - fs * 0.40, bh - fs * 0.40);
-    /* 灵脉签脚: 一枚灵根色小印 */
+    /* 灵脉签脚: 一枚灵根色小印 (落款处用**本色**, 这是"对应的颜色"最实的一笔) */
     if (opt.tint) {
-      ctx.fillStyle = 'rgba(' + opt.tint[0] + ',' + opt.tint[1] + ',' + opt.tint[2] + ',0.82)';
-      ctx.fillRect(-bw * 0.5 + fs * 0.30, -fs * 0.56, bw - fs * 0.60, fs * 0.16);
+      ctx.fillStyle = 'rgba(' + opt.tint[0] + ',' + opt.tint[1] + ',' + opt.tint[2] + ',0.86)';
+      ctx.fillRect(-bw * 0.5 + fs * 0.30, -fs * 0.56, bw - fs * 0.60, fs * 0.18);
     }
     /* 竖排字 */
     ctx.fillStyle = opt.poi ? 'rgba(140,48,34,0.95)' : 'rgba(36,29,21,0.96)';
@@ -970,6 +1128,7 @@
      只在 DEBUG 下读取, 计数开销可忽略 (整数自增)。 */
   var statBridge = 0;              // 本帧压水建筑 → 画了几座栈桥
   var statBanner = 0;              // 本帧竖排匾额画了几块
+  var statVeinBanner = 0;          // 本帧灵脉签画了几块 (灵脉名可单独关后, 与聚落签分开验数)
   var statWaterQuads = 0;          // 上次重建道路时水上虚线段的四边形数
   /* 格 → 地类 (biome)。数据来自已加载区块; 未加载返回 -1 (探针自动放弃)。
      ⚠ 区块归属**不能**用 round(q/chunkS): 引擎 chunkOfTile 是「区块格心四候选
@@ -1236,6 +1395,17 @@
   /* 稀有「地标」建筑 (全图出现 <150): 缩远时若与常规建筑一起砍掉, 这几座等于白画
      —— 战略视图下正是要找它们。名单与 `tools/stats_buildings.mjs` 的稀有档一致。 */
   var RARE_KINDS = { '炼炉': 1, '官衙': 1, '焦炭窑': 1, '宗祠': 1, '祭坛': 1, '聚灵阵': 1, '灵枢殿': 1 };
+  /* A2 (2026-09-16 用户定案): 水面格**本就有对应画法**的 kind —— 见 drawBuildings。
+     这些 kind 压在水上时**不**改写成「栈桥」, 而是按本体画 + 走渔家皮肤。
+     名单 = 引擎「渔家」池 (民房/仓库/码头/渔船坞/渔亭) —— 即水面格现在真正会抽到的全集。
+     白名单外 (核心建筑/田地/矿场等) 压水时仍走「栈桥」兜底, 不改既有语义。 */
+  var WATER_KIND = { '民房': 1, '仓库': 1, '码头': 1, '渔船坞': 1, '渔亭': 1 };
+  /* A2 A/B 档位 (2026-09-16): `?water=old` 还原改前的旧口径 ——
+     「水面格一律改画『栈桥』, 且该格不画地盘环」。只为**同机位差分**取证用
+     (见 verify/check_fish_skin.mjs G11); 线上默认走新口径 (按本体 kind 画 + 渔家皮肤 + 恒画地盘环)。 */
+  var WATER_OLD = (function () {
+    try { return /[?&]water=old(&|$)/.test(location.search); } catch (e) { return false; }
+  })();
   /* ============================================================
    * R6b 「归属势力」(B · 2026-09-15)
    * ------------------------------------------------------------
@@ -1367,27 +1537,33 @@
     for (var k = 0; k < list.length; k++) {
       var it = list[k], b = it.b;
       var fi = solver.faceInfo(b, it.st);
-      /* 建筑压水 (本格是水) → 不画房子, 改画栈桥 —— 即「水变成桥」。
-         面向水的码头/渔船坞/渔亭本就自己画栈桥伸进水里, 不在此列 (它们在沙岸陆格上)。 */
+      /* 建筑压水 (本格是水)。
+         A2 (2026-09-16 用户定案): 旧口径不论 kind 一律改画「栈桥」 ⇒ 沿海聚落水上一排
+           光板桥 (用户: "还是跟桥梁一样")。现改为 —— 水面格**按本体 kind 画**,
+           因为引擎已把**任何聚落**的水面格判为『渔家』, 抽到的本就是该在水上的
+           民房/仓库/码头/渔船坞/渔亭; 再由 fishVillage 走渔家皮肤 (吊脚楼/渔获仓)。
+         「栈桥」降级为**白名单外** kind 的兜底 (核心建筑/田矿等本不该在水上);
+           渔村自身的既有语义 (isFish) 仍豁免, 不回归。 */
       var onWater = it.bio === 0 || it.bio === 1;
-      /* R5 (2026-09-15 十一版): 海上渔村的建筑**按原 kind 画** —— 它们本就为水上设计,
-         自带伸水栈桥; 「栈桥」只留作"陆地建筑被水淹"(非渔聚落的水上格)的兜底。 */
       var isFish = it.st.type === 'fishing';
-      var bridge = onWater && !isFish;
+      var bridge = onWater && !isFish && (WATER_OLD || !WATER_KIND[b.kind]);
       var rec = BI.spriteOf({
         kind: bridge ? '栈桥' : b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
         face: fi.face, water: fi.water, R: R, detail: detail,
         plate: false,                            // R6: 地盘改由城镇色**现画** (见下), 精灵内不再烘地皮色
         onWater: onWater,                        // R5b: 水上格 → 垫干栏木台 (水上人家)
-        fishVillage: isFish                      // A: 渔村 → 走 KINDS_FISH (吊脚楼/渔获仓)
+        fishVillage: WATER_OLD ? isFish : (isFish || onWater)   // A2: 水面格也走渔家皮肤
       });
       if (!rec) continue;
       if (bridge) statBridge++;                  // 验数: 本帧画了几座栈桥 (水→桥)
       /* R6 (2026-09-15 十一版): 城镇地盘 —— 逐格现画 (设备像素, 不进精灵缓存),
          颜色 = 所属城镇 (同镇同色、异镇异色、跨会话稳定)。灵脉格禁建 (R4) ⇒ 建筑格非灵脉格。
          R10 (2026-09-15 十一版): 地盘改**中空正六边形环** (半径带 0.80R~0.90R), 实心块作废;
-         海上渔村同走本函数 ⇒ 海上的地盘也一并变成空环。 */
-      if (!bridge) {
+         海上渔村同走本函数 ⇒ 海上的地盘也一并变成空环。
+         A2 (2026-09-16 用户定案): **水陆都要画** —— 旧口径 `if (!bridge)` 把水面格整段
+           跳过 ⇒ 水上建筑下面没有六边环 (用户: "下面没有正六边形的框框")。现无差别绘制。
+         `?water=old` 档位下恢复旧的 `if (!bridge)` 语义 (同机位 A/B 差分)。 */
+      if (!bridge || !WATER_OLD) {
         /* R6b (B): 归属记号 —— seal (环心印纹) / crest (环外刻痕) 都由**归属势力**派生,
            同宗处处一致。无归属的荒野聚落传 null/0 ⇒ 保持纯环 (不臆造记号)。
            水上聚落额外 water:true ⇒ 内外各补一道亮描边 (深水底上单环对比不足)。 */
@@ -1410,6 +1586,7 @@
   function renderStaticInto() {
     var cw = els.overlay.width, ch = els.overlay.height;
     statBanner = 0;                            // 验数: 本帧匾额计数归零
+    statVeinBanner = 0;                        // 验数: 灵脉签计数归零
     bannerBoxes.length = 0;                     // 签位占用表同步清空 (避让用)
     if (DEBUG) plaqDrawn = {};                  // 匾额落点记录同步归零 (只有 DEBUG 会读)
     if (!staticLayer) staticLayer = document.createElement('canvas');
@@ -1608,22 +1785,36 @@
     /* 建筑层 (地面实体 → 压在淡淡的区域名之上, 名牌/灵脉标之下) */
     drawBuildings(ctx, vw, vh, z);
 
-    /* 聚落建筑群的「挂牌锚点」(缓存) —— C-a (2026-09-15) / 二修 (2026-09-16):
-       落点**扎在一座真实建筑格上**, 且要是建筑群**正中**的那座 (BI.anchorOf 的
-       中位建筑 medoid) ——
-       ① 初版的「合成点」(中心格 x + 建筑格 y 的 p25) 通常落在村里空地上;
-       ② 初版改的「离聚落中心列最近的那座」点虽落在房子上, 但**选址格常偏心**
-          ⇒ 实测 seed42 归元宗挂在宗门北缘一座孤立小屋上, 离建筑簇质心 3.0R。
-       ⚠ 为什么不用包围盒中心/均值: 建筑清单含农田/码头等离群地皮, 二者都会被拉偏
-         (旧注释里的两次返工就是这个)。
-       `?ancgeo=box|col` 仍可退回这两套旧规则 (同机位 A/B 差分用)。
-       ⚠ 旧实现的隐患: 首次绘制时 st.buildings 可能还没到 ⇒ y0 = Infinity ⇒ 永久退化成
-         (st.x, st.y) 且**不再重算**。现在没建筑就**不落缓存**, 等建筑随区块到货再算。 */
+    /* 聚落名牌的「挂牌锚点」(缓存) —— C-a 五修 (2026-09-16):
+       ★ 默认落点 = **城市中心点** = 聚落中心格 (st.x, st.y)。**不经任何求解器**。
+         用户原话: 「要和当前的城市的中心点位置一样, 而不是什么所谓的平均值或者参照物」。
+       ★★ 为什么这就够 (离线跑引擎实测, seed42/777 共 90 座): 引擎把**核心建筑**
+         (祠堂/村口/宗祠/集市/官衙/祖师殿…) 恒定放在中心格 (`growTownFootprint` 的
+         `cell.d === 0` 那一支) ⇒ **中心格上永远有一座真建筑**。所以:
+           · 点恒落在真建筑上 (原始病灶"点悬在村里空地上"根除);
+           · 对建筑清单**恒等免疫** —— 远处农田/码头根本读都不读, 不需要平手决序/参照物。
+         ⚠ 前四修 (合成点 → 离中心列最近 → 中位格 → 最密格+平手参照物) 都是在"用统计量
+           去猜中心", 全部保留给 A/B 对拍: `?ancgeo=densest|box|col|med|sum`。
+       ⚠ `real` = 中心格上**确有一栋建筑** (正常恒真; 中心格落在灵脉/深海格时引擎会跳过
+         核心建筑, 此时点仍扎在中心点上, 只是签子少抬一点)。
+       ⚠ 清单未到货时**不落缓存** —— 否则 `real` 会永久停在 false, 签子少抬一档。 */
     function bldgAnchor(st) {
       if (!st._anc) {
-        var an = BI.anchorOf(st.buildings, geo.hexW, geo.hexR, st.x, ANC_GEO);
-        if (!an) return { x: st.x, y: st.y, real: false, y0: st.y };   // 不缓存: 建筑未到
-        st._anc = an;
+        if (ANC_GEO !== 'center') {
+          /* 历史档位 (只给 A/B 对拍): 交给 bldg_ink.js 的求解器 */
+          var an = BI.anchorOf(st.buildings, geo.hexW, geo.hexR, st.x, ANC_GEO);
+          if (!an) return { x: st.x, y: st.y, real: false, y0: st.y };
+          st._anc = an;
+          return st._anc;
+        }
+        /* 城市中心点: 位置直接取实体坐标 (中心格); `real` 只问"这一格上有没有建筑" */
+        var bl = st.buildings, on = false;
+        for (var bi = 0; bl && bi < bl.length; bi++) {
+          if (bl[bi].q === st.q && bl[bi].r === st.r) { on = true; break; }
+        }
+        var rec = { x: st.x, y: st.y, real: on, y0: st.y };
+        if (bl && bl.length) st._anc = rec;      // 清单未到 → 每帧重算 (real 可能还不对)
+        return rec;
       }
       return st._anc;
     }
@@ -1684,24 +1875,33 @@
     poiCells.forEach(drawEntityList);
 
     /* 灵脉名牌 —— 与聚落同款**竖排纸签** (2026-09-14 二改: 原为横排描边字)。
-       受「匾额」开关统一管 (注记只管区域名淡字); 签面薄敷灵根本色 + 签脚一枚色印,
-       一眼分得清金木水火土。签底立在脉峰之上: 峰高 ≈ 2.5 格半径 (PROP_VS 的
-       H≈3.5~4.7R 折中, 减去山脚 0.95R 与顶部留白)。
+       2026-09-16: 灵脉名独立成开关 (showVeinName) —— 签长 7 字且灵脉常就长在村边,
+       和聚落名挤在一起时用户需要能单独关一头 (旧口径两者同受「匾额」一个开关管)。
+       签面薄敷灵根本色 + 签脚一枚色印, 一眼分得清金木水火土 (见 drawNameBanner 的 wash)。
        ⚠ 画在聚落名牌**之后**: 签位占用表里先到者优先, 灵脉签长 (7 字), 撞上
          村名时让它往上让一档 —— 灵脉常就在聚落旁边, 不避让必叠。 */
-    if (showBanners && z >= 0.85) {
+    if (showVeinName && z >= 0.85) {
       for (var vl = 0; vl < veinLabels.length; vl++) {
         var vb = veinLabels[vl];
-        /* C-c 二修: 签子的 x 跟峰尖走 (格心 + 精灵抖动) —— 否则竖线落在峰的一侧。
-           抖动只在世界坐标上偏 jxU*hexR, 上屏仍是一根**竖直**引线 (签与点同 x)。 */
-        var ps3 = w2s(vb.x + (vb.jxU || 0) * geo.hexR, vb.y);
+        /* 落点口径 (2026-09-16 订正 —— 与聚落同一次口径):
+           ★ center (默认) = **灵山中心点** = 灵脉格心 (v.x, v.y)。地盘色环
+             (`hexPath(v.x,v.y)`) 与灵脉花 (`drawVeinFlower(v.x,v.y)`) 都画在这一格 ⇒
+             圆点与"看得见的灵脉本体中心"同点, 不再跟精灵的随机抖动/峰尖走。
+           · apex (旧 C-c 二修, `?veinpt=apex`) = 跟精灵横向抖动 jxU + 抬到看得见的峰尖。
+           ⚠ 两种档位下**签子位置逐像素相同** (签底一律抬到峰尖之上, 由 gap 承担);
+             区别只在**圆点/引线终点** —— 中心点档的引线因此从签底一路连到峰体中心。 */
+        var apex = (VEIN_PT === 'apex');
+        var ps3 = apex ? w2s(vb.x + (vb.jxU || 0) * geo.hexR, vb.y) : w2s(vb.x, vb.y);
         if (ps3.x < -90 || ps3.y < -40 || ps3.x > vw + 90 || ps3.y > vh + 140) continue;
         if (statBanner >= BANNER_MAX) break;
-        var peakTop = ps3.y - geo.hexR * z * vb.topU;
-        drawNameBanner(ctx, ps3.x, peakTop, vb.name, {
+        var lift = geo.hexR * z * (vb.topU || 0);      // 格心 → 峰尖 的上屏高度
+        var b0 = statBanner;                           // drawNameBanner 内部自增 statBanner:
+        drawNameBanner(ctx, ps3.x, apex ? ps3.y - lift : ps3.y, vb.name, {
           fs: (vb.level === 0 ? 11.5 : 10.5) * Math.max(z, 0.75), vh: vh, tint: vb.rgb,
-          avoid: true
+          avoid: true, gap: apex ? 0 : lift            // 中心点档: 点不动, 靠 gap 把签抬上峰
         });
+        /* 真画出来了才算 (撞位让不开时 drawNameBanner 直接 return, 不计入) */
+        if (statBanner > b0) statVeinBanner++;
       }
     }
 
@@ -2061,7 +2261,8 @@
     cam.tx = cam.x = 0;
     cam.ty = cam.y = 0;
     cam.tzoom = cam.zoom = 2.2;
-    els.seedInput.value = worldSeed;
+    /* ⚠ 这里不再回填任何"种子输入框" —— 手输种子的 UI 已删 (2026-09-16 用户:
+       「seed 由服务器统一产生, 不能通过前端产生」)。世界事实由 setWorldInfo 落 UI。 */
     seedEra(worldSeed);
     /* 世界重铸: 旧世界的宗门 id 全部失效 → 清掉选中宗门与点选标记 (九版无"随行"可回退,
        重铸后回到"未择"状态, 由玩家重新点选) */
@@ -2440,40 +2641,50 @@
     /* R11: 小地图自己的输入 (跟随/全屏拖动缩放/单击跳转) 全部在
        web/js/minimap-vein.js 内绑定 —— 这里不再代理它的鼠标事件。 */
 
+    /* ---- 设置弹窗 (齿轮) ----
+       ⚠ 复选框的 change 只往 store 里写: 渲染变量的更新、置脏、复选框回填全在
+         ZMStore.on → applySettings 这一条路上发生 (**单一数据流**)。别在这里
+         顺手再改 showX 变量 —— 那样两处写同一状态, 早晚有一处漏置脏。 */
+    $('btnGear').addEventListener('click', function (e) {
+      e.stopPropagation();
+      openSettings(!settingsOpen);
+    });
+    $('btnSetClose').addEventListener('click', function () { openSettings(false); });
+    $('settingsMask').addEventListener('click', function () { openSettings(false); });
+    var setIns = $('settingsBox').querySelectorAll('input[data-zm]');
+    for (var si = 0; si < setIns.length; si++) {
+      setIns[si].addEventListener('change', function () {
+        S.settings.set(this.getAttribute('data-zm'), this.checked);
+      });
+    }
+    /* Esc 关弹窗。⚠ 与"方向键平移"共用一个 keydown 监听不可行 (那个注册在 window 上且
+       只记 keys[e.key]), 这里单独挂一条, 不干扰相机键。 */
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && settingsOpen) openSettings(false);
+    });
+    window.addEventListener('mousedown', function (e) {
+      if (!settingsOpen) return;
+      if ($('settingsBox').contains(e.target) || $('btnGear').contains(e.target)) return;
+      openSettings(false);
+    });
+    /* 另启一世: 种子由服务端产生 (POST /api/world/next), 前端只负责"求"与"用"。
+       旧口径 `regenerate(String(Date.now() % 100000000))` 是前端自造种子 —— 已删。 */
     $('btnRegen').addEventListener('click', function () {
-      regenerate(String(Date.now() % 100000000));
-    });
-    $('btnSeed').addEventListener('click', function () {
-      var v = els.seedInput.value.trim();
-      if (v) regenerate(v);
-    });
-    els.seedInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') $('btnSeed').click();
-    });
-    $('btnVeins').addEventListener('click', function () {
-      showVeins = !showVeins;
-      this.classList.toggle('off', !showVeins);
-      /* ★ 开关只改数据不改相机, 而 staticNeedsRedraw 在相机静止时返回 false →
-         不置脏则静态层 (灵脉晕圈/七星花/名牌) 不会重绘, 要等下一次平移/缩放
-         才生效。这里必须立即置脏 (用户点击应即时反馈)。 */
-      forceStaticDirty();
-    });
-    $('btnLabels').addEventListener('click', function () {
-      showLabels = !showLabels;
-      this.classList.toggle('off', !showLabels);
-      forceStaticDirty();          // 同上: 区域名/聚落名/灵脉名牌都在静态层
-    });
-    /* 地名纸签 (山海经式竖排匾额) 开关 */
-    $('btnBanners').addEventListener('click', function () {
-      showBanners = !showBanners;
-      this.classList.toggle('off', !showBanners);
-      forceStaticDirty();
-    });
-    /* 云气层开关 */
-    $('btnClouds').addEventListener('click', function () {
-      showClouds = !showClouds;
-      this.classList.toggle('off', !showClouds);
-      forceStaticDirty();          // 顺带置脏: 静止降帧会吞掉"立刻消失"
+      if (this.disabled) return;
+      regenBusy(true);
+      setMsg('');
+      worldFetch('/api/world/next', 'POST').then(function (w) {
+        setWorldInfo(w);
+        regenerate(w.seed);
+        /* 世界重铸后弹窗**保持打开**: 用户要看见"现在是第几世、种子多少"这个反馈 */
+        setMsg('已开第 ' + w.round + ' 世 · 种子 ' + w.seed);
+        regenBusy(false);
+      }, function (err) {
+        /* 失败绝**不**回落前端造种子 —— 那正是本轮要根除的行为 (造出来的世界不在台账里,
+           刷新即丢, 服务端无从知晓)。只报错, 让用户重试或去查服务端是否在跑。 */
+        setMsg('开辟失败: ' + (err && err.message || err) + ' — 服务端未响应?');
+        regenBusy(false);
+      });
     });
     /* 择宗菜单: 按钮开合 / 选项落定 / 点空白处收起 (九版: 不再有「随行」项) */
     els.sectMenuBtn.addEventListener('click', function (e) {
@@ -2580,8 +2791,8 @@
       overlayCtx: $('overlay').getContext('2d'),
       glcanvas: $('glcanvas'),
       minimap: $('minimap'),
-      seedInput: $('seedInput'),
       era: $('era'),
+      eraRound: $('eraRound'),
       stats: $('stats'),
       info: $('info'),
       infoBody: $('infoBody'),
@@ -2606,16 +2817,38 @@
     renderer.noFade = new URLSearchParams(location.search).get('nofade') === '1';
     onResize();
 
-    MC.fetchMeta().then(function (m) {
+    MC.fetchMeta().then(async function (m) {
       metaReady = true;
       geo = MC.geo();
       renderer.hexR = geo.hexR;
       renderer.seaLevel = geo.seaLevel;
       console.log('[zongmen] meta 就绪 hexW=' + geo.hexW.toFixed(3) + ' chunkS=' + geo.chunkS);
 
+      /* ---- 世界种子: 服务端是唯一来源 (W · 2026-09-16) ----
+         ★ 旧口径是 `regenerate(urlSeed || String(Date.now() % 100000000))` —— 前端凭空
+           造一个种子当世界。现在改成"向服务端领当前世": 同一台服务器上所有人看到同一个
+           世界, 刷新页面不掉世, 服务端重启也不换界 (种子落在 db/zongmen.sqlite 的 World 表)。
+         ★ `?seed=` 仍是**调试覆盖**且优先级最高: verify/*.mjs 的定点验收 (seed=42 / 20260909…)
+           全靠它, 删了整条验证管线就废了。它按"外部世界"处理 —— 不入账、不显示轮次。 */
       var urlParams = new URLSearchParams(location.search);
       var urlSeed = urlParams.get('seed');
-      regenerate(urlSeed || String(Date.now() % 100000000));
+      var w;
+      if (urlSeed) {
+        w = { seed: urlSeed, round: 0, src: 'url' };
+      } else {
+        try {
+          w = await worldFetch('/api/world/current');
+          w.src = 'server';
+        } catch (err) {
+          /* 拿不到种子就**没有世界** —— 绝不回落到前端自造 (那会把"服务端不可用"这个
+             真问题伪装成"正常开局", 且造出的世界不在台账里)。 */
+          showFatal('未能从服务器取得世界种子: ' + ((err && err.message) || err) +
+            ' — 种子由服务端统一产生并存于 db/zongmen.sqlite, 请确认 Server/Zongmen 已启动');
+          return;
+        }
+      }
+      setWorldInfo(w);
+      regenerate(w.seed);
       /* S3: 引擎脚本到货后启用「地形块本地算」; 拿不到就静默走服务端下发 (老链路)。
          S4: 同时记下引擎指纹, WS 重连时重取 meta 校验 —— 页面长开期间服务端升级引擎,
              前端旧引擎算地形 + 后端新引擎发聚落/道路 = 坐标口径漂移 (建筑落海)。 */
@@ -2663,11 +2896,16 @@
         var wSel = MC.tileToWorld(selQ, selR);
         selMark = { q: selQ, r: selR, x: wSel.x, y: wSel.y };
       }
-      /* 开关初值落到按钮外观 (nobanner=1 / nocloud=1 时按钮显示为关闭态) */
-      if (!showBanners) $('btnBanners').classList.add('off');
-      if (!showClouds) $('btnClouds').classList.add('off');
+      /* 显示开关: 从 localStorage (ZMStore) 恢复上次会话的偏好, 并订阅其变化。
+         ⚠ 这是**唯一**驱动渲染变量的入口 (弹窗里的复选框只是往 store 写值) —— 故
+           一次 applySettings 就同时完成: 变量更新 + 复选框回填 + 静态层置脏。 */
+      applySettings();
+      S.settings.on(applySettings);
       bindInput();
       initMinimap();          // R11: 挂载独立小地图模块 (可热拔插, 见 minimap-vein.js)
+      /* 调试: ?set=1 开局即展开设置弹窗 (headless 无法点齿轮 —— 与 plaqdbg/sel 同类)。
+         仅 DEBUG 生效, 不进产品路径。 */
+      if (DEBUG && urlParams.get('set') === '1') openSettings(true);
 
       /* R10: 调试句柄仅 DEBUG 模式 (debug=1 / capture=1) 暴露 */
       if (DEBUG) {
@@ -2826,12 +3064,19 @@
           });
           return {
             bannersOn: showBanners, cloudsOn: showClouds,
+            nameSettleOn: showBanners, nameVeinOn: showVeinName, nameRegionOn: showLabels,
             showVeins: showVeins, bldgShown: bldgShown,
+            /* W (2026-09-16): 世界事实 + 设置载体 —— headless 判据要能分别读
+               「这局种子来自服务端还是 URL 覆盖」「第几世」「弹窗开着没」「store 里存了什么」。 */
+            worldRound: worldRound, worldSeed: worldSeed, worldSrc: worldSrc,
+            settingsOn: settingsOpen, settingsStore: S.settings.all(),
+            localStorageOk: S.persistent(),
             cloudVariants: cloudSprites ? cloudSprites.length : 0,
             propBlock: propBlock.size, blockedVer: blockedVer, syncedVer: syncedVer,
             propBuilt: propBuilt.size, cutChunks: cutChunks, propsRemoved: removed,
             propsTotal: props, keptVein: keptVein, keptMtn: keptMtn, keptOther: keptOther,
-            banners: statBanner, bridges: statBridge, waterQuads: statWaterQuads,
+            banners: statBanner, veinBanners: statVeinBanner,
+            bridges: statBridge, waterQuads: statWaterQuads,
             factionsOn: FAC_OK, settleVer: settleVer,
             /* 九版点选态: headless 用 Input.dispatchMouseEvent 点一下, 再读这两项
                即知「朱砂标记落在哪一格 / 宗门录选中的是哪一座」。无点击时为 null/''。 */
@@ -2938,9 +3183,15 @@
                  (中位/medoid/截尾/包围盒…), 不必为每个候选改一次前端。 */
               var blc = [];
               for (j = 0; j < bl.length && j < 80; j++) blc.push([bl[j].q, bl[j].r]);
+              /* 中心点口径的直接证据: 中心格 (st.q, st.r) 上到底有没有建筑 ——
+                 引擎把核心建筑放在那里, 所以正常应恒为 true (离线可用 bldgs 复算)。 */
+              var coreOn = false;
+              for (j = 0; j < bl.length; j++) {
+                if (bl[j].q === (st.q | 0) && bl[j].r === (st.r | 0)) { coreOn = true; break; }
+              }
               rows.push({
                 id: idk, name: st.name, type: st.type, q: st.q | 0, r: st.r | 0,
-                nb: bl.length, sx: +st.x.toFixed(2), bldgs: blc,
+                nb: bl.length, sx: +st.x.toFixed(2), bldgs: blc, coreOn: coreOn,
                 ax: an ? +an.q : null, ar: an ? +an.r : null, real: an ? !!an.real : false,
                 /* 四条候选规则到**同一个稳健参照系** (截尾质心) 的距离, R 倍数 ——
                    同一行读数就能比规则; 数值越小 = 越坐在村子正中间。 */
@@ -2952,7 +3203,10 @@
                 inPlan: planned,
                 solid: rec ? rec.solid : null, gap: rec ? +rec.gap.toFixed(1) : null,
                 dotX: rec ? +rec.aX.toFixed(1) : null, dotY: rec ? +rec.anchorY.toFixed(1) : null,
-                onScreen: rec ? rec.on : null
+                onScreen: rec ? rec.on : null,
+                /* 五修口径的实机读数: 中心点 (st.x, st.y) 的投影坐标 —— 默认档下
+                   dotX/dotY 应与 ctrX/ctrY **逐像素相等** (点就扎在中心点上)。 */
+                ctrX: +w2s(st.x, st.y).x.toFixed(1), ctrY: +w2s(st.x, st.y).y.toFixed(1)
               });
             }
           });
@@ -2975,6 +3229,7 @@
           }
           return { hexR: geo.hexR, hexW: geo.hexW, zoom: +cam.zoom.toFixed(3),
                    dpr: dpr, apexV: VS && VS.apexV ? +VS.apexV().toFixed(5) : null,
+                   anc: ANC_GEO, veinpt: VEIN_PT,
                    settles: rows, veins: vrows.slice(0, 200) };
         };
         /* ?plaqprobe=1: 走「页面自回传」通道把 __plaqProbe 的 JSON 落到

@@ -5,9 +5,9 @@
  * 用途: 把散在 verify/ 下的判据脚本按固定顺序跑一遍, 汇总「红 N / 共 M」, 避免每次手拼命令行。
  *
  * 用法:
- *   node verify/run_regression.mjs                     # 18 条离线 + 4 条需活服务端(对 127.0.0.1:8140)
+ *   node verify/run_regression.mjs                     # 19 条离线 + 5 条需活服务端(对 127.0.0.1:8140)
  *   node verify/run_regression.mjs --base=192.168.63.62:8140
- *   node verify/run_regression.mjs --offline-only      # 只跑不需要活服务端的 18 条
+ *   node verify/run_regression.mjs --offline-only      # 只跑不需要活服务端的 19 条
  *   node verify/run_regression.mjs --with-server       # 追加 verify_map/w1/w2/w4(建议对着隔离 8141 跑)
  *   node verify/run_regression.mjs --only=vein         # 只跑文件名含 "vein" 的
  *   node verify/run_regression.mjs --skip=w3,w5        # 跳过含这些片段的
@@ -17,6 +17,8 @@
  *   1. **别 kill 用户 8140 实例**。服务端判据一律只读; 要跑 `--with-server` 请先另起隔离实例:
  *        set Zongmen__Port=8141 & set Zongmen__DbPath=db/zongmen.verify.sqlite & dotnet run
  *      然后 `node verify/run_regression.mjs --base=127.0.0.1:8141 --with-server`。
+ *      ⚠ **例外: check_world_ledger 会真实开一世** (POST /api/world/next 落库) —— 它只该对着
+ *        隔离实例跑; 对着用户的 8140 跑一次就会把人家正在看的世界换掉。
  *   2. **HTTP 判据必须绕代理**: 本机 `HTTP_PROXY=http://127.0.0.1:9105` 会让内网请求 502。
  *      本 runner 统一清掉 *_PROXY 并置 NO_PROXY=* , 各脚本不必自己处理。
  *   3. `w3_bfs_road` 的 ⑦ 两条**墙钟**阈值是**机器绝对速度门槛**(默认 400/500ms), 慢机/拥塞时必红。
@@ -58,6 +60,9 @@ const LIST_ONLY = has('list');
  *   ⚠ frontend_smoke 既跑源码守卫也问服务端要 meta/tile ⇒ 归 live。 */
 const JOBS = [
   ['check_vein_skin.mjs', [], 'off'],
+  /* 全局存储组件 ZMStore (web/js/store.js) —— 真跑源码 (假 window + localStorage 桩):
+     默认值/白名单/幂等/订阅/坏 JSON/无 localStorage 降级/节流/通用分区 + 弹窗与 schema 键集合对齐. */
+  ['check_settings_store.mjs', [], 'off'],
   /* 匾额/名牌落点对齐 (C-a 聚落落点扎真建筑格 / C-c 灵脉签位=峰尖 / D 文案) ——
      纯离线: 裸 eval vein-skin.js + bldg_ink.js, 再对三份前端文件做"禁第二真源"源码守卫。 */
   ['check_plaque_align.mjs', [], 'off'],
@@ -83,6 +88,10 @@ const JOBS = [
   ['w3_bfs_road.mjs', W3_MS ? [String(W3_MS)] : [], 'off', '墙钟 ⑦ 慢机红 ⇒ 降级 warn'],
   ['w5_sprite_range.mjs', [], 'off'],
   ['w6_bldg_face.mjs', [], 'off'],
+  /* 世界种子台账 (W · 2026-09-16): 服务端产种子 + 落 SQLite。
+     ⚠ 它**会真实开一世** (POST /api/world/next) —— 只对隔离实例跑, 别对着用户的 8140。
+     放在 live 组最前: 后面那几个开浏览器/多 seed 的判据都要靠"领到种子"才能起页面。 */
+  ['check_world_ledger.mjs', [BASE_URL], 'live'],
   ['frontend_smoke.mjs', [BASE_URL], 'live'],
   /* 小地图面板响应式几何 (窄屏铺满窗体宽度): 起 headless Chrome 量 iframe 布局盒。
      无 Chrome 或服务端不通时自己 rc=2 跳过 —— 见脚本头部注释。 */

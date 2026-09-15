@@ -95,16 +95,54 @@
   }
   #titleBox h1 em { font-style: normal; color: var(--seal); }
   #titleBox .sub { margin-top: 2px; font-size: 12px; color: var(--ink-soft); letter-spacing: 2px; }
-  #controls { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-  /* flex-wrap: 开关多了以后, 窄窗口下按钮不会再被挤出面板 (挤出去就"看不见/点不到") */
-  #controls .row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; align-items: center; }
-  #seedInput {
-    width: 150px; padding: 4px 8px;
-    border: 1px solid var(--panel-border); border-radius: 2px;
-    background: rgba(255, 252, 244, 0.9); color: var(--ink);
-    font-family: inherit; font-size: 13px; outline: none;
+  #controls { padding: 6px; }
+  /* ---- 齿轮: 右上角只剩这一枚 (用户 2026-09-16: 「右上角改成一个齿轮, 点开后有弹窗」)。
+     旧口径是 7 个按钮/输入框平铺 (#seedInput/btnSeed/btnRegen/btnVeins/btnLabels/btnBanners/
+     btnClouds) —— 开关越加越挤, 且按钮外观就是状态 (刷新即丢)。现全部收进设置弹窗,
+     状态由 ZMStore 持久化 (web/js/store.js)。 */
+  #btnGear {
+    display: flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; padding: 0;
+    font-size: 19px; line-height: 1; letter-spacing: 0;
   }
-  #seedInput:focus { border-color: var(--seal); }
+  #btnGear.on { border-color: var(--seal); color: var(--seal); }
+
+  /* ---- 设置弹窗 (水面纸卷轴) ----
+     必须与 #topbar 内那枚齿轮**同级**放在 <body> 下: .panel 的 clip-path 会裁掉整棵子树,
+     而弹窗要浮在视口正中 (锚在按钮下会被裁 / 窄屏放不下)。 */
+  #settingsWrap {
+    position: fixed; inset: 0; z-index: 72;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #settingsWrap.hidden { display: none; }
+  #settingsMask { position: absolute; inset: 0; background: rgba(30,24,15,0.32); }
+  #settingsBox {
+    position: relative; width: 336px; max-width: calc(100vw - 28px);
+    max-height: calc(100vh - 44px); overflow-y: auto; padding: 12px 15px 14px;
+  }
+  .set-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .set-title { font-size: 14px; letter-spacing: 3px; color: var(--ink); }
+  #btnSetClose { padding: 1px 6px; font-size: 12px; letter-spacing: 0; border: none; background: none; color: var(--ink-soft); }
+  #btnSetClose:hover { color: var(--seal); }
+  .set-cap { margin: 2px 0 4px; font-size: 11.5px; letter-spacing: 4px; color: var(--ink-faint); }
+  .set-item {
+    display: flex; align-items: baseline; gap: 8px; padding: 3px 3px;
+    font-size: 13px; cursor: pointer;
+  }
+  .set-item:hover { background: rgba(166,58,44,0.07); }
+  .set-item input { margin: 0; transform: translateY(1px); accent-color: #a63a2c; }
+  .set-item .nm { flex: 0 0 auto; width: 58px; letter-spacing: 2px; color: var(--ink); }
+  .set-item .dsc { font-size: 11.5px; color: var(--ink-faint); }
+  .set-kv { display: flex; justify-content: space-between; gap: 10px; margin: 3px 0; font-size: 12.5px; }
+  .set-kv .k { color: var(--ink-soft); letter-spacing: 2px; }
+  .set-kv .v { color: var(--ink); }
+  .set-kv .v b { font-weight: 400; color: var(--seal); }
+  #btnRegen { display: block; width: 100%; margin-top: 7px; padding: 6px 0; letter-spacing: 4px; }
+  #btnRegen[disabled] { opacity: 0.45; cursor: default; border-color: var(--panel-border); color: var(--ink-soft); }
+  .set-note { margin-top: 7px; font-size: 11px; line-height: 1.75; color: var(--ink-faint); }
+  .set-note b { font-weight: 400; color: var(--ink-soft); }
+  .set-msg { margin-top: 4px; font-size: 12px; letter-spacing: 1px; color: var(--seal); }
+  .set-msg:empty { display: none; }
   button {
     padding: 4px 12px; cursor: pointer;
     border: 1px solid var(--panel-border); border-radius: 2px;
@@ -300,7 +338,7 @@
     <div id="hudLeft">
       <div id="titleBox" class="panel">
         <h1>宗门模拟器 <em>·</em> 山河图</h1>
-        <div class="sub"><span id="era">岁次甲辰 · 春</span></div>
+        <div class="sub"><span id="era">岁次甲辰 · 春</span><span id="eraRound"></span></div>
       </div>
       <div id="sectWrap">
         <div id="sectBox" class="panel">
@@ -315,24 +353,49 @@
       </div>
     </div>
     <div id="controls" class="panel">
-      <div class="row">
-        <input id="seedInput" placeholder="输入种子…" spellcheck="false">
-        <button id="btnSeed">山河重铸</button>
-        <button id="btnRegen" class="primary">另起一界</button>
-      </div>
-      <div class="row">
-        <button id="btnVeins">灵脉</button>
-        <button id="btnLabels">注记</button>
-        <button id="btnBanners">匾额</button>
-        <button id="btnClouds">云气</button>
-      </div>
-      <div class="row"><span id="stats">-</span></div>
+      <button id="btnGear" title="设置 · 显示项 / 世界" aria-label="设置">⚙</button>
     </div>
   </div>
 
   <div id="info" class="panel hidden">
     <h3><span>山川志</span><button id="infoClose">✕</button></h3>
     <div id="infoBody"></div>
+  </div>
+
+  <!-- 设置弹窗 (右上角齿轮) —— 与 #topbar 同级: 面板的 clip-path 会裁掉子树,
+       且弹窗要浮在视口正中 (锚在按钮下方会被裁 / 窄屏放不下)。 -->
+  <div id="settingsWrap" class="hidden">
+    <div id="settingsMask"></div>
+    <div id="settingsBox" class="panel" role="dialog" aria-modal="true" aria-label="山河图设置">
+      <div class="set-head">
+        <span class="set-title">山 河 图 · 设 置</span>
+        <button id="btnSetClose" title="关闭 (Esc)">✕</button>
+      </div>
+      <div class="ink-rule"></div>
+      <div class="set-cap">显 示</div>
+      <label class="set-item"><input type="checkbox" data-zm="veins">
+        <span class="nm">灵脉</span><span class="dsc">峰体 · 地盘色环 · 七星花</span></label>
+      <label class="set-item"><input type="checkbox" data-zm="nameSettle">
+        <span class="nm">聚落名</span><span class="dsc">城镇 / 宗门 / 景点纸签</span></label>
+      <label class="set-item"><input type="checkbox" data-zm="nameVein">
+        <span class="nm">灵脉名</span><span class="dsc">灵脉签 · 签面敷五行色</span></label>
+      <label class="set-item"><input type="checkbox" data-zm="nameRegion">
+        <span class="nm">区域名</span><span class="dsc">山川注记淡字</span></label>
+      <label class="set-item"><input type="checkbox" data-zm="clouds">
+        <span class="nm">云气</span><span class="dsc">云毯 · 地面云影</span></label>
+      <div class="ink-rule"></div>
+      <div class="set-cap">世 界</div>
+      <div class="set-kv"><span class="k">轮次</span><span class="v" id="setRound">-</span></div>
+      <div class="set-kv"><span class="k">种子</span><span class="v" id="setSeed">-</span></div>
+      <div class="set-kv"><span class="k">来历</span><span class="v" id="setSeedSrc">-</span></div>
+      <button id="btnRegen" class="primary">另 启 一 世</button>
+      <div class="set-note">种子由服务器统一产生, 落在 <b>db/zongmen.sqlite</b> 的 World 表 ——
+        刷新不掉世、多端同世界。URL 带 <b>?seed=</b> 时按调试口径覆盖 (不入账)。</div>
+      <div class="ink-rule"></div>
+      <div class="set-cap">山 河</div>
+      <div id="stats">-</div>
+      <div class="set-msg" id="setMsg"></div>
+    </div>
   </div>
 
   <div id="minimapBox" class="panel">
@@ -370,6 +433,9 @@
   <script src="js/pb.js"></script>
   <script src="js/mapclient.js"></script>
   <script src="js/noiselib.js"></script>
+  <!-- 全局存储组件 (localStorage 持久化的设置/分区读写) ——
+       必须在使用它的 main.js **之前**; 与引擎/小地图无依赖, 位置只受此约束。 -->
+  <script src="js/store.js"></script>
   <script src="js/vein-skin.js"></script>
   <script src="js/textures.js"></script>
   <script src="js/renderer.js"></script>
