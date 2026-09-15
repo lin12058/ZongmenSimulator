@@ -209,6 +209,26 @@ public static class WsFrame
     public const byte Tile = 2;
     public const byte Ping = 3;
     public const byte Pong = 3;
+    /* R11 (小地图灵脉化): 引擎脚本下发 —— 前端要按 seed 自行算地形, 需要
+       mapgen 三件套 (noise/mapgen-config/mapgen)。走 WS 而非新增静态挂载,
+       保证「单真源」: 浏览器拿到的永远是服务端当前 bundle, 不会与前端副本漂移。 */
+    public const byte Script = 4;
+}
+
+[ProtoContract]
+public sealed class ScriptRequest
+{
+    /// <summary>文件名 (仅白名单内有效); 空 = 要整包 (noise+mapgen-config+mapgen)。</summary>
+    [ProtoMember(1)] public string Name { get; set; } = "";
+}
+
+[ProtoContract]
+public sealed class ScriptPack
+{
+    /// <summary>包名 ("engine" = 整包, 否则单文件名)。</summary>
+    [ProtoMember(1)] public string Name { get; set; } = "";
+    /// <summary>gzip(UTF-8 js 源码)。空数组 = 未找到/被拒。</summary>
+    [ProtoMember(2)] public byte[] Source { get; set; } = [];
 }
 
 /// <summary>图层位掩码 (设计 §3.3)。mask=0 语义上等同 All。</summary>

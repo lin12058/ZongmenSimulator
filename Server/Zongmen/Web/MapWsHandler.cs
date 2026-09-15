@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Text;
 using Zongmen.Domain;
 using Zongmen.Protocol;
 using Zongmen.Services;
@@ -19,7 +20,12 @@ public static class MapWsHandler
 {
     private const int MaxFrameBytes = 1 * 1024 * 1024;   // 请求上限 (TileRequest 很小, 防御性)
 
-    public static void Map(WebApplication app, MapWorldService svc)
+    /* R11: 可下发的引擎脚本白名单 + 拼接次序 —— 必须与服务端 bundle 一致
+       (JsEngineHost: noise → mapgen-config → mapgen)。mapgen-server.js 是服务端
+       适配层 (落库/JSON 出口), 浏览器侧不需要, 故不下发。 */
+    private static readonly string[] EngineScriptOrder = ["noise.js", "mapgen-config.js", "mapgen.js"];
+
+    public static void Map(WebApplication app, MapWorldService svc, string engineJsDir)
     {
         app.MapGet("/ws/map", async (HttpContext ctx) =>
         {
@@ -56,6 +62,10 @@ public static class MapWsHandler
 
                         case WsFrame.Ping:
                             await SendFrameAsync(ws, WsFrame.Pong, null, ctx.RequestAborted);
+                            break;
+
+                        case WsFrame.Script:
+                            await HandleScriptAsync(ws, engineJsDir, recvBuf, count, ctx.RequestAborted);
                             break;
 
                         default:
@@ -166,6 +176,50 @@ public static class MapWsHandler
     {
         var resp = new TileResponse { I = i, J = j, Mask = mask, Seq = reqSeq, Err = err };
         return SendFrameAsync(ws, WsFrame.Tile, ProtoCodec.SerToByte(resp), ct, gzip: true);
+    }
+
+    /* ---- R11: 引擎脚本下发 ----
+       载荷 = ScriptPack{ Name, Source = gzip(js) }; 帧类型 4 自身不压缩 (源已是 gzip)。
+       白名单外/不存在 → 回空 Source (客户端据此降级为「未探测」占位, 不抛异常)。
+       Name 只做白名单匹配, 绝不用它拼路径 —— 杜绝目录穿越。 */
+    private static async Task HandleScriptAsync(
+        WebSocket ws, string jsDir, byte[] buf, int count, CancellationToken ct)
+    {
+        string want = "";
+        try
+        {
+            if (count > 1)
+                want = ProtoCodec.DesFromByte<ScriptRequest>(buf.AsSpan(1, count - 1).ToArray()).Name ?? "";
+        }
+        catch { /* 载荷损坏/为空: 按「要整包」处理 */ }
+
+        string[] files = want.Length == 0
+            ? EngineScriptOrder
+            : Array.FindAll(EngineScriptOrder, f => string.Equals(f, want, StringComparison.OrdinalIgnoreCase));
+        if (files.Length == 0)
+        {
+            await SendFrameAsync(ws, WsFrame.Script,
+                ProtoCodec.SerToByte(new ScriptPack { Name = "denied" }), ct);
+            return;
+        }
+
+        var sb = new StringBuilder();
+        foreach (var f in files)
+        {
+            var p = Path.Combine(jsDir, f);
+            if (!File.Exists(p))
+            {
+                Console.Error.WriteLine("[ws/map] ScriptRequest 缺少引擎脚本: " + p);
+                await SendFrameAsync(ws, WsFrame.Script,
+                    ProtoCodec.SerToByte(new ScriptPack { Name = "missing" }), ct);
+                return;
+            }
+            sb.AppendLine("/* ==== " + f + " ==== */");
+            sb.AppendLine(File.ReadAllText(p, Encoding.UTF8));
+        }
+        var src = Encoding.UTF8.GetBytes(sb.ToString());
+        var pack = new ScriptPack { Name = "engine", Source = GZipCodec.Compress(src) };
+        await SendFrameAsync(ws, WsFrame.Script, ProtoCodec.SerToByte(pack), ct);
     }
 
     /* ---- 帧收发 ---- */

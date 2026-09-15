@@ -5,7 +5,7 @@
  *
  *   注: chunk/region/comm 在 WebSocket 单块重构后已下线 HTTP 接口,
  *       其数据正确性由 verify_map.mjs (WS 链路) / w1_client_revs.mjs 覆盖;
- *       本脚本只负责「HTTP 辅助接口 (meta/tile/fields) + 几何公式」这一层。
+ *       本脚本只负责「HTTP 辅助接口 (meta/tile) + 几何公式 + 小地图新架构契约」这一层。
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -51,13 +51,6 @@ async function fetchTile(seed, q, r) {
   check(`tile(${q},${r}) 区域名非空`, typeof t.regionName === 'string' && t.regionName.length > 0,
     String(t.regionName));
   return t;
-}
-
-async function fetchFields(seed, q0, q1, r0, r1) {
-  const g = await MC.fieldGrid(seed, q0, q1, r0, r1);
-  check(`fields 网格大小`, g.nq === q1 - q0 + 1 && g.nr === r1 - r0 + 1, `${g.nq}x${g.nr}`);
-  check(`fields data 字节数`, g.data.length === g.nq * g.nr, String(g.data.length));
-  return g;
 }
 
 function checkGeometry() {
@@ -126,55 +119,179 @@ function checkStaticDirtyContract() {
   check('标注开关键均触发静态层重绘', bad2.length === 0, bad2.join(' '));
 }
 
-/* 小地图契约: /api/map/fields 的响应键必须是 { q0, r0, nq, nr, d } ——
-   客户端由 q0+nq-1 / r0+nr-1 推上界。**历史上这里出过真实 bug**: 客户端曾直接读
-   mmData.q1/mmData.r1 (服务端从未下发这两个键 → 恒 undefined) → 越界判断恒假
-   → 小地图自上线起一直是均匀兜底色 (#b9ad92) 的空框, 从未显示过地形。
-   本检查做两件事: ① 数据契约 —— 用真实 fields 响应复算一遍像素上色, 必须真的
-   画出多种地形色 (证明「服务端数据足以绘制 + 索引公式正确」);
-   ② 源码守卫 —— main.js 不得再引用不存在的 mmData.q1/r1。 */
+/* 小地图 (R11) 契约 —— 旧实现 (每 1.5s 轮询 HTTP /api/map/fields 采 132×88 字段网格)
+   已整体退役 (那正是「一直请求 → 撞请求速率」的根因)。新架构三层:
+     L1 地形: 前端按 seed 自算 (引擎脚本经 WS 下发 ScriptPack → 间接 eval → MapGen.fields)
+     L2 世界: 全部来自 WS (灵脉 comm.veins / 聚落 / 道路)
+     L3 视野: 默认档跟随主相机, 全屏档独立拖动缩放, 可整体隐藏 (停摆)
+   本检查 = 源码守卫 (零轮询 / 旧符号清除 / 模块接线) + 地形可画性复算。 */
 async function checkMinimap() {
-  const G = MC.geo();
-  const cam = { x: G.hexW * (-51 + 133 / 2), y: 1.5 * G.hexR * 133 };   // 与 shot.mjs 默认视野同参数
-  const W = 132, H = 88, SCALE = 6;
-  const x0 = cam.x - W / 2 * SCALE, y0 = cam.y - H / 2 * SCALE;
-  const x1 = cam.x + W / 2 * SCALE, y1 = cam.y + H / 2 * SCALE;
-  const a = MC.pxToTile(x0, y0), b = MC.pxToTile(x1, y1);
-  const c = MC.pxToTile(x0, y1), d = MC.pxToTile(x1, y0);
-  const q0 = Math.min(a.q, b.q, c.q, d.q), q1 = Math.max(a.q, b.q, c.q, d.q);
-  const r0 = Math.min(a.r, b.r, c.r, d.r), r1 = Math.max(a.r, b.r, c.r, d.r);
-  const g = await MC.fieldGrid('42', q0, q1, r0, r1);
-  check('fields 响应含 q0/r0/nq/nr/d (客户端上色所需)',
-    g.q0 === q0 && g.r0 === r0 && g.nq === q1 - q0 + 1 && g.nr === r1 - r0 + 1,
-    JSON.stringify({ q0: g.q0, r0: g.r0, nq: g.nq, nr: g.nr }));
-  check('fields 不含 q1/r1 (客户端须自行推上界)',
-    g.q1 === undefined && g.r1 === undefined, `q1=${g.q1} r1=${g.r1}`);
-
-  const hiQ = g.q0 + g.nq - 1, hiR = g.r0 + g.nr - 1;
-  const hist = new Map();
-  let outside = 0;
-  for (let py = 0; py < H; py++) {
-    for (let px = 0; px < W; px++) {
-      const t = MC.pxToTile(cam.x + (px - W / 2) * SCALE, cam.y + (py - H / 2) * SCALE);
-      let disp = -1;
-      if (t.q >= g.q0 && t.q <= hiQ && t.r >= g.r0 && t.r <= hiR) {
-        disp = g.data[(t.r - g.r0) * g.nq + (t.q - g.q0)];
-      }
-      if (disp < 0) outside++;
-      const col = disp < 0 ? '#b9ad92' : (G.biomeMeta[disp] || { color: '#b9ad92' }).color;
-      hist.set(col, (hist.get(col) || 0) + 1);
-    }
-  }
-  check(`小地图采样 0 落空 (实测 ${outside}/${W * H})`, outside === 0, `${outside} 像素落在窗口外`);
-  check(`小地图画出多种地形色 (实测 ${hist.size} 种)`, hist.size >= 3, `仅 ${hist.size} 种 → 疑似又退回空框`);
-
-  const src = fs.readFileSync(path.join(ROOT, 'web', 'js', 'main.js'), 'utf8');
-  /* 先剥注释再判断 — 否则「解释这个 bug」的注释本身会被误判为仍在引用 (不是 `"//"` 在 URL 里的场景: 前一字符为冒号则跳过) */
-  const code = src
+  const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+  /* 注释剥离: 文档性注释里出现旧符号名不算违规 (否则改不动注释) */
+  const strip = (src) => src
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/(^|[^:\w])\/\/[^\n]*/g, '$1');
-  check('main.js 不再引用不存在的 mmData.q1/r1 (源码守卫)',
-    !/mmData\.q1|mmData\.r1/.test(code), '仍在使用 mmData.q1/mmData.r1');
+
+  const mc = read('web/js/mapclient.js'), mcs = strip(mc);
+  check('mapclient 不再导出 fieldGrid (HTTP 字段网格退役)',
+    !/fieldGrid/.test(mcs), '仍存在 fieldGrid');
+  check('mapclient 不再出现 /api/map/fields 轮询',
+    !mcs.includes('/api/map/fields'), '仍引用 /api/map/fields');
+  check('mapclient 提供 requestScript (WS 下发引擎脚本)',
+    mcs.includes('requestScript') && mc.includes('requestScript: requestScript'));
+
+  const mm = read('web/js/minimap-vein.js');
+  const mainJs = strip(read('web/js/main.js'));
+  check('main.js 旧小地图实现已清除 (mmData/mmCam/requestMinimap/…)',
+    !/mmData|mmCam|requestMinimap|refreshMinimap|drawMinimap|syncMinimapSize|minimapWindowStale/.test(mainJs),
+    '仍残留旧符号');
+  /* 热拔插单点: 壳层只把 window.MiniMapVein 取出来注入四个口子 (panel/full/snapshot/jump),
+     不含任何小地图绘制逻辑 —— 换一个 minimap-*.js 即可整体替换。 */
+  const initAt = mainJs.indexOf('M.init({');
+  const initSeg = initAt < 0 ? '' : mainJs.slice(initAt, initAt + 420);
+  const injMiss = ['panel', 'full', 'snapshot', 'jump'].filter((k) => !initSeg.includes(k + ':'));
+  check('main.js 通过 MiniMapVein 单点注入 (panel/full/snapshot/jump)',
+    /var M = window\.MiniMapVein;/.test(mainJs) && initAt >= 0 && injMiss.length === 0,
+    initAt < 0 ? '未见 M.init({' : '缺 ' + injMiss.join(','));
+  check('main.js 暴露只读快照 (comms/settles/roads 取自 WS 层)',
+    /comms:\s*commCells/.test(mainJs) && /settles:\s*settleCells/.test(mainJs) &&
+    /roads:\s*regionCells/.test(mainJs));
+
+  /* 模块自足性: 三层 + 三态入口 + 探针都必须存在 (换模块时这些是接口契约) */
+  const need = ['MiniMapVein', 'setMaximized', 'setHidden', 'probe', 'requestScript']
+    .filter((k) => mm.indexOf(k) < 0);
+  check('minimap-vein.js 接口齐备 (init/setMaximized/setHidden/probe)',
+    need.length === 0, '缺少 ' + need.join(','));
+
+  const html = read('web/index.html');
+  check('index.html 挂载点齐备 + 全屏浮层与面板同级 (不被 .panel clip-path 裁)',
+    html.includes('id="minimapBox"') && html.includes('id="mmCanvasFull"') &&
+    html.includes('id="mmRestore"') && html.includes('js/minimap-vein.js"'));
+
+  const pbSrc = strip(read('web/js/pb.js'));
+  check('pb.js 有 SCRIPT 帧 + ScriptPack 编解码',
+    /FRAME\s*=\s*\{[^}]*SCRIPT:\s*4/.test(pbSrc) &&
+    pbSrc.includes('encodeScriptRequest') && pbSrc.includes('decodeScriptPack'));
+  const cs = read('Server/Zongmen/Domain/MapMessages.cs');
+  const ws = read('Server/Zongmen/Web/MapWsHandler.cs');
+  check('服务端帧类型 Script=4 与处理器齐备',
+    /Script = 4;/.test(cs) && ws.includes('HandleScriptAsync') &&
+    ws.includes('EngineScriptOrder'));
+
+  /* 地形复算: 用 Engine/js 原算法 (与前端同一份), 按模块真实的抽样规则复算。
+     ⚠ R12 起抽样格是「世界对齐」的 { q%m==0 && r%m==0 } (m 由 SAMPLE_CELLS_MAX 反推),
+       不是旧版「画布像素格投影进世界」—— 后者视图一动缓存全废 (实测平移 5 单位复用
+       仅 55%, 面板档→全屏档 11.5%), 且默认全屏档漏格 63%。本段把该契约钉死:
+         ① 抽样格落在 m 的整数倍上 (世界对齐);
+         ② 视图内每一格都被某个抽样格代表 (全覆盖 ⇒ 不再出现成片「未探测」);
+         ③ 视图微动后抽样格集合高度重合 (复用率; 旧实现在此只有 55% / 32%);
+         ④ 复算出的群系索引与色板正确。
+     ⚠ 本段是「按模块常量复刻规则」的代理检查 —— 改抽样规则必须同步本段。 */
+  const wpp = Number((mm.match(/FOLLOW_WPP\s*=\s*([\d.]+)/) || [])[1]) || 6;
+  const cellsMax = Number((mm.match(/SAMPLE_CELLS_MAX\s*=\s*(\d+)/) || [])[1]) || 24000;
+  const lvMax = Number((mm.match(/LEVEL_MAX\s*=\s*(\d+)/) || [])[1]) || 5;
+  const pad = Number((mm.match(/PADDING\s*=\s*([\d.]+)/) || [])[1]) || 0;
+  for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js']) {
+    (0, eval)(fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js', f), 'utf8'));
+  }
+  const MG = globalThis.MapGen;
+  MG.init('42');
+  const G = MC.geo();
+  const HRW = 1.5 * G.hexR;
+  /* 抽样层级 m: 与模块 levelFor 同式 —— 一个抽样格 ≈ 一个显示块 (step 像素 × wpp) */
+  const levelFor = (vw, vh, w) => {
+    const step = Math.max(2, Math.ceil(Math.sqrt((vw * vh) / cellsMax)));
+    const k = Math.ceil(Math.log2(Math.max(1e-6, (step * w) / G.hexW)));
+    return 1 << Math.min(lvMax, k > 0 ? k : 0);
+  };
+  /* 复刻 rebuildPending 的枚举 (只要格集合) */
+  const cellsOf = (vw, vh, cx, cy, w) => {
+    const m = levelFor(vw, vh, w);
+    const px = (vw * pad / 2) * w, py = (vh * pad / 2) * w;
+    const x0 = cx - (vw / 2) * w - px, x1 = cx + (vw / 2) * w + px;
+    const y0 = cy - (vh / 2) * w - py, y1 = cy + (vh / 2) * w + py;
+    const r0 = Math.floor(y0 / HRW) - 1, r1 = Math.ceil(y1 / HRW) + 1;
+    const q0 = Math.floor(x0 / G.hexW - r1 / 2) - 1, q1 = Math.ceil(x1 / G.hexW - r0 / 2) + 1;
+    const aq = Math.ceil(q0 / m) * m, ar = Math.ceil(r0 / m) * m;
+    const S = new Set();
+    for (let r = ar; r <= r1; r += m) for (let q = aq; q <= q1; q += m) S.add(q + ',' + r);
+    return { S, m };
+  };
+  const MW = 216, MH = 141;                            // 与 #minimap 的 CSS 尺寸同尺寸
+  const cam = { x: G.hexW * (-51 + 133 / 2), y: 1.5 * G.hexR * 133 };
+  const cell = cellsOf(MW, MH, cam.x, cam.y, wpp);
+  let misaligned = 0, bad = 0;
+  const hist = new Map();
+  for (const k of cell.S) {
+    const p = k.split(','), q = Number(p[0]), r = Number(p[1]);
+    if (q % cell.m !== 0 || r % cell.m !== 0) { misaligned++; continue; }
+    const fl = MG.fields(q, r);
+    const b = fl && typeof fl.biome === 'number' ? fl.biome : -1;
+    if (b < 0 || b > 7) { bad++; continue; }
+    const col = (G.biomeMeta[b] || {}).color || '?';
+    hist.set(col, (hist.get(col) || 0) + 1);
+  }
+  check(`抽样格全部落在 m=${cell.m} 的整数倍上 (世界对齐, 错位 ${misaligned})`,
+    misaligned === 0, String(misaligned));
+  check(`自算地形样本全部落在群系 0..7 (越界 ${bad})`, bad === 0, String(bad));
+  check(`前端自算地形画出多种地形色 (实测 ${hist.size} 种)`, hist.size >= 3,
+    `仅 ${hist.size} 种 → 抽样/上色公式可疑`);
+  /* 全覆盖: 视图内任取一格, 其所属抽样格必须已被枚举 ⇒ 渲染不会留成片「未探测」 */
+  let hole = 0, probe = 0;
+  for (let y = 0; y < MH; y += 3) {
+    for (let x = 0; x < MW; x += 3) {
+      const t = MC.pxToTile(cam.x + (x - MW / 2) * wpp, cam.y + (y - MH / 2) * wpp);
+      const k = (Math.floor(t.q / cell.m) * cell.m) + ',' + (Math.floor(t.r / cell.m) * cell.m);
+      probe++;
+      if (!cell.S.has(k)) hole++;
+    }
+  }
+  check(`视图内每格都有抽样格代表 (探针 ${probe} 点, 空洞 ${hole})`, hole === 0, `${hole} 空洞`);
+  /* 复用率: 视图微动后抽样格集合必须高度重合 —— 这是「平移/缩放不再打回未探测」的核心契约 */
+  const reuse = (c2) => { let n = 0; for (const k of cell.S) if (c2.S.has(k)) n++; return n / cell.S.size; };
+  const panR = reuse(cellsOf(MW, MH, cam.x + 6, cam.y, wpp));
+  const zoomR = reuse(cellsOf(MW, MH, cam.x, cam.y, wpp * 1.05));
+  check(`视图平移 6 世界单位后抽样格复用率 ${(panR * 100).toFixed(1)}% (要求 >=90%)`,
+    panR >= 0.90, `${(panR * 100).toFixed(1)}%`);
+  check(`视图缩放 5% 后抽样格复用率 ${(zoomR * 100).toFixed(1)}% (要求 >=90%)`,
+    zoomR >= 0.90, `${(zoomR * 100).toFixed(1)}%`);
+
+  /* ---------- R13: 面板档倍率 (与大地图恒定比例 / 持久化 / 可拖可缩) ----------
+     用户口径: 「左下角地图应该可以设置倍率, 放大后可以拉动, 保存和地图一直的大小比例」。
+     口径 = 面板上屏 wpp 由「基准 baseWpp」与主相机 zoom 反比推出 ⇒ 小图/大图的世界长度比
+     是常数, 主图缩放时小图同比例跟动。下面把该契约钉死 (改公式必须同步本段)。 */
+  const mmS = strip(mm);
+  /* 只看 curView 的函数体 (模块里 viewPanel 的初值可以合法地用 FOLLOW_WPP) */
+  const cvAt = mmS.indexOf('function curView');
+  const clAt = mmS.indexOf('function canvasLogical', cvAt);
+  const cvSeg = cvAt < 0 ? '' : mmS.slice(cvAt, clAt < 0 ? cvAt + 400 : clAt);
+  check('面板档 wpp 不再写死 (curView 走 panelWppNow, 由 zoom 反比推出)',
+    cvAt >= 0 && cvSeg.includes('panelWppNow()') && !/wpp:\s*FOLLOW_WPP/.test(cvSeg) &&
+    mmS.includes('baseWpp * DEFAULT_ZOOM / z'),
+    cvAt < 0 ? '未见 curView' : 'curView 仍写死 FOLLOW_WPP');
+  check('面板倍率持久化 (localStorage zongmen.mmView + load/save)',
+    /LS_KEY\s*=\s*'zongmen\.mmView'/.test(mmS) &&
+    mmS.includes('localStorage.setItem') && mmS.includes('localStorage.getItem'),
+    '缺持久化');
+  check('面板档可滚轮缩放 + 可拖动平移 (拖过阈值 ⇒ 自动转自由视角)',
+    /canvas\.addEventListener\('wheel'/.test(mmS) &&
+    /dragPanel\s*=\s*\{/.test(mmS) && /followCam = false/.test(mmS),
+    '缺面板档滚轮/拖动');
+  check('面板档 跟随↔自由 有归心出口 (拖出去必须能回来)',
+    /followCam = true/.test(mmS) && html.includes('data-mm="recenter"'), '缺归心');
+  check('全屏档倍率同样持久化 (fullWpp 入档)',
+    /fullWpp:/.test(mmS) && /viewFull\.wpp = clamp\(viewFull\.wpp \* f/.test(mmS));
+  /* 数值契约: 小图px/世界px ÷ 大图px/世界px = 1/(baseWpp × DEFAULT_ZOOM) —— 与 zoom 无关。
+     这是「保存和地图一直的大小比例」唯一可执行的口径 (两个不同 zoom 比值必须相等)。 */
+  const dZoom = Number((mm.replace(/\/\*[\s\S]*?\*\//g, ' ').match(/DEFAULT_ZOOM\s*=\s*([\d.]+)/) || [])[1]) || 2.2;
+  const pw = (z) => wpp * dZoom / z;          // wpp(此处=FOLLOW_WPP) 即默认 baseWpp
+  const ratio = (z) => (1 / pw(z)) / z;
+  const r1 = ratio(0.9), r2 = ratio(5.1);
+  check(`面板倍率与主相机缩放恒为常数比 (zoom 0.9→5.1 不变, 大图:小图 = ${(1 / r1).toFixed(2)}:1)`,
+    Math.abs(r1 - r2) / r1 < 1e-9, `比值漂移 ${r1} vs ${r2}`);
+  check('面板 wpp 覆盖主相机全档位 (0.7~6) 且不越界 [0.30, 48]',
+    [0.7, 2.2, 6].every((z) => pw(z) >= 0.30 && pw(z) <= 48),
+    [0.7, 2.2, 6].map((z) => z + '→' + pw(z).toFixed(2)).join(' '));
 }
 
 /* 色板契约: 五行/异灵根配色由 meta 单点下发 (elementRGB/variantRGB), 客户端优先读取
@@ -269,7 +386,6 @@ console.log(`\n== HTTP 辅助接口模拟前端 (seed=${seed}) ==`);
 await fetchTile(seed, 0, 0);
 await fetchTile(seed, 5, -3);
 await fetchTile(seed, -8, 7);
-await fetchFields(seed, -10, 10, -10, 10);
 
 /* HTTP tile 缓存头已改 no-cache (内容随 roadVer 变), 顺带断言不再给长缓存 */
 {

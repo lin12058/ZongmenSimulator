@@ -3,8 +3,8 @@
  *   图数据 (chunk/region/settle/poi/comm) 全部走 ws://…/ws/map:
  *   一个块一个 TileRequest, 响应为多图层子消息的 TileResponse
  *   (设计 §三), mask 全量拉取, rev 按块缓存实现增量失效 (§四)。
- *   HTTP 仅保留 meta / tile / fields (单格详情与字段网格)。
- *   前端不运行任何地图生成/噪声/寻路判定。
+ *   HTTP 仅保留 meta / tile (单格详情)。R11 起引擎脚本也走 WS 下发
+ *   (ScriptRequest/ScriptPack) —— 小地图按 seed 自算地形, 不再要后端字段网格。
  * ============================================================ */
 (function (g) {
   'use strict';
@@ -122,6 +122,7 @@
       s.onclose = function () {
         sock = null;
         failAllPending(new Error('WS 连接已断开'));
+        failScript(new Error('WS 连接已断开'));
         if (sockReadyRej) { sockReadyRej(new Error('WS 连接已断开')); sockReadyRej = null; }
         scheduleReconnect();
       };
@@ -195,6 +196,21 @@
       return;
     }
     if (type === PB.FRAME.PING) return;         // 服务器不应主动 ping; 忽略
+    if (type === PB.FRAME.SCRIPT) {             // R11: 引擎脚本下发 (载荷 = protobuf, Source 字段才是 gzip js)
+      var pack;
+      try { pack = PB.decodeScriptPack(payload); }
+      catch (e) { failScript(new Error('ScriptPack 解码失败: ' + e.message)); return; }
+      if (!pack.source || !pack.source.length) {
+        failScript(new Error('引擎脚本不可用 (name=' + (pack.name || '?') + ')'));
+        return;
+      }
+      gunzip(pack.source).then(function (buf) {
+        scriptPack = { name: pack.name, text: toText(new Uint8Array(buf)) };
+        var w = scriptWaiters; scriptWaiters = [];
+        for (var i = 0; i < w.length; i++) { clearTimeout(w[i].timer); w[i].resolve(scriptPack); }
+      }, function (err) { failScript(new Error('引擎脚本解压失败: ' + err.message)); });
+      return;
+    }
     if (type === PB.FRAME.TILE) {
       gunzip(payload).then(function (buf) {
         var resp;
@@ -246,6 +262,54 @@
   function failAllPending(err) {
     pending.forEach(function (p) { clearTimeout(p.timer); p.reject(err); });
     pending.clear();
+  }
+
+  /* ============================================================
+   * R11: 引擎脚本请求 (供小地图模块按 seed 自算地形)
+   *   —— 单真源: 脚本由服务端从 Engine/js 读原文件下发, 前端不保留副本,
+   *      引擎一改前端立刻跟着变 (历史坑: 内联/拷贝副本会与服务端漂移)。
+   *   整包只取一次; 失败只拒绝等待者, 不影响块请求链路。
+   * ============================================================ */
+  var scriptPack = null;           // {name, text} 已到货缓存
+  var scriptWaiters = [];          // [{resolve, reject, timer}]
+  var SCRIPT_TIMEOUT = 15000;
+
+  function toText(u8) {
+    if (typeof TextDecoder !== 'undefined') return new TextDecoder('utf-8').decode(u8);
+    var s = '';
+    for (var i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    return s;
+  }
+  function failScript(err) {
+    var w = scriptWaiters; scriptWaiters = [];
+    for (var i = 0; i < w.length; i++) { clearTimeout(w[i].timer); w[i].reject(err); }
+  }
+  function requestScript(name) {
+    if (scriptPack) return Promise.resolve(scriptPack);
+    return connect().then(function () {
+      return new Promise(function (resolve, reject) {
+        if (!sock || sock.readyState !== 1) { reject(new Error('WS 未就绪')); return; }
+        var body = PB.encodeScriptRequest({ name: name || '' });
+        var frame = new Uint8Array(1 + body.length);
+        frame[0] = PB.FRAME.SCRIPT;
+        frame.set(body, 1);
+        var w = {
+          resolve: resolve, reject: reject,
+          timer: setTimeout(function () {
+            var i = scriptWaiters.indexOf(w);
+            if (i >= 0) scriptWaiters.splice(i, 1);
+            reject(new Error('引擎脚本请求超时'));
+          }, SCRIPT_TIMEOUT)
+        };
+        scriptWaiters.push(w);
+        if (!wsSend(frame)) {
+          var j = scriptWaiters.indexOf(w);
+          if (j >= 0) scriptWaiters.splice(j, 1);
+          clearTimeout(w.timer);
+          reject(new Error('WS 发送失败'));
+        }
+      });
+    });
   }
 
   /* 请求一个块 (mask 全量; rev 增量)。主块坐标 = 区块格 (i,j) = (ca,cb)。 */
@@ -312,23 +376,8 @@
     });
   }
 
-  function fieldGrid(seed, q0, q1, r0, r1) {
-    return fetch(base + '/api/map/fields?seed=' + enc(seed) +
-      '&q0=' + q0 + '&q1=' + q1 + '&r0=' + r0 + '&r1=' + r1)
-      .then(function (r) { return r.json(); })
-      .then(function (m) {
-        m.data = new Uint8Array(base64ToBytes(m.d));
-        return m;
-      });
-  }
-  function base64ToBytes(b64) {
-    if (typeof atob === 'function') {
-      var bin = atob(b64), u = new Uint8Array(bin.length);
-      for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
-      return u;
-    }
-    return Uint8Array.from(Buffer.from(b64, 'base64'));
-  }
+  /* D8 (R11): fieldGrid 退役 —— 小地图改为「前端按 seed 自算地形 + WS 世界层」,
+     后端字段网格接口不再被前端调用 (保留服务端端点不影响, 只是没人再用)。 */
 
   g.MapClient = {
     fetchMeta: fetchMeta,
@@ -341,8 +390,9 @@
     blockForget: blockForget,
     blockForgetAll: blockForgetAll,
     reconnectDue: reconnectDue,
+    /* R11: 引擎脚本 (WS 下发, 前端按 seed 自算地形) */
+    requestScript: requestScript,
     /* HTTP 辅助接口 */
-    tile: tile,
-    fieldGrid: fieldGrid
+    tile: tile
   };
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));

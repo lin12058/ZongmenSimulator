@@ -3,8 +3,9 @@
  *  - 单块流式加载: 视野切块 → ws TileRequest → TileResponse 多图层
  *    子消息 (chunk/region/settle/poi/comm) 分发 (设计 §三)
  *  - 覆盖层: 道路/聚落/景点/区域/灵脉/浪线 全部基于后端下发数据绘制
- *  - 小地图字段采样 / 点击格详情: HTTP 后端即时计算
- *  - 前端不再执行任何地图生成/噪声/寻路判定
+ *  - 小地图: 独立模块 web/js/minimap-vein.js (R11) ——
+ *    地形按 seed 前端自算 (引擎脚本经 WS 下发), 世界层全走 WS, 零 HTTP 轮询
+ *  - 单格详情: HTTP 后端即时计算
  * ============================================================ */
 (function () {
   'use strict';
@@ -102,10 +103,11 @@
 
   var timeSec = 0, lastT = 0;
   var frameCount = 0;              // 渲染帧计数 (capture=1 截图须等「数据到达后至少渲染过一帧」)
-  var minimapDirty = true, minimapTimer = 0, mmDrawTimer = 0, mmBoxDirty = true;
-  var mmReq = null, mmData = null;      // 小地图网格请求/数据
-  var mmInFlight = false;               // 同窗口去重, 避免狂发同窗口请求
-  var mmCam = { x: NaN, y: NaN };       // 上次真正绘制小地图位图时的相机位置 (D3/D16)
+  /* R11: 小地图已拆成独立模块 (web/js/minimap-vein.js, 可热拔插)。
+     壳层只提供一个「数据版本号」: 任何图层变化都 +1, 模块据此决定世界层重绘 ——
+     旧实现 (mmData/mmInFlight/requestMinimap + 1.5s /api/map/fields 轮询) 已删。 */
+  var dataRev = 0;
+  function mmBump() { dataRev++; }
 
   /* ---------- 静态覆盖层缓存 ---------- */
   var staticLayer = null;
@@ -124,6 +126,7 @@
   /* 数据到达类脏标记(浪线/地名/道路补齐): 距上次重绘 <200ms 时延迟合并,
      已 ≥200ms 或 staticDirty 已挂起则立即置位由下一帧消费 */
   function markStaticDirty() {
+    mmBump();                          // R11: 图层数据变化 → 小地图世界层重绘
     if (staticDirty) return;
     var now = performance.now();
     if (now - lastStaticDraw >= 200 || lastStaticDraw === 0) { staticDirty = true; return; }
@@ -135,6 +138,7 @@
   }
   /* 卸载/重铸等必须尽快消除残影的置位: 不节流 */
   function forceStaticDirty() {
+    mmBump();                          // R11: 卸载/重铸 → 小地图同样要重绘
     if (staticSchedTimer) { clearTimeout(staticSchedTimer); staticSchedTimer = null; }
     staticDirty = true;
   }
@@ -341,7 +345,6 @@
       renderer.uploadChunk(job.key, arrays, bb);   // R7: bbox 供渲染粗剔除
       chunkData.set(job.key, { arrays: arrays, bbox: bb });
       refreshChunkProps(job.key);        // 新块: 立即按最新覆盖格过滤树·山 (让位)
-      minimapDirty = true;
       markStaticDirty();                   // R1: 连续 N 个块合并 200ms 重绘一次
     }
 
@@ -584,121 +587,47 @@
     ctx.restore();
   }
 
-  /* ---------- 小地图 (字段网格由后端采样) ---------- */
-  var mmBase = null;
-  function requestMinimap() {
-    var W = 132, H = 88, SCALE = 6;
-    var x0 = cam.x - W / 2 * SCALE, y0 = cam.y - H / 2 * SCALE;
-    var x1 = cam.x + W / 2 * SCALE, y1 = cam.y + H / 2 * SCALE;
-    var a = MC.pxToTile(x0, y0), b = MC.pxToTile(x1, y1);
-    var c = MC.pxToTile(x0, y1), d = MC.pxToTile(x1, y0);
-    var q0 = Math.min(a.q, b.q, c.q, d.q), q1 = Math.max(a.q, b.q, c.q, d.q);
-    var r0 = Math.min(a.r, b.r, c.r, d.r), r1 = Math.max(a.r, b.r, c.r, d.r);
-    var gen = worldSeed, req = { q0: q0, q1: q1, r0: r0, r1: r1, gen: gen };
-    mmInFlight = true;
-    MC.fieldGrid(gen, q0, q1, r0, r1).then(function (grid) {
-      if (req.gen !== worldSeed) return;
-      mmData = grid;
-      minimapDirty = true;             // 数据就绪, 下一帧绘制
-    }).catch(function (err) { console.error('小地图采样失败', err); })
-      .then(function () { mmInFlight = false; });
+  /* ============================================================
+   * R11: 小地图壳层接口 —— 只给「只读快照 + 主相机跳转」,
+   *   渲染/交互全在 web/js/minimap-vein.js (独立模块, 可热拔插:
+   *   换小地图只改这一个 init 调用, 不动 main.js 其它部分)。
+   *   旧实现 (HTTP /api/map/fields 轮询采样 132×88 网格) 已整体删除 ——
+   *   那正是「一直请求 → 撞请求速率」的根因 (D8/R11)。
+   * ============================================================ */
+  function mmSnapshot() {
+    return {
+      rev: dataRev,
+      seed: worldSeed,
+      cam: { x: cam.x, y: cam.y, zoom: cam.zoom },
+      vw: els.app ? (els.app.clientWidth || 0) : 0,
+      vh: els.app ? (els.app.clientHeight || 0) : 0,
+      hexW: geo ? geo.hexW : 0, hexR: geo ? geo.hexR : 0,
+      biomeMeta: geo ? geo.biomeMeta : null,
+      elementRGB: geo ? geo.elementRGB : null,
+      variantRGB: geo ? geo.variantRGB : null,
+      /* 世界层: 全部来自 WS 已到货的群落/聚落/道路。模块只读, 不得修改;
+         世界是动态的 ⇒ 前端绝不自算这些内容 (自算必然与服务端不一致)。 */
+      comms: commCells, settles: settleCells, roads: regionCells
+    };
   }
-  function refreshMinimap() {
-    var W = 132, H = 88, SCALE = 6;
-    if (!mmBase) mmBase = document.createElement('canvas');
-    mmBase.width = W; mmBase.height = H;
-    var ctx = mmBase.getContext('2d');
-    var img = ctx.createImageData(W, H);
-    var colCache = {};
-    /* ★ 服务端 /api/map/fields 的响应键是 { q0, r0, nq, nr, d } —— 没有 q1/r1。
-       此前这里直接读 mmData.q1/r1 (恒为 undefined), 于是 `t.q <= undefined` 恒假
-       → 每个像素都被判为「窗口外」→ 整幅小地图恒为兜底色 #b9ad92 的空框
-       (小地图自上线起就从未显示过地形)。上界必须由 q0+nq-1 / r0+nr-1 推出。 */
-    var mq1 = mmData ? mmData.q0 + mmData.nq - 1 : -1;
-    var mr1 = mmData ? mmData.r0 + mmData.nr - 1 : -1;
-    for (var py = 0; py < H; py++) {
-      for (var px = 0; px < W; px++) {
-        var wx = cam.x + (px - W / 2) * SCALE;
-        var wy = cam.y + (py - H / 2) * SCALE;
-        var t = MC.pxToTile(wx, wy);
-        var disp = -1;
-        if (mmData && t.q >= mmData.q0 && t.q <= mq1 && t.r >= mmData.r0 && t.r <= mr1) {
-          disp = mmData.data[(t.r - mmData.r0) * mmData.nq + (t.q - mmData.q0)];
-        }
-        /* D3: 色值预解析成 [r,g,b] —— 原实现每像素 3 次 parseInt(col.slice(...)),
-           单次刷新 132×88×3 ≈ 3.5 万次字符串切片 + 解析。 */
-        var rgb = colCache[disp];
-        if (!rgb) {
-          if (disp < 0) {
-            rgb = colCache[disp] = [185, 173, 146];          // 窗口外兜底色 #b9ad92
-          } else {
-            var col = (geo.biomeMeta[disp] || { color: '#b9ad92' }).color;
-            rgb = colCache[disp] = [parseInt(col.slice(1, 3), 16),
-                                    parseInt(col.slice(3, 5), 16),
-                                    parseInt(col.slice(5, 7), 16)];
-          }
-        }
-        var i = (py * W + px) * 4;
-        img.data[i] = rgb[0];
-        img.data[i + 1] = rgb[1];
-        img.data[i + 2] = rgb[2];
-        img.data[i + 3] = 255;
-      }
+  /* 小地图单击 → 主相机跳转 (全屏档用) */
+  function mmJump(x, y) {
+    cam.tx = x; cam.ty = y; cam.x = x; cam.y = y;
+    forceStaticDirty();
+  }
+  function initMinimap() {
+    var M = window.MiniMapVein;
+    if (!M || !M.init) {
+      console.warn('小地图模块未加载 (web/js/minimap-vein.js) — 已跳过');
+      return;
     }
-    ctx.putImageData(img, 0, 0);
-    mmCam.x = cam.x; mmCam.y = cam.y;      // 记录本次绘制所用相机 → mmCamMoved 判据
-    mmBoxDirty = true;                     // 位图变了 → 外层画布需重绘一次
+    M.init({
+      panel: document.getElementById('minimapBox'),
+      full: document.getElementById('mmFull'),
+      snapshot: mmSnapshot,
+      jump: mmJump
+    });
   }
-  /* D16: 小地图数据窗口是否已不覆盖当前相机窗口 (平移久了必须重采样, 否则大片兜底色) */
-  function minimapWindowStale() {
-    var W = 132, H = 88, SCALE = 6;
-    if (!mmData) return true;
-    var x0 = cam.x - W / 2 * SCALE, y0 = cam.y - H / 2 * SCALE;
-    var x1 = cam.x + W / 2 * SCALE, y1 = cam.y + H / 2 * SCALE;
-    var a = MC.pxToTile(x0, y0), b = MC.pxToTile(x1, y1);
-    var c = MC.pxToTile(x0, y1), d = MC.pxToTile(x1, y0);
-    var q0 = Math.min(a.q, b.q, c.q, d.q), q1 = Math.max(a.q, b.q, c.q, d.q);
-    var r0 = Math.min(a.r, b.r, c.r, d.r), r1 = Math.max(a.r, b.r, c.r, d.r);
-    return q0 < mmData.q0 || r0 < mmData.r0 ||
-           q1 > mmData.q0 + mmData.nq - 1 || r1 > mmData.r0 + mmData.nr - 1;
-  }
-  /* mmBase 是「以相机为中心」的窗口 ⇒ 相机没动、也没新数据时位图内容不变 */
-  function mmCamMoved() {
-    return !(Math.abs(cam.x - mmCam.x) <= 1.5 && Math.abs(cam.y - mmCam.y) <= 1.5);
-  }
-  /* D4: 小地图画布按 dpr 对齐 —— 原先 width/height 写死 432×282 (= CSS 216×141 × 固定 2),
-     在 dpr=1 屏幕上等于每次 blit 都做 2× 降采样, dpr=3 又糊。 */
-  function syncMinimapSize() {
-    var box = els.minimap;
-    if (!box) return;
-    var cw = box.clientWidth || 216, chh = box.clientHeight || 141;
-    var w = Math.max(1, Math.round(cw * dpr)), h = Math.max(1, Math.round(chh * dpr));
-    if (box.width !== w || box.height !== h) {
-      box.width = w; box.height = h;
-      mmBoxDirty = true;
-    }
-  }
-  /* D4: 外层小地图画布只在位图/尺寸变化时重绘 (原先每帧 blit + 描边 + 文字) */
-  function drawMinimap() {
-    if (!mmBoxDirty) return;
-    var box = els.minimap, bctx = box.getContext('2d');
-    var mw = box.width, mh = box.height;
-    mmBoxDirty = false;
-    bctx.imageSmoothingEnabled = false;
-    bctx.clearRect(0, 0, mw, mh);
-    if (!mmBase) return;
-    bctx.drawImage(mmBase, 0, 0, mw, mh);
-    /* 覆盖标记按画布比例缩放 (原写死 2 线宽 / 6×6 方块 / 10px 字, 换画布尺寸即失真) */
-    var k = mw / 132;
-    bctx.strokeStyle = 'rgba(166,58,44,0.95)';
-    bctx.lineWidth = Math.max(1, 2 * k);
-    bctx.strokeRect(mw / 2 - 3 * k, mh / 2 - 3 * k, 6 * k, 6 * k);
-    bctx.fillStyle = 'rgba(50,42,34,0.7)';
-    bctx.font = Math.round(10 * k) + 'px "KaiTi","STKaiti",serif';
-    bctx.textAlign = 'left';
-    bctx.fillText('方圆百里', 6 * k, mh - 6 * k);
-  }
-
   /* ---------- 标注层: 全部基于后端数据绘制 ---------- */
   function staticNeedsRedraw(vw, vh) {
     if (staticDirty) return true;
@@ -1723,7 +1652,6 @@
     chunkBusy.clear();                // 旧世界在途回调带 gen 守卫, 不会误删新世界标记
     roadsDirty = true;                // T7: 世界重铸 → 路网几何强制重建
     lastStream.x = NaN;               // P1: 重置流式增量状态 → 首帧强制全量重建
-    mmData = null;
     hoverTile = null;
     selectedTile = null;
     cam.tx = cam.x = 0;
@@ -1738,9 +1666,7 @@
     openSectMenu(false);
     updateSectPanel(true);
     hideInfo();
-    minimapDirty = true;
-    mmCam.x = NaN; mmCam.y = NaN; mmDrawTimer = 1;   // D3/D16: 新世界 → 小地图窗口与位图都要重做
-    forceStaticDirty();               // R1: 重铸需立即全量重绘 (清节流定时器)
+    forceStaticDirty();               // R1: 重铸需立即全量重绘 (清节流定时器) + 小地图 rev bump
   }
 
   function updateStats() {
@@ -2108,13 +2034,8 @@
       if (keys.ArrowDown || keys.s || keys.S) cam.ty += sp;
     }, 33);
 
-    els.minimap.addEventListener('mousedown', function (e) {
-      var rect = els.minimap.getBoundingClientRect();
-      var fx = (e.clientX - rect.left) / rect.width - 0.5;
-      var fy = (e.clientY - rect.top) / rect.height - 0.5;
-      cam.tx = cam.x + fx * 132 * 6;
-      cam.ty = cam.y + fy * 88 * 6;
-    });
+    /* R11: 小地图自己的输入 (跟随/全屏拖动缩放/单击跳转) 全部在
+       web/js/minimap-vein.js 内绑定 —— 这里不再代理它的鼠标事件。 */
 
     $('btnRegen').addEventListener('click', function () {
       regenerate(String(Date.now() % 100000000));
@@ -2190,7 +2111,6 @@
     els.overlay.height = Math.round(vh * dpr);
     els.overlay.style.width = vw + 'px';
     els.overlay.style.height = vh + 'px';
-    syncMinimapSize();          // D4: 小地图画布按 CSS 尺寸 × dpr 对齐
   }
 
   /* ---------- 主循环 ---------- */
@@ -2201,6 +2121,7 @@
      画面纹丝不动, 只有拖动 (drag 让跳帧条件不成立) 才"活一帧"再冻。
      这正是"滚轮有时没响应、只有拖屏幕才有反应"的根因。 */
   var tickCount = 0;
+  var statsTimer = 0;            // R11: 原 minimapTimer 同节拍改名 (小地图已独立) 
   function loop(t) {
     try {
       tickCount++;
@@ -2219,7 +2140,7 @@
          的功耗砍半。任何交互 (拖拽/滚轮/点击)、数据到达、脏标记都会立刻恢复满帧。 */
       var settled = Math.abs(cam.tx - cam.x) < 0.5 && Math.abs(cam.ty - cam.y) < 0.5 &&
                     Math.abs(cam.tzoom - cam.zoom) < 0.004;
-      if (settled && !staticDirty && !minimapDirty && !drag && chunkBusy.size === 0 &&
+      if (settled && !staticDirty && !drag && chunkBusy.size === 0 &&
           (tickCount & 1)) {
         requestAnimationFrame(loop);
         return;
@@ -2229,25 +2150,14 @@
       renderer.render(cam, timeSec);
       drawOverlay();
       frameCount++;
-      minimapTimer += dt;
-      mmDrawTimer += dt;
-      if (minimapTimer > 1.5) {
-        minimapTimer = 0;
+      /* R11: 小地图已完全交给独立模块 (自带 rAF + 节流), 主循环不再为它做任何事 ——
+         这里只剩「统计/宗门录」的 1.5s 节拍。 */
+      statsTimer += dt;
+      if (statsTimer > 1.5) {
+        statsTimer = 0;
         updateStats();
         updateSectPanel(false);     // 「距此」随相机移动, 与统计同节拍刷新
       }
-      /* D3/D16: 小地图不再 1.5s 无条件全量重建 (132×88 逐像素 + parseInt×3):
-         · 数据窗口只在「相机窗口越出已采样范围」时重采 —— 原先从不按相机重采,
-           长时间平移后位图大片落回兜底色;
-         · 位图只在「有新数据 或 相机真的移动了」时重绘, 相机静止即完全跳过。 */
-      if (!mmInFlight && ((minimapDirty && minimapTimer > 0.4) ||
-                          (minimapTimer === 0 && minimapWindowStale()))) requestMinimap();
-      if (mmData && mmDrawTimer > 0.4 && (minimapDirty || mmCamMoved())) {
-        mmDrawTimer = 0;
-        refreshMinimap();
-        minimapDirty = false;
-      }
-      drawMinimap();
     } catch (err) {
       showFatal('渲染循环异常: ' + err.message);
       throw err;
@@ -2320,12 +2230,152 @@
       if (!showBanners) $('btnBanners').classList.add('off');
       if (!showClouds) $('btnClouds').classList.add('off');
       bindInput();
+      initMinimap();          // R11: 挂载独立小地图模块 (可热拔插, 见 minimap-vein.js)
 
       /* R10: 调试句柄仅 DEBUG 模式 (debug=1 / capture=1) 暴露 */
       if (DEBUG) {
         window.__cam = cam;
         window.__renderer = renderer;
+        window.__mm = window.MiniMapVein;      // R11: 小地图探针 (截图/断言读事实)
         window.__data = function () { return { chunks: chunkData.size, regions: regionCells.size, comms: commCells.size }; };
+        /* R12 诊断: ?mmprobe=1 —— CDP Runtime.evaluate 对本页会永久挂起 (见 memory),
+           故沿用小地图自回传通道: 按时间点采 小地图探针 + 数据计数, 末尾一次性
+           POST 到 /api/debug/snap (服务端只落字节, 不校验 MIME) ⇒ 读 verify/capture.png
+           即得整条时间序列。仅显式传参生效, 不参与业务。 */
+        if (/[?&]mmprobe=1/.test(location.search) && window.__mm) {
+          var mmSamples = [];
+          var mmTake = function (tag) {
+            var p = { tag: tag, t: Math.round(performance.now()) };
+            try { p.mm = window.__mm.probe(); } catch (e) { p.err = String(e); }
+            try { p.data = window.__data(); } catch (e2) { /* noop */ }
+            mmSamples.push(p);
+          };
+          /* ?mmdrive=1: 脚本化交互 (headless 没法手拖) —— 在全屏画布上派发真实
+             wheel/mouse 事件, 走模块自己的处理器。用于验收「平移/缩放之后
+             是否还露出成片未探测」。仅显式传参生效。 */
+          var mmDrive = /[?&]mmdrive=1/.test(location.search);
+          /* R13 面板档 / 倍率持久化 的验收通道 (CDP 挂起、live_cap 每次新 profile ⇒
+             只能靠页面自己派事件 + 自己重载) */
+          var mmPanel = /[?&]mmdrive=panel/.test(location.search);
+          var mmReload = /[?&]mmreload=1/.test(location.search);
+          var mmPostAt = 14000;
+          var pcv = function () { return document.getElementById('minimap'); };
+          var mmWheelPanel = function (n) {
+            var cv = pcv(); if (!cv) return;
+            var rc = cv.getBoundingClientRect();
+            var d = n < 0 ? -100 : 100, k = Math.abs(n);   // ⚠ 负 n 不能直接进 for 条件 (空循环)
+            for (var i = 0; i < k; i++) cv.dispatchEvent(new WheelEvent('wheel', {
+              deltaY: d, clientX: rc.left + rc.width / 2, clientY: rc.top + rc.height / 2,
+              bubbles: true, cancelable: true
+            }));
+          };
+          var mmDragPanel = function (dx, dy) {
+            var cv = pcv(); if (!cv) return;
+            var rc = cv.getBoundingClientRect();
+            var x0 = rc.left + rc.width / 2, y0 = rc.top + rc.height / 2;
+            cv.dispatchEvent(new MouseEvent('mousedown', {
+              button: 0, clientX: x0, clientY: y0, bubbles: true, cancelable: true
+            }));
+            for (var s = 1; s <= 8; s++) {
+              window.dispatchEvent(new MouseEvent('mousemove', {
+                clientX: x0 + dx * s / 8, clientY: y0 + dy * s / 8, bubbles: true
+              }));
+            }
+            window.dispatchEvent(new MouseEvent('mouseup', {
+              button: 0, clientX: x0 + dx, clientY: y0, bubbles: true
+            }));
+          };
+          var mmRecenter = function () {
+            var b = document.querySelector('#minimapBox [data-mm="recenter"]');
+            if (b) b.click();
+          };
+          /* ?mmreload=1: 跨刷新「倍率是否真被记住」的端到端验收 —— 同一 profile 内:
+             阶段 A 滚轮改倍率 (触发 saveView) → 打标 → location.reload();
+             阶段 B (重载后) 采一支 probe 即 POST —— 此时 localStorage 已被 loadView 读回,
+             若 probe().baseWpp / savedRaw 与 A 阶段一致, 即「保存」成立。 */
+          if (mmReload) {
+            var mmPhase = 0;
+            try { mmPhase = Number(sessionStorage.getItem('mmrPhase') || 0); } catch (e) { mmPhase = 0; }
+            if (mmPhase === 0) {
+              setTimeout(function () { mmTake('reload-A-before'); }, 2500);
+              setTimeout(function () { mmWheelPanel(4); }, 3200);
+              setTimeout(function () { mmTake('reload-A-after'); }, 4600);
+              setTimeout(function () {
+                try { sessionStorage.setItem('mmrPhase', '1'); } catch (e2) { /* noop */ }
+                location.reload();
+              }, 5200);
+              mmPostAt = -1;                    // A 阶段不 POST (留待 B 阶段一次性回传)
+            } else {
+              setTimeout(function () { mmTake('reload-B-restored'); }, 6000);
+              /* 重载后通用采样 (1500/3000/5000/8000) 也会进 payload —— 单支 probe 太小,
+                 live_cap 的「>1KB」门槛会判成超时, 故留到 10.5s 一起回传。 */
+              mmPostAt = 10500;
+            }
+          }
+          /* ?mmdrive=panel: 在左下角小图上派真事件 —— 验「滚轮调倍率 / 拖动转自由视角 / 归心」 */
+          if (mmPanel && !mmReload) {
+            setTimeout(function () { mmTake('panel-before'); }, 9000);
+            setTimeout(function () { mmWheelPanel(4); }, 9400);
+            setTimeout(function () { mmTake('panel-zoomIn'); }, 10600);
+            setTimeout(function () { mmDragPanel(70, 50); }, 11000);
+            setTimeout(function () { mmTake('panel-pan+1.2s'); }, 12200);
+            setTimeout(function () { mmTake('panel-pan+4s'); }, 15000);
+            setTimeout(function () { mmRecenter(); }, 15400);
+            setTimeout(function () { mmTake('panel-recentered'); }, 16400);
+            setTimeout(function () { mmWheelPanel(-6); }, 17400);
+            setTimeout(function () { mmTake('panel-zoomOut+2s'); }, 19400);
+            mmPostAt = 21000;
+          }
+          if (mmDrive) {
+            var fcv = function () { return document.getElementById('mmCanvasFull'); };
+            var wheel = function (n) {
+              var cv = fcv(); if (!cv) return;
+              var rc = cv.getBoundingClientRect();
+              for (var i = 0; i < n; i++) {
+                cv.dispatchEvent(new WheelEvent('wheel', {
+                  deltaY: 100, clientX: rc.left + rc.width / 2, clientY: rc.top + rc.height / 2,
+                  bubbles: true, cancelable: true
+                }));
+              }
+            };
+            var dragTo = function (dx, dy) {
+              var cv = fcv(); if (!cv) return;
+              var rc = cv.getBoundingClientRect();
+              var x0 = rc.left + rc.width / 2, y0 = rc.top + rc.height / 2;
+              cv.dispatchEvent(new MouseEvent('mousedown', {
+                button: 0, clientX: x0, clientY: y0, bubbles: true, cancelable: true
+              }));
+              for (var s = 1; s <= 8; s++) {
+                window.dispatchEvent(new MouseEvent('mousemove', {
+                  clientX: x0 + dx * s / 8, clientY: y0 + dy * s / 8, bubbles: true
+                }));
+              }
+              window.dispatchEvent(new MouseEvent('mouseup', {
+                button: 0, clientX: x0 + dx, clientY: y0 + dy, bubbles: true
+              }));
+            };
+            setTimeout(function () { mmTake('pan-before'); }, 14000);
+            setTimeout(function () { dragTo(220, 120); }, 14300);
+            setTimeout(function () { mmTake('pan+0.3s'); }, 14600);
+            setTimeout(function () { mmTake('pan+1s'); }, 15300);
+            setTimeout(function () { mmTake('pan+3s'); }, 17300);
+            setTimeout(function () { mmTake('zoom-before'); }, 17700);
+            setTimeout(function () { wheel(6); }, 17900);
+            setTimeout(function () { mmTake('zoom+1s'); }, 18900);
+            setTimeout(function () { mmTake('zoom+5s'); }, 22900);
+            setTimeout(function () { wheel(-9); }, 23300);
+            setTimeout(function () { mmTake('zoomin+3s'); }, 26300);
+          }
+          [1500, 3000, 5000, 8000, 12000].forEach(function (ms) {
+            setTimeout(function () { mmTake(ms); }, ms);
+          });
+          if (mmDrive) mmPostAt = 27600;          // 全屏驱动序列比默认采样长
+          if (mmPostAt > 0) {
+            setTimeout(function () {
+              fetch('/api/debug/snap', { method: 'POST', body: JSON.stringify(mmSamples) }).catch(function () {});
+            }, mmPostAt);
+          }
+        }
         /* 表现升级验数: 一次性汇总, 供 headless 断言 (看图之外的"事实"证据) */
         window.__feat = function () {
           var cutChunks = 0, removed = 0, keptVein = 0, keptMtn = 0, keptOther = 0, props = 0;
@@ -2425,6 +2475,15 @@
             var ctx = canvas.getContext('2d');
             ctx.drawImage(els.glcanvas, 0, 0, canvas.width, canvas.height);
             ctx.drawImage(els.overlay, 0, 0, canvas.width, canvas.height);
+            /* R11: 小地图是 DOM 画布 (独立模块), 不在 gl/overlay 合成里 ——
+               截图验证必须显式把它按屏幕位置贴回来, 否则「图上有小地图」这件事
+               在 capture.png 上根本看不见 (探针会误判为没画)。 */
+            var mmCvs = document.querySelectorAll('#minimap, #mmCanvasFull');
+            for (var mi = 0; mi < mmCvs.length; mi++) {
+              var mEl = mmCvs[mi], mr = mEl.getBoundingClientRect();
+              if (mr.width < 2 || mr.height < 2) continue;
+              try { ctx.drawImage(mEl, mr.left, mr.top, mr.width, mr.height); } catch (e3) { /* 空画布 */ }
+            }
             canvas.toBlob(function (b) {
               if (!b) return;
               fetch('/api/debug/snap', { method: 'POST', body: b }).catch(console.error);

@@ -1,47 +1,23 @@
-# 大体积素材下载包 (OpenGameArt CC0 纸纹包 58MB)
-# 所需文件已解压至 assets/textures/paper.png, 此包无需入库
-assets/papertextures.zip
+# --- 运行时/构建产物 & 测试产物（勿入库） ---
 
-# 调试用的页面截图导出 (现行机制: URL 带 ?capture=1 → 页面合成后 POST /api/debug/snap)
-assets/snap_*.png
+# .NET 编译产物
+Server/**/bin/
+Server/**/obj/
 
-# 临时探针/诊断脚本 (并行会话工作文件, 不入库)
-.tmp_*
+# 运行时数据库与 WAL
+db/*.sqlite
+db/*.sqlite-shm
+db/*.sqlite-wal
 
-# 系统杂物
-Thumbs.db
-Desktop.ini
-
-# AI 本地工作目录（临时截图等不入库；会话记忆 memory/ 与项目 skill 例外，需入库留档）
-.workbuddy/*
-!.workbuddy/memory/
-!.workbuddy/memory/**
-!.workbuddy/skills/
-!.workbuddy/skills/**
-
-# ======== 运行时产物 (不入库) ========
-
-# SQLite 运行数据库 (世界数据 KV 表实时落盘, 21MB+)
-db/
-
-# verify 调试产物 (截图 / DOM dump / 日志), 保留验证脚本源文件
+# verify 测试截图/临时 HTML/日志（保留 *.mjs 脚本）
 verify/*.png
 verify/*.html
 verify/*.log
-verify/*.txt
+verify/live_*.png
+verify/.r13_*.bin
 
-# .NET 构建产物 (源码已入库, 二进制运行时重建生成)
-Server/Zongmen/bin/
-Server/Zongmen/obj/
-
-# 临时 A/B 对拍探针 / 引擎快照 (下划线前缀, 排查过程产物不入库)
-verify/_*.mjs
-verify/_head_mapgen.js
-verify/_old_mapgen.js
-verify/_eng_head/
-verify/_*.md
-verify/_*.json
-verify/_*/
-
-# 隔离 .NET 验证实例的运行时产物 (ClearScript/SQLite/protobuf DLL + native runtimes)
-verify/_vmsrv/
+# 常用编辑器 / 系统临时文件
+*.swp
+*.tmp
+.DS_Store
+Thumbs.db

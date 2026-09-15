@@ -338,7 +338,7 @@
    *   服务端契约: Server/Zongmen/Domain/MapMessages.cs (WsFrame 起始)。
    * ============================================================ */
 
-  var FRAME = { LOGIN: 1, TILE: 2, PING: 3 };
+  var FRAME = { LOGIN: 1, TILE: 2, PING: 3, SCRIPT: 4 };
   var MASK = { CHUNK: 1, REGION: 2, SETTLE: 4, POI: 8, COMM: 16, ALL: 31 };
 
   /* ---------------- 微型编码器 (仅覆盖本协议所需) ---------------- */
@@ -382,6 +382,26 @@
     if (o.account) wstr(w, 1, o.account);
     if (o.token) wstr(w, 2, o.token);
     return w.done();
+  }
+
+  /* ---------------- ScriptPack (R11: 引擎脚本下发) ----------------
+     C→S: ScriptRequest{ 1 name } (空 = 要整包)
+     S→C: ScriptPack{ 1 name, 2 source=gzip(js) } */
+  function encodeScriptRequest(o) {
+    var w = new Writer();
+    if (o && o.name) wstr(w, 1, o.name);
+    return w.done();
+  }
+  function decodeScriptPack(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { name: '', source: new Uint8Array(0) };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.name = rdStr(r, t);
+      else if (t.field === 2) m.source = r.bin(r.vi()).slice();
+      else r.skip(t.wire);
+    }
+    return m;
   }
 
   function decodeLoginResponse(buf) {
@@ -574,6 +594,8 @@
     MASK: MASK,
     encodeTileRequest: encodeTileRequest,
     encodeLogin: encodeLogin,
+    encodeScriptRequest: encodeScriptRequest,
+    decodeScriptPack: decodeScriptPack,
     decodeLoginResponse: decodeLoginResponse,
     decodeTileResponse: decodeTileResponse
   };

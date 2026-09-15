@@ -36,7 +36,10 @@ app.UseMiddleware<StaticWebMiddleware>(webDir);
 app.UseMiddleware<ApiRateLimitMiddleware>();   // R6: per-IP 限流, 保护 tile/fields 即时计算不被钉死
 app.UseWebSockets();                           // WebSocket 单块接口 (设计 §三/§五)
 MapEndpoints.Map(app, app.Services.GetRequiredService<MapWorldService>());
-MapWsHandler.Map(app, app.Services.GetRequiredService<MapWorldService>());
+/* R11: 引擎脚本目录一并交给 WS 处理器 —— 前端按 seed 自算地形需要
+   noise/mapgen-config/mapgen 三件套, 由 WS 下发 (单真源, 见 MapWsHandler.HandleScriptAsync)。 */
+MapWsHandler.Map(app, app.Services.GetRequiredService<MapWorldService>(),
+    ZongmenPaths.ResolveEngineJsDir(options, contentRoot));
 MapEndpoints.MapDebug(app, Path.Combine(ZongmenPaths.FindRoot(contentRoot), "verify", "capture.png"));
 
 app.Lifetime.ApplicationStarted.Register(() =>

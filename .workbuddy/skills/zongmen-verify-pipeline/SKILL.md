@@ -35,7 +35,7 @@ node verify/w2_concurrency.mjs    # 新 seed 冷启 24 路并发 + liveSeeds 有
 node verify/w3_bfs_road.mjs       # 道路 BFS 契约: 权重表 / 双预算上界 / 权重累加自洽 / 邻域剪枝全量 null / 下界剪枝不改路径 / 确定性(重复+跨实例) / 建路率+耗时 (离线, 不需起服务)
 node verify/w4_revs_at_scale.mjs  # revs 契约 + 毒块恢复 (纯 Node 120 块, 替代跑不动的 CDP 竞态回归)
 node verify/w5_sprite_range.mjs   # 立体精灵索引契约 (与图集/着色器分段一致, 离线)
-node verify/frontend_smoke.mjs    # meta 常量 + HTTP tile/fields + 几何往返 ±1000 格 + DOM id/静态置脏/小地图/色板 契约
+node verify/frontend_smoke.mjs    # meta 常量 + HTTP meta/tile + 几何往返 ±1000 格 + DOM id/静态置脏/小地图(R12)/色板 契约
 node verify/scan_poison.mjs       # 广域抓毒块 (1681 块 bad=0); 例: node ... 42 '[-20,20,-20,20]'
 node --check web/js/*.js          # 前端语法
 ```
@@ -47,8 +47,11 @@ node --check web/js/*.js          # 前端语法
   - **DOM id 契约**：JS 里 `$('x')`/`getElementById('x')` 引用的 id 必须在 `index.html` 定义；
   - **静态层置脏契约**：`showVeins`/`showLabels` 的运行时改写、以及每个 `classList.toggle('off')`
     开关，都必须伴随 `forceStaticDirty()`/`markStaticDirty()`（否则相机静止时点了没反应 —— N12 的真实 bug）；
-  - **小地图契约**：`/api/map/fields` 只下发 `{q0,r0,nq,nr,d}`，客户端必须由 `q0+nq-1`/`r0+nr-1` 推上界
-    （曾直接读 `mmData.q1/r1` → 恒 undefined → 小地图自上线起一直是空框 —— N11）；
+  - **小地图契约（R12 起已换口径）**：旧实现每 1.5s 轮询 HTTP `/api/map/fields`（132×88 后端采样）
+    直接撞请求速率上限 ⇒ **整体退役**，`mapclient.fieldGrid` 已删，前端零 HTTP。现检查 = 源码守卫
+    （不得出现 `/api/map/fields`、不得残留旧符号 `mmData/mmCam/requestMinimap…`、`main.js` 只经
+    `MiniMapVein` 单点注入）+ 用 `Engine/js` 复算「前端自算地形」抽样上色（0 越界 + ≥3 种地貌色）。
+    历史 N11「客户端读 `mmData.q1/r1` 恒 undefined ⇒ 小地图自上线起一直是空框」的教训保留在 §9；
   - **色板契约**：五行/异灵根配色由 `metaJson` 的 `elementRGB`/`variantRGB` 单点下发，
     断言与 `Engine/js/mapgen.js` 的 `ELEMENT_RGB`/`VARIANT_RGB` 逐值相同，并守卫 `main.js`
     优先读 `geo.elementRGB`/`geo.variantRGB`。**改色板只改 `mapgen.js` 一处。**
@@ -108,11 +111,12 @@ node verify/shot.mjs "http://127.0.0.1:8140/index.html?seed=42&nofade=1&qt=-51&r
   - 它还会单独识别**「中途帧」**（`mean < 70` = 背景大片未加载的偏黑画面）并同样重试 ——
     仅靠「颜色数 <300」会把中途帧误判为渲染成功（实测曾漏过一帧 `mean=34 / 646 色`）。
 - ⚠️ **headless 验不了「按时间门控」的 UI**（N11 排查中的关键教训）：虚拟时钟下 rAF 帧数极少，
-  实测 `frameCount = 5`、`minimapTimer = 0.10` —— 任何「累积 0.4s 才刷新」的逻辑（如小地图门控）
+  实测 `frameCount = 5`（当时读出的 `minimapTimer` 变量已随 R12 删除旧小地图一并消失，仅作历史证据）—— 任何「累积 0.4s 才刷新」的逻辑（如小地图门控）
   **永远到不了**，于是截图里那部分恒空。**这是 headless 伪影，不是线上 bug**（真实浏览器 60fps 下约 0.4s 即出现）。
   遇到这类「截图里某块恒空/恒不变」时，**先怀疑帧饥饿，不要直接当代码 bug 改**。三条可靠验法（按可靠性排序）：
-  1. **纯 Node 复现同一算法**（首选）：见 `frontend_smoke.mjs` 的「小地图契约」段 —— 直接驱动真实
-     `MapClient` + 真实服务端跑一遍像素上色，断言「0 落空 + ≥3 种地形色」；
+  1. **纯 Node 复现同一算法**（首选）：见 `frontend_smoke.mjs` 的「小地图契约」段 —— 加载 `Engine/js`
+     原算法逐格 `MapGen.fields()` 抽样上色，断言「0 越界 + ≥3 种地貌色」（R12 后数据源由「HTTP 字段网格」
+     换成「前端自算」，断言意图不变）；
   2. **真实浏览器 A/B**：临时把时间门控改成首帧触发，截图对比修复前/后（本次即用此法确证：
      bug 版框内是整片兜底色 `#b9ad92`，修复版是真实地形缩略图），**验完立即还原**；
   3. **临时在 canvas 上绘制诊断文字**再截图读取（本次用它读出 `frameCount=5`，一锤定音）。
@@ -350,3 +354,98 @@ tasklist | grep -i zongmen || echo "无进程"
 - **做「改前/改后」对照图的正确姿势**：临时把 `SEL_K` 改成 1 → 同一 URL 截一张 → 改回 `1/3` → 再截一张
   （Chrome 每次加载都重读磁盘 js，**不需要重启服务端**）。
   ⚠ 改回后**必须 grep `var SEL_K` 复核**，别把对照值留在生产代码里。
+
+## 16. 小地图灵脉化：独立模块 + 全 WS 数据（2026-09-15 十三版 R12）
+
+> 触发：用户「右下角小地图**一直请求**导致到了请求速率上限」。根因 = 旧小地图每 1.5s 轮询
+> HTTP `/api/map/fields`（132×88 后端采样，`main.js requestMinimap` → `MC.fieldGrid`），撞
+> `ApiRateLimitMiddleware`。要求：融合 `灵脉预览.html` 风格重做、可最大化、**独立文件热拔插**、数据走 WS。
+
+### 16.1 交付物与热拔插点
+- 新模块 `web/js/minimap-vein.js`（独立 IIFE → `global.MiniMapVein`，约 680 行）。
+- **唯一接线点** = `main.js initMinimap()`：`var M = window.MiniMapVein;` → `M.init({panel, full, snapshot, jump})`。
+  换小地图 = 换这一个文件 + `index.html` 一行 `<script>`，壳层零改动。
+- ⚠⚠ **`main.js` 是 `(function () {`，没有 `g` 形参**（`mapclient.js` 是 `(function(g){`）。写 `g.MiniMapVein`
+  会 `g is not defined` → 整页 fatal「后端世界服务不可用」。**必须写 `window.MiniMapVein`**（本版踩过，
+  现象是 `--dump-dom` 里 fatal 文本 + canvas 不挂载）。
+
+### 16.2 三层数据口径（改小地图必守）
+| 层 | 数据源 | 铁律 |
+|----|--------|------|
+| L1 地形 | **前端按 seed 自算**：`MapGen.fields(q,r).biome/.e` → 位图 | ⚠ **绝不读 `onRoad`**（道路语义依赖引擎 `roadCache` 冷热，见 `mapgen.js`）；色板取 `geo.biomeMeta[i].color` |
+| L2 世界 | **全部来自 WS 快照**：`commCells` / `settleCells` / `regionCells` | 世界是动态的 ⇒ 前端**绝不自算**灵脉/聚落/道路（自算必与服务端不一致） |
+| L3 视野 | 默认档跟随主相机（`FOLLOW_WPP=6`，不可拖）；全屏档独立相机 | 全屏浮层/tooltip 必须与 `.panel` **同级兄弟**（面板 `clip-path` 会裁整棵子树） |
+
+### 16.3 引擎脚本经 WS 下发（D3）
+- 协议：帧 `Script = 4`；`ScriptRequest{Name}` C→S → `ScriptPack{Name, Source}` S→C。
+- 服务端 `MapWsHandler.EngineScriptOrder = [noise.js, mapgen-config.js, mapgen.js]`，**按序拼接**（`mapgen-server.js` 不下发）；
+  文件名走**白名单**（杜绝目录穿越），缺文件回空 `Source`（`name="missing"/"denied"`）。
+- 前端 `mapclient.requestScript(name)` → `gunzip(source)` → `(0, eval)("'use strict';\n" + src)` 注入全局 → `window.MapGen`；
+  `finally` 还原 `window.NoiseLib`（引擎 noise.js 会覆盖它，但引擎内部已捕获自身引用 ⇒ 还原无副作用）。
+- ⚠ **ScriptPack 帧本身不 gzip，只有 `Source` 字段 gzip**。第一版在 `onFrame` 里先 `gunzip(payload)` 再解码 ⇒
+  `Z_DATA_ERROR` + `.then is not a function`。正确顺序：`PB.decodeScriptPack(payload)` → `gunzip(pack.source)`。
+- **单真源**：绝不把 `mapgen.js` 拷进 `web/js/`（副本漂移 ⇒ 前端世界 ≠ 服务端；`灵脉预览.html` 当年就是内联副本）。
+
+### 16.4 防卡与收敛（全屏档大范围抽样）
+- 每帧按**时间额度**抽样 `clamp(dtMs * 0.35, SAMPLE_BUDGET_MS=10, 110)` ms（不是按个数），
+  配 `SAMPLE_CELLS_MAX`（显示位图 / 抽样层级）与 `REDRAW_MS` 节流；未算到的画「未探测」斜纹占位。
+- ⚠ 抽样格必须**世界对齐**（`q%m==0 && r%m==0`，缓存键只有 `q,r`）—— 初版「按画布像素格取格」是
+  **视图锁定**的：平移 5 世界单位只剩 55% 复用，每次交互都重新露底。详见 §17。
+- **隐藏 = 真停摆**（`tick()` 直接 return，停 rAF / 停抽样 / 停绘制），不是只 `display:none`。
+- 实测成本基准：`MapGen.fields` 单格 **0.019 ms**（Node 冷缓存；浏览器约 0.06~0.11 ms/格）⇒ 前端自算可行。
+### 16.5 验收姿势
+- 端到端：登录 → `ScriptRequest` → `ScriptPack`（约 95KB js，gzip 26ms）→ eval → 抽样 `MapGen.fields`
+  与 `/api/map/tile` 地形**逐格比对必须一致**（本次 6/6）。
+- 实机三态截图：默认左下 / 全屏 / 隐藏（`verify/live_r11_mm_*.png`）。
+- 契约：`verify/frontend_smoke.mjs::checkMinimap`（16 项）。
+- ⚠ **环境更正**：本机 8140 **`127.0.0.1` 与 LAN IP `192.168.63.62` 都通**（Kestrel 绑全网卡）。
+  旧记录「只绑 LAN IP、127.0.0.1 不通」是把「服务没在跑」误当成绑定问题 —— 早先的 `ECONNREFUSED` 请先探活服务。
+
+## 17. 小地图地形层：抽样格必须「世界对齐」（2026-09-15 R12 修复 · 大面积未探测）
+
+### 17.1 病征与根因
+
+- 病征：全屏大地图只有中心一块实心（= 默认档跟随相机时算过的窗口），其余约 30% 散点 +
+  大面积「未探测」斜纹，越靠下越空。
+- 根因：`buildTerrain` 的抽样点是**画布像素格投影进世界**得到的 ⇒ **抽样格与视图绑定**。
+  实测（复刻抽样格、比较两视图的格集合）：平移 5 世界单位（不足半格）复用 **55.1%**、
+  平移一格 **36.4%**、滚轮一格 ×1.14 **30.7%**、面板档→全屏档 **11.5%**；且默认全屏档
+  视图内真实 58363 格只抽 21850 = **漏格 63%**（wpp=12 时达 96.8%）。
+- ⚠ 看到「小地图大片暗底斜纹」先怀疑**抽样格跟不跟着视图走**，别先查引擎 ——
+  `MapGen.fields` 在 ±220 格内**零 null 零异常**、单格约 0.019ms（Node 冷缓存）。
+
+### 17.2 正确口径（改小地图地形层必守）
+
+- 抽样集合 = 世界格 `{ q % m == 0 && r % m == 0 }`，`m = 2^k`；**缓存键只有 `q,r`**，
+  `m` 只决定「选哪些格去算 / 显示时读哪一格」⇒ 跨视图、跨层级复用同一张表。
+- `m` 取「一个抽样格 ≈ 一个显示块」：`m = ceil_pow2(step(px) * wpp / hexW)`（`levelFor`）；
+  只取 2 的幂 ⇒ 缩放跨阈值才换层，层内平移/缩放基本 100% 复用。
+- 显示读取走 `biomeAt` 的**层级回退链**（精确格 → m → 2m → 4m → 8m）；重建待采样列表时
+  **先铺粗层**（m*8/m*4/m*2）再铺 m ⇒ 首帧就有粗略地脉，不成片露底。
+- 待采样列表按「离视野中心由近及远」排序，用**游标**消费（别用 `Array.shift()`：大数组 O(n) 搬移）；
+  容量上限别静默丢弃（旧 `QUEUE_CAP` 满即丢 = 把「待算」永久变成「未探测」）。
+- 缓存超限按插入序**淘汰最旧 1/4**（整表清空会重新露底）。
+
+### 17.3 取数 / 验收姿势（headless 实机）
+
+- 三态 `?mm=full|hide`；**`?mmwpp=N`** 指定全屏档初始缩放（复现「缩得很远」的现场）；
+  `?debug=1` 才暴露 `window.__mm`。
+- **`?mmprobe=1`**：页面按时间点采 `__mm.probe()`（`terrainCached / queueLen / sampleM / miss /
+  draws / enqDrop`），**末尾一次性 POST 到 `/api/debug/snap`**（服务端只落字节、不校验 MIME）
+  ⇒ 读 `verify/capture.png` 即得**整条时间序列**。⚠ CDP `Runtime.evaluate` 对本页会永久挂起，别用。
+- **`?mmdrive=1`**：在全屏画布上派发**真实** `WheelEvent` 与 `mousedown/mousemove/mouseup`
+  （走模块自己的处理器），验收「拖动/缩放之后是否还露底」。判据：**`miss` 应全程为 0**；
+  平移只应新增少量格（本次 1784），缩放换层才会有一批新格（本次 7885，约 1s 补齐）。
+- **截图量化**：`verify/*.png` 用自写 PNG 解码（Node `zlib.inflateSync` 手解，零依赖）统计
+  「未探测」像素占比 —— 未探测色是 `(40,36,32)/(58,52,44)`，基色:斜纹恒 **3:1**（代码 `(px+py)&3`），
+  与任何地貌色都不撞（深海是 `#6d9aab`）。这是最直观的回归判据：本次 **46.5% → 0%**。
+- 离线契约：`verify/frontend_smoke.mjs::checkMinimap`（**16 项**），其中
+  「平移/缩放复用率 ≥ 90%」与「视图内 0 空洞」是本病的回归闸。
+  ⚠ 该段是**按模块常量复刻抽样规则**的代理检查 —— 改抽样规则必须同步改它。
+
+### 17.4 教训
+
+- 「按屏幕像素抽样」这类**视图锁定**的设计，在「全屏大范围 + 逐帧补齐」场景下必然退化；
+  抽样/缓存键必须落在**世界坐标**上。
+- **静默丢弃最坑**：容量上限提前 return 会把「还没算」变成「永远算不到」，而且日志里什么都看不到。
+- 判「大面积未探测」不要靠看：量它的**像素占比**和**随行号的覆盖率梯度**，一秒定性。

@@ -174,7 +174,8 @@
   /* ---- 信息面板 ---- */
   #info {
     position: absolute;
-    left: 16px; bottom: 18px; width: 228px; padding: 12px 14px;
+    /* R11: 左下角让给「山河小图」(bottom:18 + 面板高 ≈196 + 间距) —— 山川志上移到它上方 */
+    left: 16px; bottom: 230px; width: 228px; padding: 12px 14px;
     transition: opacity 0.2s;
   }
   #info.hidden { opacity: 0; pointer-events: none; }
@@ -187,13 +188,58 @@
   #infoBody .v.big { color: var(--seal); font-size: 15px; }
   #infoBody .sep { border-top: 1px dashed var(--panel-border); margin: 6px 0; }
 
-  /* ---- 小地图 ---- */
+  /* ---- 小地图 (R11: 灵脉版 · 独立模块 minimap-vein.js) ----
+     默认档贴屏幕左下角: 中心跟随主相机, 滚轮调「与大地图恒定的倍率」, 拖动转自由视角,
+     单击展开全屏档 (可拖动/缩放)。倍率持久化在 localStorage (zongmen.mmView)。
+     隐藏 = 模块整体停摆 (停 rAF/停抽样/停绘制), 角落留一枚极小恢复钮。 */
   #minimapBox {
     position: absolute;
-    right: 16px; bottom: 18px; padding: 8px;
+    left: 16px; bottom: 18px; padding: 7px 8px 6px;
   }
-  #minimap { display: block; width: 216px; height: 141px; cursor: crosshair; border: 1px solid rgba(80,60,30,0.3); }
-  #minimapBox .hint { margin-top: 6px; font-size: 11px; color: var(--ink-soft); text-align: center; letter-spacing: 2px; }
+  #minimapBox.mm-hidden, #mmRestore.mm-hidden { display: none; }
+  #minimapBox .mm-head, #mmFull .mm-head {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 5px;
+  }
+  #minimapBox .mm-head .mm-title, #mmFull .mm-head .mm-title {
+    font-size: 12px; letter-spacing: 2px; color: var(--ink-soft); flex: 1;
+  }
+  #minimapBox .mm-btn, #mmFull .mm-btn {
+    padding: 1px 6px; font-size: 11px; line-height: 17px; letter-spacing: 1px;
+  }
+  #minimap {
+    display: block; width: 216px; height: 141px; cursor: grab;
+    border: 1px solid rgba(80,60,30,0.3);
+  }
+  #minimap:active { cursor: grabbing; }
+  #minimapBox .hint { margin-top: 5px; font-size: 11px; color: var(--ink-soft); text-align: center; letter-spacing: 2px; cursor: default; }
+  .mm-tip {
+    position: fixed; display: none; z-index: 70; pointer-events: none;
+    max-width: 260px; padding: 5px 9px; border-radius: 3px; white-space: pre-line;
+    background: rgba(28,24,20,0.92); color: #ece2cd; font-size: 11.5px; line-height: 1.55;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.35);
+  }
+  /* 全屏浮层: 必须是 #minimapBox 的兄弟 —— .panel 的 clip-path 会裁掉子树 */
+  #mmFull {
+    position: fixed; inset: 0; z-index: 60; display: none;
+    background: rgba(20,17,13,0.86); padding: 14px; box-sizing: border-box;
+  }
+  #mmFull.open { display: flex; flex-direction: column; }
+  #mmFull .mm-head {
+    background: rgba(240,232,214,0.94); color: #3a3226; padding: 5px 10px;
+    border-radius: 3px; margin-bottom: 8px;
+  }
+  #mmFull .mm-head .mm-title { color: #6a5f4c; }
+  #mmFull .mm-stage { position: relative; flex: 1; min-height: 0; }
+  #mmCanvasFull {
+    display: block; width: 100%; height: 100%; cursor: grab;
+    border: 1px solid rgba(200,180,140,0.35);
+  }
+  #mmCanvasFull:active { cursor: grabbing; }
+  #mmRestore {
+    position: absolute; left: 16px; bottom: 18px; z-index: 40;
+    padding: 2px 9px; font-size: 11px; letter-spacing: 1px; opacity: 0.62;
+  }
+  #mmRestore.show { display: block; }
 
   /* ---- 致命错误 ---- */
   #fatal {
@@ -210,6 +256,7 @@
     .sec-name { font-size: 15px; letter-spacing: 2px; }
     #titleBox h1 { font-size: 17px; letter-spacing: 3px; }
     #minimap { width: 150px; height: 98px; }
+    #info { bottom: 168px; }          /* 小图更矮 → 山川志跟着下移 */
   }
 </style>
 </head>
@@ -259,8 +306,30 @@
   </div>
 
   <div id="minimapBox" class="panel">
-    <canvas id="minimap" width="432" height="282"></canvas>
-    <div class="hint">拖拽平移 · 滚轮缩放 · 点击查看</div>
+    <div class="mm-head">
+      <span class="mm-title">山河小图</span>
+      <button class="mm-btn" data-mm="recenter" title="回到主视野中心 (倍率不变)">归心</button>
+      <button class="mm-btn" data-mm="full" title="全屏查看 (可拖动/缩放)">全屏</button>
+      <button class="mm-btn" data-mm="hide" title="隐藏小地图 (相关组件停摆)">隐藏</button>
+    </div>
+    <canvas id="minimap"></canvas>
+    <div class="hint" title="滚轮缩放 · 拖动平移 (拖过会自动转自由视角) · 单击展开全屏 · 归心恢复跟随">跟随视野 · 倍率 ×1</div>
+  </div>
+  <button id="mmRestore" class="mm-hidden" title="显示小地图">显图</button>
+  <!-- 提示层: 必须放在面板外 (面板 clip-path 会裁掉溢出的提示) -->
+  <div id="mmTip" class="mm-tip"></div>
+
+  <!-- 全屏档浮层: 与 #minimapBox 同级 (面板的 clip-path 会裁子树) -->
+  <div id="mmFull">
+    <div class="mm-head">
+      <span class="mm-title">山河小图 · 全屏（拖动平移 · 滚轮缩放 · 单击跳转）</span>
+      <button class="mm-btn" data-mm="reset">归位</button>
+      <button class="mm-btn" data-mm="hide">隐藏</button>
+      <button class="mm-btn" data-mm="close">关闭 ✕</button>
+    </div>
+    <div class="mm-stage">
+      <canvas id="mmCanvasFull"></canvas>
+    </div>
   </div>
 
   <div id="fatal">
@@ -275,6 +344,7 @@
   <script src="js/textures.js"></script>
   <script src="js/renderer.js"></script>
   <script src="js/bldg_ink.js"></script>
+  <script src="js/minimap-vein.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>
