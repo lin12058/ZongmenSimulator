@@ -312,26 +312,123 @@
   /* ============================================================
    * 5. 立体构件 (全部走 frame 投影 → 自然带朝向与遮挡)
    * ============================================================ */
-  /* 5.1 六边格基座 = 建筑的「场地」: 与地图网格同朝向同半径的地皮色块 + 墨边
-     2026-09-14 七版加强 (用户: "建筑背景应该有一个场地, 避免 svg 太浅被背景覆盖"):
-       · 地皮色块不透明度默认 0.32 (旧 0.22 太淡, 浅色墙/茅顶会直接糊进群系底纹);
-       · 墨边降到 detail>=1 就画 (旧仅 detail>=2), 让"这块地有边界"一眼可读;
-       · 六边**之外**再铺一圈渐隐柔光 —— 建筑与地形之间有一层过渡, 不再硬切。
-     opts.tint 取地皮底色 (LANDUSE_TINT); halo=false 可关柔光 (小尺寸省一层)。 */
+  /* 5.1 六边格基座 = 建筑的「场地」
+     2026-09-14 七版: 实心色块 + 墨边 + 一圈柔光 (避免浅色墙/茅顶糊进群系底纹)。
+     ⚠ 2026-09-15 十一版 R10 (用户: "背景用中空的设计, 而不是整个背景色都一样的填色块
+       的, 大概距离边界 0.8-0.9格子的范围的正六边形, 海上的也要") ⇒ **改成中空正六边形环**:
+       · 只画半径带 [rIn, rOut] = [0.80R, 0.90R] 的环带 (与地图网格同朝向), 环内与环外
+         一律透空 ⇒ 既标出"这块地有边界", 又不把群系底纹整块盖掉;
+       · 0.90R < 1.0R 且相邻格中心距 = √3R ⇒ 邻格的环永不相接, 密排也不会糊成一片;
+       · 环带用「粗描边 + 双墨边」实现 (两后端都只有单环 poly/line, 没有 even-odd 填充)。
+     实现口径: 环带 = 以 mid=(rIn+rOut)/2 为半径的六边形, 描边宽 = rOut-rIn。
+     opts: { tint 地皮底色, a 环带不透明度(默认0.30), rIn/rOut, lw/lc/la 墨边,
+             solid=true 走七版实心路径(看板对照用), rMul 整体缩放 } */
   function hexPlate(S, o) {
     o = o || {};
-    var B = S.B, r = S.R * (o.rMul == null ? 1.0 : o.rMul);
-    var pts = hexPts(S.cx, S.cy, r);
-    if (o.halo !== false && S.detail >= 2) {
-      var g0 = S.g(0, 0);
-      B.radial(g0[0], g0[1], r * 1.18, o.haloCol || '#efe6d2',
-        o.haloA == null ? 0.28 : o.haloA, r * 1.18, r * 1.18 * KY);
+    var B = S.B, r = S.R * (o.rMul == null ? 1.0 : o.rMul), i;
+    if (o.solid) {                                  /* —— 七版实心 (对照/看板) —— */
+      var sp = hexPts(S.cx, S.cy, r);
+      if (o.halo !== false && S.detail >= 2) {
+        var g0 = S.g(0, 0);
+        B.radial(g0[0], g0[1], r * 1.18, o.haloCol || '#efe6d2',
+          o.haloA == null ? 0.28 : o.haloA, r * 1.18, r * 1.18 * KY);
+      }
+      B.poly(sp, o.tint || STONE, o.a == null ? 0.32 : o.a);
+      if (S.detail >= 1) {
+        B.line(sp.concat([sp[0]]), { w: o.lw || Math.max(0.5, r * 0.045), c: o.lc || INK4,
+          a: o.la == null ? 0.40 : o.la });
+      }
+      return;
     }
-    B.poly(pts, o.tint || STONE, o.a == null ? 0.32 : o.a);
+    /* —— R10 中空环带 —— */
+    var rOut = r * (o.rOut == null ? 0.90 : o.rOut);
+    var rIn = r * (o.rIn == null ? 0.80 : o.rIn);
+    if (!(rOut > rIn)) return;
+    var mid = (rOut + rIn) * 0.5;
+    var ring = hexPts(S.cx, S.cy, mid);
+    B.line(ring.concat([ring[0]]), { w: rOut - rIn, c: o.tint || STONE,
+      a: o.a == null ? 0.30 : o.a });
     if (S.detail >= 1) {
-      B.line(pts.concat([pts[0]]), { w: o.lw || Math.max(0.5, r * 0.045), c: o.lc || INK4,
-        a: o.la == null ? 0.40 : o.la });
+      var lw = o.lw || Math.max(0.5, r * 0.038);
+      var ic = o.lc || INK4, ia = o.la == null ? 0.32 : o.la;
+      var po = hexPts(S.cx, S.cy, rOut), pi = hexPts(S.cx, S.cy, rIn);
+      B.line(po.concat([po[0]]), { w: lw, c: ic, a: ia });
+      B.line(pi.concat([pi[0]]), { w: lw * 0.78, c: ic, a: ia * 0.82 });
     }
+    void i;
+  }
+  /* 5.1b 城镇地盘 (R6, 2026-09-15 十一版): 直接画在 2D 上下文 (设备像素), **不进精灵缓存**。
+     ⚠ spriteOf 的缓存 key 不含 tint ⇒ 把"随城镇而变"的色塞进精灵会串色 (第一个城镇的色被
+       所有城镇复用); 把 tint 加进 key 又会把 SPR_CAP 撑爆 (城镇数 × 地皮数)。故由 main.js
+       在贴建筑精灵**之前**逐格调用本函数现画地盘, 使地盘颜色 = 所属城镇色 (townColor)。
+     ⚠ R10 (2026-09-15 十一版): 与 hexPlate 同步改成**中空正六边形环** (半径带 0.80R~0.90R),
+       实心块作废 —— 用户要"中空"而非整块填色; 海上的渔村同样走本函数 ⇒ 一并生效。
+     o: { cx, cy, R, tint, a, rIn, rOut, lw, lc, la, edge, solid }
+        R 为设备像素半径 (≈ 格半径); solid=true 走旧实心路径。 */
+  function plateAt(ctx, o) {
+    o = o || {};
+    var r = o.R;
+    var cx = o.cx, cy = o.cy, i;
+    if (!ctx || !(r > 0)) return;
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    if (o.solid) {                                  /* —— 旧实心路径 —— */
+      var sp = hexPts(cx, cy, r);
+      if (o.halo !== false && r >= 5) {
+        var hg = ctx.createRadialGradient(cx, cy, r * 0.15, cx, cy, r * 1.18);
+        hg.addColorStop(0, rgba(o.haloCol || '#efe6d2', o.haloA == null ? 0.22 : o.haloA));
+        hg.addColorStop(1, rgba(o.haloCol || '#efe6d2', 0));
+        ctx.fillStyle = hg;
+        ctx.beginPath(); ctx.arc(cx, cy, r * 1.18, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.moveTo(sp[0][0], sp[0][1]);
+      for (i = 1; i < 6; i++) ctx.lineTo(sp[i][0], sp[i][1]);
+      ctx.closePath();
+      ctx.globalAlpha = o.a == null ? 0.34 : o.a;
+      ctx.fillStyle = o.tint || STONE;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      if (o.edge !== false) {
+        ctx.globalAlpha = o.la == null ? 0.42 : o.la;
+        ctx.strokeStyle = o.lc || INK4;
+        ctx.lineWidth = o.lw || Math.max(0.6, r * 0.05);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+      return;
+    }
+    /* —— R10 中空环带 —— */
+    var rOut = r * (o.rOut == null ? 0.90 : o.rOut);
+    var rIn = r * (o.rIn == null ? 0.80 : o.rIn);
+    if (!(rOut > rIn)) { ctx.restore(); return; }
+    var ring = hexPts(cx, cy, (rOut + rIn) * 0.5);
+    function path(pts) {
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (var k = 1; k < 6; k++) ctx.lineTo(pts[k][0], pts[k][1]);
+      ctx.closePath();
+    }
+    ctx.globalAlpha = o.a == null ? 0.34 : o.a;
+    path(ring);
+    ctx.strokeStyle = o.tint || STONE;
+    ctx.lineWidth = rOut - rIn;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    if (o.edge !== false) {
+      ctx.globalAlpha = o.la == null ? 0.34 : o.la;
+      ctx.strokeStyle = o.lc || INK4;
+      ctx.lineWidth = o.lw || Math.max(0.6, r * 0.038);
+      path(hexPts(cx, cy, rOut));
+      ctx.stroke();
+      ctx.lineWidth = (o.lw || Math.max(0.6, r * 0.038)) * 0.78;
+      path(hexPts(cx, cy, rIn));
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
   }
   /* 5.2 墙: 一段竖直墙面 (由局部线段 a→b + 高度区间 [h0,h1] 定义) */
   function wallRect(S, w, t0, t1, h0, h1, fill, alpha) {
@@ -797,6 +894,30 @@
       a = S.p(u, o.v1, o.h1); b = S.p(u, o.v1, o.h0);
       ink(S, [a, b], { w: 1.5, c: EARTH, a: 0.5, n: 1, fly: false, j: 0.35 });
     }
+  }
+  /* 水上木台 (R5b, 2026-09-15 十一版): 建筑格落在**水面** (浅海/深海) 时, 先垫一层
+     干栏木台 + 入水桩脚 + 水色压深 —— 让「民房/仓库」落在海面读作「水上人家」,
+     而不是一栋浮在水上的房子。由 paint() 在 spec.onWater 时调用 (陆上格不受影响)。
+     ⚠ 台面**刻意不铺实色**: 只描木框 + 板缝 + 一层极淡暖晕 (与 R10 的中空地盘同一
+       审美 —— 用户明确否掉了"整个背景色都一样的填色块", 木台再铺满就把水面糊住了)。
+     范围收在 ±0.60 格 ⇒ 与地盘环 (0.80R~0.90R) 之间始终留一圈水色。 */
+  function waterDeck(S) {
+    gpWash(S, 0, 0.05, 0.98, '#17414f', 0.20);         /* 台下水色压深 */
+    var i, us = [-0.56, -0.19, 0.19, 0.56];            /* 近侧 4 根入水桩脚 */
+    for (i = 0; i < us.length; i++) {
+      ink(S, [S.p(us[i], 0.58, 0.03), S.p(us[i], 0.58, -0.24)],
+        { w: 1.8, c: EARTH, a: 0.62, n: 1, fly: false, j: 0.3 });
+    }
+    gpWash(S, 0, 0, 0.70, '#c2a377', 0.16);            /* 极淡暖晕: 标出木台范围, 不铺实色 */
+    if (S.detail >= 2) {                               /* 板缝 */
+      for (i = 0; i < 3; i++) {
+        var v = -0.30 + i * 0.32;
+        gpLine(S, [[-0.60, v], [0.60, v]], { w: 0.85, c: EARTH, a: 0.34, n: 1, fly: false, j: 0.3 });
+      }
+    }
+    ink(S, [gpOf(S, -0.60, -0.52), gpOf(S, 0.60, -0.52), gpOf(S, 0.60, 0.60),
+            gpOf(S, -0.60, 0.60), gpOf(S, -0.60, -0.52)],
+      { w: 1.6, c: EARTH, a: 0.60, n: 1, fly: false, j: 0.4 });
   }
   /* 席棚 / 作坊棚: 柱 + 单坡顶 (集市/炼器/伐木共用) */
   function shedOf(S, o) {
@@ -1752,6 +1873,8 @@
       hexPlate(S, { tint: spec.tint || LANDUSE_TINT[KIND_TERRAIN[spec.kind]] || STONE,
         a: spec.plateA == null ? 0.32 : spec.plateA });
     }
+    /* R5b (2026-09-15 十一版): 建筑格是水 → 先垫干栏木台, 读作「水上人家」 */
+    if (spec.onWater) waterDeck(S);
     if (detail >= 2) {
       var g0 = S.g(0, 0.06);
       B.radial(g0[0], g0[1], R * 0.92, '#302a22', 0.26, R * 0.92, R * 0.92 * KY);
@@ -1789,7 +1912,8 @@
     var detail = spec.detail != null ? spec.detail : (R >= 9 ? 3 : (R >= 5.2 ? 2 : 1));
     var key = spec.kind + '|' + dirIdxOf(spec.face) + '|' + (spec.variant | 0) + '|' +
               (Math.round(R * 2) / 2) + '|' + detail + '|' + (spec.tier | 0) + '|' +
-              (spec.water === false ? 'd' : 'w');
+              (spec.water === false ? 'd' : 'w') + '|' + (spec.plate === false ? 'n' : 'p') + '|' +
+              (spec.onWater ? 'W' : '-');        // R5b: 水上木台随格水质而变
     var hit = _spr.get(key);
     if (hit) return hit;
     var w = Math.max(6, Math.ceil((SPR_BOX.x1 - SPR_BOX.x0) * R));
@@ -1801,7 +1925,7 @@
       kind: spec.kind, q: spec.q, r: spec.r, variant: spec.variant, tier: spec.tier,
       face: spec.face, probe: spec.probe, R: R, detail: detail, water: spec.water,
       cx: -SPR_BOX.x0 * R, cy: -SPR_BOX.y0 * R,
-      plate: spec.plate, tint: spec.tint, plateA: spec.plateA
+      plate: spec.plate, tint: spec.tint, plateA: spec.plateA, onWater: spec.onWater
     });
     var rec = { cv: cv, ox: SPR_BOX.x0 * R, oy: SPR_BOX.y0 * R, w: w, h: h };
     if (_spr.size >= SPR_CAP) {
@@ -1829,7 +1953,7 @@
     spriteOf: spriteOf, spriteClear: spriteClear, SPR_BOX: SPR_BOX,
     hexPts: hexPts, gpOf: gpOf,
     _ink: ink, _face: faceOf, _dots: dots, _shade: shade,
-    _rgba: rgba, hexPlate: hexPlate, boxWalls: boxWalls, wallRect: wallRect,
+    _rgba: rgba, hexPlate: hexPlate, plateAt: plateAt, boxWalls: boxWalls, wallRect: wallRect,
     placeDoor: placeDoor, placeWin: placeWin, roofGable: roofGable, roofHip: roofHip,
     roofPyr: roofPyr, roofCone: roofCone, slab: slab, stairs: stairs, posts: posts,
     flag: flag, tree: tree, smoke: smoke, aura: aura, fence: fence,

@@ -52,6 +52,10 @@
      本文件只用它两处: ① 灵脉签的垂直锚点 (峰体高度 = 山地底座 + 灵脉峰);
      ② 山地底座倍率 shape.terrainBase (详见 PROP_VS 灵脉分支)。 */
   var VS = (typeof window !== 'undefined' && window.VeinSkin) || null;
+  /* 灵脉等级 → 中文 (名牌文案): 与 vein-skin.js levels[] 的 key 一一对应 (0大/1中/2小/3从属)。
+     ⚠ 从属档 (3) 只出现在"大/中灵脉的从属格", 而**从属格不进 comm.veins[]** ⇒ 名牌里
+       理论上不会出现 3; 这里仍列全, 避免将来改口径时静默显示成 undefined。 */
+  var VEIN_LV_NAME = ['大', '中', '小', '从属'];
   /* 匾额锚点调试层 (headless 定位「牌匾 vs 地物」用): plaqdbg=1
      绿=聚落中心 st.x/y · 黄=聚落格 tileToWorld(q,r) · 青=建筑包围盒锚点 ·
      橙点=每个建筑格 · 品红=灵脉 v.x/y。日常游玩不传此参数。 */
@@ -479,8 +483,10 @@
     ctx.fillStyle = 'rgba(150,52,38,0.95)'; ctx.fill();
     ctx.restore();
   }
-  var ICON_FN = { sect: drawSect, city: drawCity, town: drawTown, village: drawVillage, poi: drawPoi };
-  var TYPE_NAME = { sect: '宗门', city: '仙城', town: '坊市', village: '村落', poi: '秘境' };
+  var ICON_FN = { sect: drawSect, city: drawCity, town: drawTown, village: drawVillage,
+                  fishing: drawVillage, poi: drawPoi };
+  var TYPE_NAME = { sect: '宗门', city: '仙城', town: '坊市', village: '村落',
+                    fishing: '渔村', poi: '秘境' };
   var VEIN_EL = ['金', '木', '水', '火', '土'];
 
   /* ---------- 地名纸签 (山海经式竖排匾额) ----------
@@ -868,10 +874,12 @@
      随机抖动项取包络中值 (hrand=0.86) —— 签位只需 ≈峰尖高度, 不必逐格精确到 hash。 */
   function veinTopU(v) {
     var tb = (VS && VS.shape && VS.shape.terrainBase != null) ? VS.shape.terrainBase : 1.0;
+    var tbMin = (VS && VS.shape && VS.shape.terrainBaseMin != null) ? VS.shape.terrainBaseMin : 0;
     var e = elevAtTile(v.q, v.r);
     var bhs = 0;
     if (e > 0.84) bhs = 0.95 + 0.60 * Math.min(1, (e - 0.84) / 0.12);        // 雪峰档
     else if (e > 0.70) bhs = 0.55 + 0.75 * Math.min(1, (e - 0.70) / 0.14);   // 山地档
+    if (bhs < tbMin) bhs = tbMin;                                            // 十一版 R3-a 底座下限
     var baseU = (3.3 + 1.2 * 0.86) * bhs * tb;
     var lv = (VS && VS.levelInfo) ? VS.levelInfo(v.level) : null;
     var peakU = lv ? (3.3 + 1.2 * (lv.hRand[0] + lv.hRand[1]) * 0.5) * lv.hScale * VS.shape.sizeScale
@@ -952,12 +960,14 @@
       c[m * 2] = x; c[m * 2 + 1] = y;
       sp[m] = sid; hs[m] = a.propHashes[i];
       /* ⚠ 灵脉峰的第 4 通道要**复合等级与海拔**: 服务端给的 propElevs[i] 是灵脉等级
-         (0大/1中/2小), 而"在原来的山之上再加峰高"还需**该格真实海拔** —— 它只在地块段
-         (arrays.elevs) 里。合成 (等级 + 海拔)/3 后上传, 由 renderer.js PROP_VS 还原
-         (精灵段的海拔通道是 u16 量化、值域 [0,1], 装不下两个量, 故先归一化压进去)。 */
+         (0大/1中/2小/3从属), 而"在原来的山之上再加峰高"还需**该格真实海拔** —— 它只在地块段
+         (arrays.elevs) 里。合成 (等级 + 海拔)/4 后上传, 由 renderer.js PROP_VS 还原
+         (精灵段的海拔通道是 u16 量化、值域 [0,1], 装不下两个量, 故先归一化压进去)。
+         ⚠ 十一版 D1: 除数由 3 改 **4** (新增第 4 档「从属」) —— 上界 (3+1)/4 = 1.0 恰好不溢出,
+           换档位数时**必须重算这个上界**, 否则 iElev > 1 被 clamp 后等级错档。 */
       if (isVein) {
         if (!elevOf) elevOf = tileElevMap(info);
-        el[m] = (a.propElevs[i] + (elevOf.get(t.q + ',' + t.r) || 0)) / 3;
+        el[m] = (a.propElevs[i] + (elevOf.get(t.q + ',' + t.r) || 0)) / 4;
       } else {
         el[m] = a.propElevs[i];
       }
@@ -1001,6 +1011,25 @@
   /* 稀有「地标」建筑 (全图出现 <150): 缩远时若与常规建筑一起砍掉, 这几座等于白画
      —— 战略视图下正是要找它们。名单与 `tools/stats_buildings.mjs` 的稀有档一致。 */
   var RARE_KINDS = { '炼炉': 1, '官衙': 1, '焦炭窑': 1, '宗祠': 1, '祭坛': 1, '聚灵阵': 1, '灵枢殿': 1 };
+  /* R6 (2026-09-15 十一版): 城镇地盘色 —— 由聚落**位置 + 类型**派生确定性 HSL。
+     同一城镇恒同色、异镇异色、跨会话稳定; 色相按 type 分带 (城/镇/村/宗门/渔村各占一段),
+     避免满屏同色; 不落协议 (纯前端派生)。⚠ 不用 st.id: 客户端实体未必带该字段 (以 q,r 为准)。 */
+  var TOWN_HUE = { city: 22, town: 46, village: 142, sect: 268, fishing: 196 };
+  function townColorHash(a, b, c) {
+    var h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x165667b1) ^ Math.imul(c | 0, 0x9e3779b1);
+    h ^= h >>> 15; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13;
+    return h >>> 0;
+  }
+  function townColor(st) {
+    var base = TOWN_HUE[st && st.type];
+    if (base == null) base = 200;
+    var tKey = st && st.type ? st.type.length : 0;
+    var hh = townColorHash(st && st.q | 0, st && st.r | 0, tKey);
+    var hue = (base + (hh % 29) - 14 + 360) % 360;      // 同带内 ±14° 抖动 (区分同类型不同城镇)
+    var sat = 40 + (hh >>> 8) % 20;                     // 40~59%
+    var lig = 39 + (hh >>> 16) % 11;                    // 39~49%
+    return 'hsl(' + hue + ',' + sat + '%,' + lig + '%)';
+  }
   /* 屏幕空间 (dpr 变换下) 逐格贴图。
      六边格半径 <5px (tiny) 时: 常规建筑交给聚落图标, 只保留稀有地标 (抬最小尺寸),
      否则「全图没几座」的建筑在战略视图里等于白画。
@@ -1047,13 +1076,26 @@
       /* 建筑压水 (本格是水) → 不画房子, 改画栈桥 —— 即「水变成桥」。
          面向水的码头/渔船坞/渔亭本就自己画栈桥伸进水里, 不在此列 (它们在沙岸陆格上)。 */
       var onWater = it.bio === 0 || it.bio === 1;
+      /* R5 (2026-09-15 十一版): 海上渔村的建筑**按原 kind 画** —— 它们本就为水上设计,
+         自带伸水栈桥; 「栈桥」只留作"陆地建筑被水淹"(非渔聚落的水上格)的兜底。 */
+      var isFish = it.st.type === 'fishing';
+      var bridge = onWater && !isFish;
       var rec = BI.spriteOf({
-        kind: onWater ? '栈桥' : b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
+        kind: bridge ? '栈桥' : b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
         face: fi.face, water: fi.water, R: R, detail: detail,
-        plateA: 0.40, plate: !onWater            // 场地不透明度 (七版: 0.16→0.40, 浅色建筑不再糊进底纹)
+        plate: false,                            // R6: 地盘改由城镇色**现画** (见下), 精灵内不再烘地皮色
+        onWater: onWater                         // R5b: 水上格 → 垫干栏木台 (水上人家)
       });
       if (!rec) continue;
-      if (onWater) statBridge++;                 // 验数: 本帧画了几座栈桥 (水→桥)
+      if (bridge) statBridge++;                  // 验数: 本帧画了几座栈桥 (水→桥)
+      /* R6 (2026-09-15 十一版): 城镇地盘 —— 逐格现画 (设备像素, 不进精灵缓存),
+         颜色 = 所属城镇 (同镇同色、异镇异色、跨会话稳定)。灵脉格禁建 (R4) ⇒ 建筑格非灵脉格。
+         R10 (2026-09-15 十一版): 地盘改**中空正六边形环** (半径带 0.80R~0.90R), 实心块作废;
+         海上渔村同走本函数 ⇒ 海上的地盘也一并变成空环。 */
+      if (!bridge) {
+        BI.plateAt(ctx, { cx: it.x, cy: it.y, R: R * scale, tint: townColor(it.st),
+                          a: 0.40, edge: true, la: 0.44 });
+      }
       ctx.drawImage(rec.cv, it.x + rec.ox * scale, it.y + rec.oy * scale,
                     rec.w * scale, rec.h * scale);
     }
@@ -1208,8 +1250,21 @@
         for (var vv = 0; vv < cm.veins.length; vv++) {
           var v = cm.veins[vv];
           var rgb = v.variant ? geoVariantColor(v.variant) : cRGB;
+          /* R8 (2026-09-15 十一版): 灵脉「地盘」色环 —— 峰下铺一圈元素色六边地台,
+             与 R6 的城镇地盘同一「六边地台」语汇, 让灵脉本体一眼分得清金木水火土。 */
+          ctx.save();
+          ctx.beginPath();
+          hexPath(ctx, v.x, v.y, geo.hexR * 0.94);
+          ctx.globalAlpha = 0.16;
+          ctx.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+          ctx.fill();
+          ctx.globalAlpha = 0.55;
+          ctx.strokeStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+          ctx.lineWidth = Math.max(0.8, geo.hexR * 0.09);
+          ctx.stroke();
+          ctx.restore();
           IT.drawVeinFlower(ctx, v.x, v.y, null, rgb, { level: v.level });
-          veinLabels.push({ x: v.x, y: v.y, name: v.name + '灵脉（' + ['大', '中', '小'][v.level] + '）',
+          veinLabels.push({ x: v.x, y: v.y, name: v.name + '灵脉（' + (VEIN_LV_NAME[v.level] || '小') + '）',
                             rgb: rgb, level: v.level, topU: veinTopU(v) });
         }
       });
@@ -1525,21 +1580,34 @@
     if (selMark) {
       var sp = w2s(selMark.x, selMark.y);
       if (sp.x > -80 && sp.y > -80 && sp.x < vw + 80 && sp.y < vh + 80) {
-        var sr = Math.max(geo.hexR * cam.zoom * 1.9, 11);
+        /* 2026-09-15 十二版: 标记整体缩为原先的 1/3 (用户: 点选红圈太大);
+           再 ×1.2 (用户: 圈圈太小了) ⇒ SEL_K = 1/3·1.2 = 0.4。
+           所有几何量 (半径 / 圈距 / 斜标偏移与长度) 统一乘 SEL_K。
+
+           线宽 (2026-09-15 用户: 线太细了, 大概 0.1 格宽; 缩太小要跟着变粗):
+           基准 = **0.1 × 该缩放下一格的屏显宽度** (格宽 = geo.hexW × zoom, 即六边形对边距),
+           不写死像素 ⇒ 放大时圈与线同比例变粗, 比例恒定;
+           缩得太小时线会在屏幕上细到看不见 ⇒ 保底 SEL_LW_MIN, 让线**相对圈**变粗。 */
+        var SEL_K = 1 / 3 * 1.2;
+        var SEL_LW_MIN = 1.5;                              // 保底线宽 (CSS px)
+        var selCellW = (geo.hexW || geo.hexR * 1.7320508) * cam.zoom;
+        var selLw = Math.max(selCellW * 0.1, SEL_LW_MIN);  // ≈ 0.1 格宽
+        var sr = Math.max(geo.hexR * cam.zoom * 1.9 * SEL_K, 11 * SEL_K);
         ctx.save();
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);          // 以下为 CSS px 作图
         ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-        ctx.strokeStyle = 'rgba(166,58,44,0.88)'; ctx.lineWidth = 1.7;
+        ctx.strokeStyle = 'rgba(166,58,44,0.88)'; ctx.lineWidth = selLw;
         ctx.beginPath(); ctx.arc(sp.x, sp.y, sr, 0, Math.PI * 2); ctx.stroke();
-        ctx.strokeStyle = 'rgba(166,58,44,0.30)'; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(sp.x, sp.y, sr + 3.4, 0, Math.PI * 2); ctx.stroke();
-        ctx.strokeStyle = 'rgba(166,58,44,0.85)'; ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(166,58,44,0.30)'; ctx.lineWidth = Math.max(selLw * 0.6, 1);
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, sr + 3.4 * SEL_K, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = 'rgba(166,58,44,0.85)'; ctx.lineWidth = selLw * 1.2;
         for (var s4 = 0; s4 < 4; s4++) {
           var sa = Math.PI / 4 + s4 * Math.PI / 2;
-          var sx2 = sp.x + Math.cos(sa) * (sr + 6.5), sy2 = sp.y + Math.sin(sa) * (sr + 6.5);
+          var so = sr + 6.5 * SEL_K;
+          var sx2 = sp.x + Math.cos(sa) * so, sy2 = sp.y + Math.sin(sa) * so;
           ctx.beginPath();
-          ctx.moveTo(sx2 - Math.cos(sa) * 4, sy2 - Math.sin(sa) * 4);
-          ctx.lineTo(sx2 + Math.cos(sa) * 4, sy2 + Math.sin(sa) * 4);
+          ctx.moveTo(sx2 - Math.cos(sa) * 4 * SEL_K, sy2 - Math.sin(sa) * 4 * SEL_K);
+          ctx.lineTo(sx2 + Math.cos(sa) * 4 * SEL_K, sy2 + Math.sin(sa) * 4 * SEL_K);
           ctx.stroke();
         }
         ctx.restore();
@@ -2238,6 +2306,15 @@
       }
       if (urlParams.get('zm') != null) {
         cam.tzoom = cam.zoom = MC.clamp(parseFloat(urlParams.get('zm')), minZoom, maxZoom);
+      }
+      /* 十二版调试: ?sel=q,r 直接落一枚点选标记 (仅 DEBUG 生效, 与 plaqdbg/ancgeo 同类)。
+         headless 截图无从模拟鼠标点击 ⇒ 靠它验收「朱砂标记」的实际大小与落点。
+         ⚠ 必须在 regenerate 之后: 世界重铸会把 selMark 清空。 */
+      if (DEBUG && urlParams.get('sel') != null) {
+        var selQ = +urlParams.get('sel').split(',')[0];
+        var selR = +(urlParams.get('sel').split(',')[1] || 0);
+        var wSel = MC.tileToWorld(selQ, selR);
+        selMark = { q: selQ, r: selR, x: wSel.x, y: wSel.y };
       }
       /* 开关初值落到按钮外观 (nobanner=1 / nocloud=1 时按钮显示为关闭态) */
       if (!showBanners) $('btnBanners').classList.add('off');

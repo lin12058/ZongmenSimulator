@@ -116,11 +116,13 @@
     var out = { h: (s && s.hScale) || 1.55, w: (s && s.wScale) || 0.80,
                 sc: (s && s.sizeScale) || 1.0,
                 tb: (s && s.terrainBase != null) ? s.terrainBase : 1.0,
+                tbm: (s && s.terrainBaseMin != null) ? s.terrainBaseMin : 0,
                 tbw: (s && s.terrainBaseW != null) ? s.terrainBaseW : 0, lv: [] };
-    /* 三档 (大/中/小) 的高度倍率与收窄包络; 缺配置 → 三档一律退回 shape.hScale
-       ⚠ 顺序即 mapgen.js veins[].level (0大 / 1中 / 2小), 契约见 verify/check_vein_skin.mjs */
+    /* 四档 (大/中/小/从属) 的高度倍率与收窄包络; 缺配置 → 一律退回 shape.hScale
+       ⚠ 顺序即 mapgen.js 的 level (0大 / 1中 / 2小 / 3从属), 契约见 verify/check_vein_skin.mjs */
     var EPS = 1.0 / 1024.0;                       // 浮点字面量精度 (避免 GLSL 里出现 0.7200001)
-    for (var i = 0; i < 3; i++) {
+    var nlv = (vs && vs.levels && vs.levels.length) || 3;
+    for (var i = 0; i < nlv; i++) {
       var L = vs && vs.levels && vs.levels[i];
       var lo = (L && L.hRand && L.hRand[0] != null) ? L.hRand[0] : 0.72;
       var hi = (L && L.hRand && L.hRand[1] != null) ? L.hRand[1] : 1.00;
@@ -148,6 +150,10 @@
      —— 底座只加高、不加宽。九版宽度也叠加 ⇒ 上屏总宽 ≈ 9.9 uR > 总高 8.0 uR,
      整座灵峰读起来"变宽了" (用户 2026-09-15: "你这个怎么变成宽度了? 我要又高又瘦的")。 */
   var VBASEW = VEIN_SHAPE.tbw.toFixed(3);
+  /* 灵脉格「山地底座」的**下限** (vein-skin.js shape.terrainBaseMin): 十一版 R3-a ——
+     小灵脉中心海拔 LIFT_CORE[2]=0.70 恰好压在底座判档的严格边界 (`ve > 0.70`) 上,
+     底座恒为 0 ⇒ 只画峰体没有山脚 (上屏总高仅大档的 28%)。这里给底座倍率兜一个下界。 */
+  var VBMIN = VEIN_SHAPE.tbm.toFixed(3);
   /* 大世界山/雪峰的高度倍率档位 —— 山地底座与地形分支**共用同一组常量**,
      避免"灵脉底座用的山高"与"旁边真山"两套数字各自漂移。 */
   var MTN_LO = (0.55).toFixed(3), MTN_HI = (1.30).toFixed(3);
@@ -158,7 +164,7 @@
     'layout(location=1) in vec2 iCenter;',
     'layout(location=2) in float iSprite;',    // row*8+col
     'layout(location=3) in float iHash;',
-    'layout(location=4) in float iElev;',      // 大世界山=海拔; 灵脉峰=(等级+海拔)/3, 见下
+    'layout(location=4) in float iElev;',      // 大世界山=海拔; 灵脉峰=(等级+海拔)/4, 见下
     'uniform vec2 uRes;',
     'uniform vec2 uCam;',
     'uniform float uZoom;',
@@ -172,10 +178,11 @@
        林 44..47 / 沙 48 / 草 49 只做轻微随机;
        灵脉峰 32..35(异灵根) 与 50..54(五行) 用 vein-skin.js 的**分档**倍率:
          大/中/小 三档高度不同 (levels[].hScale), 且各自收窄随机包络 (levels[].hRand);
-       ⚠ 通道复用 (九版): 灵脉峰的 iElev **既不是海拔、也不只是等级**, 而是**归一化复合值**
-         `(灵脉等级 + 该格真实海拔) / 3` —— 精灵段的海拔通道是 u16 量化 (值域 [0,1]), 装不下
-         「等级 0..2」+「海拔 0..1」两个量, 故在 main.js refreshChunkProps 里先压进 [0,1],
-         这里再还原 (等级 = floor(3*iElev), 海拔 = frac(3*iElev))。见下面的 ve/bhs 分支。
+       ⚠ 通道复用 (九版, 十一版除数改 4): 灵脉峰的 iElev **既不是海拔、也不只是等级**, 而是
+         **归一化复合值** `(灵脉等级 + 该格真实海拔) / 4` —— 精灵段的海拔通道是 u16 量化
+         (值域 [0,1]), 装不下「等级 0..3」+「海拔 0..1」两个量, 故在 main.js refreshChunkProps
+         里先压进 [0,1], 这里再还原 (等级 = floor(4*iElev), 海拔 = frac(4*iElev))。见下面的
+         ve/bhs 分支。上界 (3+1)/4 = 1.0 **恰好不溢出** (换档位数时必须重算这个上界)。
          大世界山照旧直接下发海拔 (else-if 分支里 iElev 就是 e)。
        wScale 收窄 + hScale 抬高 ⇒ 方框近似正方, 山形不被横向拉宽 (历史画崩的根因)。
        ⚠ 灵脉峰还**额外收窄高度随机包络** —— 否则同一 hash 抖动区间会盖过倍率差:
@@ -193,18 +200,22 @@
     '  float hs; float ws = 1.0; float hrand = fract(iHash*5.17);',
     '  float vbaseH = 0.0; float vbaseW = 0.0;',      // 山地底座 (仅灵脉格非 0)
     '  if ((iSprite > 31.5 && iSprite < 35.5) || (iSprite > 49.5 && iSprite < 54.5)) {',
-    '    float vz = clamp(iElev, 0.0, 1.0) * 3.0;',   // 复合通道 → 等级 + 海拔
-    '    float vlv = min(floor(vz), 2.0);',           // 灵脉等级 (0大/1中/2小)
+    '    float vz = clamp(iElev, 0.0, 1.0) * 4.0;',   // 复合通道 → 等级 + 海拔 (除数 4 = 四档)
+    '    float vlv = min(floor(vz), 3.0);',           // 灵脉等级 (0大/1中/2小/3从属)
     '    float ve  = vz - floor(vz);',                // 该格真实海拔 (0..1)
     '    ws = ' + VEIN_SHAPE.w.toFixed(3) + ';',
-    '    hs = (vlv < 0.5) ? ' + VH(0) + ' : ((vlv < 1.5) ? ' + VH(1) + ' : ' + VH(2) + ');',
+    '    hs = (vlv < 0.5) ? ' + VH(0) + ' : ((vlv < 1.5) ? ' + VH(1) +
+           ' : ((vlv < 2.5) ? ' + VH(2) + ' : ' + VH(3) + '));',
     '    hrand = (vlv < 0.5) ? mix(' + VLO(0) + ', ' + VHI(0) + ', hrand)',
     '          : (vlv < 1.5) ? mix(' + VLO(1) + ', ' + VHI(1) + ', hrand)',
-    '          :               mix(' + VLO(2) + ', ' + VHI(2) + ', hrand);',
+    '          : (vlv < 2.5) ? mix(' + VLO(2) + ', ' + VHI(2) + ', hrand)',
+    '          :               mix(' + VLO(3) + ', ' + VHI(3) + ', hrand);',
     /* 「原来的山」: 与大世界山**同一档公式** (海拔 → 高度倍率), 平原/水面 → 0 */
     '    float bhs = 0.0;',
     '    if (ve > 0.84)      bhs = mix(' + SNOW_LO + ', ' + SNOW_HI + ', clamp((ve-0.84)/0.12, 0.0, 1.0));',
     '    else if (ve > 0.70) bhs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((ve-0.70)/0.14, 0.0, 1.0));',
+    /* 十一版 R3-a: 底座**下限** —— 小灵脉 (LIFT_CORE[2]=0.70) 恰卡在严格边界上, 否则底座恒 0 */
+    '    bhs = max(bhs, ' + VBMIN + ');',
     '    bhs *= ' + VBASE + ';',
     '    vbaseH = uR*(3.3+1.2*hrand) * bhs;',
     '    vbaseW = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*bhs) * ' + VBASEW + ';',

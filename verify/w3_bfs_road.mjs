@@ -11,7 +11,7 @@
  *     下界剪枝  剩余代价可采纳下界 (最小权重×六边距) 使 g+h > 预算 的格跳过
  *   故本回归改为直接断言 BFS 的语义契约。
  *
- * 本回归锁七件事:
+ * 本回归锁八件事:
  *   ① 权重表与文档 §二 一致 (深海8/浅海6/沙岸4/草地3/林地4/沙漠5/山地8/雪峰8, 8 个 biome 全覆盖)
  *   ② 双预算上界: 任何成功路径 Σ权重 ≤ COST_MAX 且 步数 ≤ STEPS_MAX
  *   ③ 权重累加自洽: Σ权重 ∈ [minW×hexDist, COST_MAX] (下界=最便宜地形直连)
@@ -19,6 +19,8 @@
  *   ⑤ 剪枝不改变结果: 与「去掉下界剪枝」的参照实现逐对路径完全一致
  *   ⑥ 确定性: 同对重复调用 / 跨引擎实例 路径一致 (跨会话一致性的前提)
  *   ⑦ 端到端: 建路率 ≥ 阈值 + 最慢单 region(含 roadsNear) < 预算 ms
+ *   ⑧ R9 灵脉禁路: 严格模式可连通 ⇒ 路径逐位一致且不含灵脉格; 穿脉只许兜底;
+ *      路网灵脉格路段占比 < 5% (2026-09-15 十一版 R9 新增)
  *   附: 权重预算扫描 (信息性输出, 便于日后调参时判断影响面)
  *
  * 用法: node verify/w3_bfs_road.mjs [样本区域数] [最慢单region上界ms]
@@ -84,6 +86,15 @@ const REF_SRC = mapSrc.replace(PRUNE_H, '')
                       .replace(BUCKET_ALLOC, `for (var b = 0; b <= ${BUCKET_MAX}; b++) buckets.push([]);`)
                       .replace(LOOP_BOUND, `for (var f = 0; f <= ${BUCKET_MAX}; f++) {`);
 const REF = makeEngine(REF_SRC);
+
+/* ---- R9 (2026-09-15 十一版): 「严格禁穿灵脉」对照实现 ----
+   bfsRoad 生产路径 = 严格模式 (allowVein=false) 优先, 无路才退到兜底 (allowVein=true 可穿灵脉)。
+   把纯地形分支的兜底去掉 ⇒ 得到「打死不穿灵脉」的严格引擎, 用来断言:
+     · 严格可连通 ⇒ 生产路径必须逐位等于严格路径 (绕行优先), 且不含灵脉格;
+     · 生产路径含灵脉格 ⇒ 只可能是严格无路的兜底穿行 (连通性优先, 见 §9 放宽口径)。 */
+const STRICT_SRC = mapSrc.replace(/return pS \|\| search\(stepsTight, true\);/, 'return pS;');
+if (STRICT_SRC === mapSrc) throw new Error('R9: 未找到严格模式兜底语句 (改了 bfsRoad 请同步本脚本)');
+const STRICT = makeEngine(STRICT_SRC);
 
 console.log(`== 道路 A* 寻路回归 (COST_MAX=${COST_MAX}, STEPS_MAX=${STEPS_MAX}, ROAD_W=[${W}]) ==\n`);
 
@@ -196,7 +207,31 @@ check('⑥ 同对重复调用路径一致 (确定性)', detBad === 0, `${detBad}
   check('⑥ 跨引擎实例路径一致 (300 对)', bad === 0, `${bad} 例不一致`);
 }
 
-/* ---- ⑦ 端到端: 建路率 + 最慢单 region (用较小跨度控制耗时, 结论与全域一致) ---- */
+/* ---- ⑧ R9 (2026-09-15 十一版): 灵脉格禁路, 道路绕行灵脉 ---- */
+{
+  STRICT.init('42');
+  let builtN = 0, veinCross = 0, strictMismatch = 0, strictWithVein = 0, crossCells = 0, totalCells = 0;
+  for (const [aq, ar, bq, br] of sampled) {
+    const p = MG.bfsRoad(aq, ar, bq, br);
+    const ps = STRICT.bfsRoad(aq, ar, bq, br);
+    /* 严格模式能连通 ⇒ 生产路径必须 = 严格路径 (未触发兜底) */
+    if (ps && JSON.stringify(p) !== JSON.stringify(ps)) strictMismatch++;
+    if (!p) continue;
+    builtN++;
+    let hasVein = false;
+    for (let k = 0; k < p.length; k++) {
+      totalCells++;
+      if (MG.fields(p[k][0], p[k][1]).vein) { hasVein = true; crossCells++; }
+    }
+    if (hasVein) { veinCross++; if (ps) strictWithVein++; }   // ps 非空却仍穿脉 = 本可绕行却破例 (缺陷)
+  }
+  const ratio = totalCells ? crossCells / totalCells : 0;
+  check('⑧ 严格模式可连通 ⇒ 生产路径逐位一致 (绕行优先于穿脉)', strictMismatch === 0, `${strictMismatch} 例不一致`);
+  check('⑧ 生产路径穿脉 ⇒ 必为严格模式无路的兜底 (连通性优先, 非本可绕行)', strictWithVein === 0, `${strictWithVein} 例本可绕行却穿脉`);
+  check('⑧ 灵脉格上路点占比 < 5% (禁路有效, 仅兜底破例)', ratio < 0.05, `${(ratio * 100).toFixed(2)}%`);
+  console.log(`  R9: 抽样 ${builtN} 条建成路 → 穿灵脉 ${veinCross} 条 (均为兜底), 路点穿脉率 ${(ratio * 100).toFixed(2)}% (${crossCells}/${totalCells})`);
+}
+
 const MG3 = makeEngine(mapSrc);
 MG3.init('seed-check');
 {
@@ -243,6 +278,7 @@ MG3.init('seed-check');
     return false;
   };
   const seenPair = new Set(), seenRoad = new Set();
+  const roadObjs = [];                                       // R9: 收集路对象, 统计灵脉格路段
   let attempted = 0, worst = 0, total = 0, cells = 0;
   const cellMs = [];                                       // 逐区域格耗时 (判据见 ⑦ 说明)
   for (let i = -E2E_SPAN; i <= E2E_SPAN; i++) {
@@ -266,7 +302,7 @@ MG3.init('seed-check');
       const t = performance.now();
       const roads = MG3.roadsNear(i, j, 9999);
       const dt = performance.now() - t;
-      for (const rd of roads) seenRoad.add(rd.key);
+      for (const rd of roads) { seenRoad.add(rd.key); roadObjs.push(rd); }
       total += dt; cells++;
       cellMs.push(dt);
       if (dt > worst) worst = dt;
@@ -274,6 +310,18 @@ MG3.init('seed-check');
   }
   const built = seenRoad.size;
   const rate = built / attempted;
+  /* R9: 真实路网上「灵脉格路段」统计 (只可能来自兜底穿行; 期望极低)。
+     ⚠ roadObjs 含跨区域重复返回的同一条路 ⇒ 按 key 去重后再统计。 */
+  const seenObj = new Map();
+  for (const rd of roadObjs) if (!seenObj.has(rd.key)) seenObj.set(rd.key, rd);
+  let netCells = 0, netVein = 0;
+  for (const rd of seenObj.values()) {
+    rd.tiles.forEach((t) => {
+      netCells++;
+      const sp = t.split(',');
+      if (MG3.fields(+sp[0], +sp[1]).vein) netVein++;
+    });
+  }
   const top = cellMs.slice().sort((a, b) => b - a);
   const third = top[Math.min(2, top.length - 1)];
   console.log(`\n  seed=seed-check ±${E2E_SPAN}: 建成路 ${built} 条 / 可建候选对(预算内且未被 RNG 支配) ${attempted} → 建路率 ${(rate * 100).toFixed(1)}%`);
@@ -281,6 +329,10 @@ MG3.init('seed-check');
     + ` 单区域 Top5: ${top.slice(0, 5).map((x) => x.toFixed(0)).join('/')}ms`);
   /* 阈值: 可建对绝大多数应连通 (旧近邻版实测 ~89-92%); 留出余量, 只在「路网大幅退化」时报错 */
   check('⑦ 建路率 ≥ 70% (路网未退化)', rate >= 0.70, `${(rate * 100).toFixed(1)}%`);
+  /* R9: 路网灵脉格路段占比 (禁路有效 ⇒ 仅兜底破例; 期望 <5%) */
+  const netRatio = netCells ? netVein / netCells : 0;
+  check('⑧ 路网灵脉格路段占比 < 5% (禁路有效, 仅兜底穿行)', netRatio < 0.05, `${(netRatio * 100).toFixed(2)}% (${netVein}/${netCells})`);
+  console.log(`  ⑦ 路网灵脉格路段: ${netVein}/${netCells} (${(netRatio * 100).toFixed(2)}%)`);
   /* ⑦ 时间判据 (2026-09-14 重标, B 版同时改):
      单区域 **max** 在本机是噪声主导的极值统计 —— 同一份代码实测 221 / 290 / 297 / 307 / 605ms
      (605 那次整轮总耗时也从 14s 涨到 19s, 是机器拥塞不是代码)。用它做阈值必然 flaky。

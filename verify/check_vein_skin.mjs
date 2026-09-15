@@ -15,16 +15,17 @@
  *     4. 每个调色板 6 个色字段齐备, 均为 3 元整数 0..255
  *     5. variantSprite(name) == 32 + 该异灵根在 order 里的下标; 未知名 → -1
  *     6. shape.hScale/wScale 有限且 > 0
- *   B. 等级契约 (2026-09-14 三轮: 大/中/小 分档)
- *     7. levels 有 3 档, level 序号 == 0/1/2, key == 大/中/小
+ *   B. 等级契约 (2026-09-14 三轮: 大/中/小; 2026-09-15 十一版加第 4 档「从属」)
+ *     7. levels 有 4 档, level 序号 == 0/1/2/3, key == 大/中/小/从属
  *     8. 「大的不变」: levels[0].hScale == shape.hScale 且 hRand == [0.72, 1.00]
  *     9. hScale 严格递减; 每档 hRand 合法 (0<=lo<hi<=1)
- *    10. 视觉高度**严格不重叠**: 大min > 中max, 中min > 小max
+ *    10. 视觉高度**严格不重叠**: 大min > 中max, 中min > 小max, 小min > 从属max
  *        (视觉高度倍数 = (3.3 + 1.2*hRand) * hScale)
- *    11. **占地** (引擎侧 veinFootKeep): **三档一律只占本格 = 1 格** (2026-09-14 六版) ——
- *        等级只影响高度、不影响占地; 六邻与更远处一律不保留
+ *    11. **占地** (引擎侧 veinFootKeep): **按档占地** (2026-09-15 十一版) ——
+ *        大 7 格 (本格 + 六邻) / 中 3 格 (本格 + 西南 + 东南) / 小 1 格 (仅本格);
+ *        更远处一律不保留。引擎侧从属格的高度档 = CFG.VEIN_SAT_LEVEL (= 3)。
  *    12. 相对高度倍率仍是"高"档 (hScale > 1.55) —— 上屏尺寸另由 shape.sizeScale 缩放
- *    13. **上屏尺寸总倍率** shape.sizeScale 有效 (0<s<=1.2)、上屏后三档仍严格不重叠、
+ *    13. **上屏尺寸总倍率** shape.sizeScale 有效 (0<s<=1.2)、上屏后**四档**仍严格不重叠、
  *        且大档上屏高 ≤ 3.6 uR (≈1.8 格高: 单格灵脉不许大到越格成灾)
  *   C. 山地底座契约 (2026-09-14 九版, 用户: "灵脉在山地要在原来的山的基础上加上高度")
  *    14. shape.terrainBase 有效 (0<=tb<=2); 引擎 LIFT_CORE 三档 >= 0.70 (⇒ 灵脉格必在山地档
@@ -33,6 +34,10 @@
  *    16. **又高又瘦** (2026-09-15 十版, 用户: "我的目标是又高又瘦的"): 大档上屏
  *        **总高 > 总宽** (W/H < 1, 含底座) —— 九版把底座宽度也叠上 ⇒ W 9.9 > H 8.0,
  *        整座灵峰读起来"变宽了"; 本条把这个退化钉死
+ *    17. **底座下限** shape.terrainBaseMin 有效 (0 <= tbm <= 1.2) 且**小档底座不为 0**
+ *        (2026-09-15 十一版 R3-a, 用户: "小灵脉 高度偏低了") —— 底座判档是**严格** `e > 0.70`,
+ *        而 LIFT_CORE[2] = 0.70 恰好压在边界 ⇒ 无下限时小灵脉底座恒 0 (只有峰体没有山脚,
+ *        上屏总高仅大档的 28%)。本断言语义上要求"小档底座的可见高度 >= 1 uR"。
  *
  * 用法: node verify/check_vein_skin.mjs
  * ============================================================ */
@@ -103,16 +108,19 @@ check('shape.hScale / wScale 为正有限数', Number.isFinite(sh.hScale) && sh.
   `h=${sh.hScale} w=${sh.wScale}`);
 
 /* ============================ B. 等级契约 ============================ */
-console.log('\n== 灵脉契约 B: 等级分档 (大/中/小 ↔ level 0/1/2) ==');
+console.log('\n== 灵脉契约 B: 等级分档 (大/中/小/从属 ↔ level 0/1/2/3) ==');
 const LV = VS.levels;
-check('VeinSkin.levels 存在且有 3 档', Array.isArray(LV) && LV.length === 3, `实际 ${LV && LV.length}`);
-if (!Array.isArray(LV) || LV.length !== 3) {
+check('VeinSkin.levels 存在且有 4 档', Array.isArray(LV) && LV.length === 4, `实际 ${LV && LV.length}`);
+if (!Array.isArray(LV) || LV.length !== 4) {
   console.log('\n========== 结果: ' + (failures ? failures + ' 项失败' : '全部通过 ✔') + ' ==========');
   process.exit(1);
 }
-check('等级序号 == 0/1/2 且 key == 大/中/小',
-  eq(LV.map((l) => l.level), [0, 1, 2]) && eq(LV.map((l) => l.key), ['大', '中', '小']),
+check('等级序号 == 0/1/2/3 且 key == 大/中/小/从属',
+  eq(LV.map((l) => l.level), [0, 1, 2, 3]) && eq(LV.map((l) => l.key), ['大', '中', '小', '从属']),
   `${LV.map((l) => l.key + l.level).join(' ')}`);
+/* 11版: 引擎侧从属格的高度档必须与本表的「从属」下标一致 */
+check('引擎 CFG.VEIN_SAT_LEVEL == 从属档下标 (3)',
+  (MG.CFG && MG.CFG.VEIN_SAT_LEVEL) === LV[3].level, `引擎 ${MG.CFG && MG.CFG.VEIN_SAT_LEVEL} / 配置 ${LV[3].level}`);
 
 /* 8. 「大的不变」——大档必须与分档前的 shape 值逐项一致 */
 check('「大的不变」: levels[0].hScale == shape.hScale', LV[0].hScale === sh.hScale,
@@ -120,8 +128,8 @@ check('「大的不变」: levels[0].hScale == shape.hScale', LV[0].hScale === s
 check('「大的不变」: levels[0].hRand == [0.72, 1.00]', eq(LV[0].hRand, [0.72, 1.00]), JSON.stringify(LV[0].hRand));
 
 /* 9. hScale 严格递减 + 包络合法 */
-check('三档 hScale 严格递减 (大>中>小)',
-  LV[0].hScale > LV[1].hScale && LV[1].hScale > LV[2].hScale,
+check('四档 hScale 严格递减 (大>中>小>从属)',
+  LV[0].hScale > LV[1].hScale && LV[1].hScale > LV[2].hScale && LV[2].hScale > LV[3].hScale,
   LV.map((l) => l.hScale).join(' > '));
 const badEnv = LV.filter((l) => !Array.isArray(l.hRand) || l.hRand.length !== 2 ||
   !(l.hRand[0] >= 0 && l.hRand[0] < l.hRand[1] && l.hRand[1] <= 1));
@@ -133,24 +141,26 @@ const vh = (l) => [(3.3 + 1.2 * l.hRand[0]) * l.hScale, (3.3 + 1.2 * l.hRand[1])
 const R = LV.map(vh);
 check('视觉高度不重叠: 大min > 中max', R[0][0] > R[1][1], `大${R[0][0].toFixed(2)} vs 中max${R[1][1].toFixed(2)}`);
 check('视觉高度不重叠: 中min > 小max', R[1][0] > R[2][1], `中${R[1][0].toFixed(2)} vs 小max${R[2][1].toFixed(2)}`);
+check('视觉高度不重叠: 小min > 从属max', R[2][0] > R[3][1], `小${R[2][0].toFixed(2)} vs 从属max${R[3][1].toFixed(2)}`);
 console.log('  视觉高度 (uR 倍数) 大 ' + R[0][0].toFixed(2) + '~' + R[0][1].toFixed(2) +
             ' | 中 ' + R[1][0].toFixed(2) + '~' + R[1][1].toFixed(2) +
             ' | 小 ' + R[2][0].toFixed(2) + '~' + R[2][1].toFixed(2) +
+            ' | 从属 ' + R[3][0].toFixed(2) + '~' + R[3][1].toFixed(2) +
             '   (大世界: 山地 ≤5.85 / 雪峰 ≤6.98)');
 
-/* 11. 占地 —— 引擎侧 veinFootKeep: 三档一律只占本格 (2026-09-14 六版) */
+/* 11. 占地 —— 引擎侧 veinFootKeep: **按档占地** (2026-09-15 十一版) */
 const RING = [[0, 0], [1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];   // d <= 1 的七个偏移
 check('引擎导出 veinFootKeep', typeof MG.veinFootKeep === 'function', '');
 if (typeof MG.veinFootKeep === 'function') {
   const kept = (lv) => RING.filter(([dq, dr]) => MG.veinFootKeep(lv, dq, dr));
-  for (const lv of [0, 1, 2]) {
-    const k = kept(lv);
-    check(`level ${lv} 占地 = 仅本格 = 1 格`, eq(k, [[0, 0]]), JSON.stringify(k));
-  }
-  check('等级不影响占地 (大/中/小 同 footprint)',
-    [0, 1, 2].every((lv) => eq(kept(lv), kept(0))), '');
-  const OUT = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1], [2, 0], [0, 2], [-2, 2], [3, 3]];
-  check('六邻与更远处一律不保留 (灵脉不再是山脉群)',
+  check('level 0 (大) 占地 = 本格 + 六邻 = 7 格', kept(0).length === 7, JSON.stringify(kept(0)));
+  check('level 1 (中) 占地 = 本格 + 西南(-1,+1) + 东南(0,+1) = 3 格',
+    eq(kept(1), [[0, 0], [0, 1], [-1, 1]]), JSON.stringify(kept(1)));
+  check('level 2 (小) 占地 = 仅本格 = 1 格', eq(kept(2), [[0, 0]]), JSON.stringify(kept(2)));
+  check('等级**决定**占地形态 (大/中/小 各不相同)',
+    !eq(kept(0), kept(1)) && !eq(kept(1), kept(2)), '');
+  const OUT = [[2, 0], [0, 2], [-2, 2], [2, -1], [3, 3], [-2, -2]];
+  check('d >= 2 一律不保留 (七星只铺紧邻一圈)',
     [0, 1, 2].every((lv) => OUT.every(([dq, dr]) => MG.veinFootKeep(lv, dq, dr) === false)), '');
 }
 
@@ -164,13 +174,18 @@ const SS = sh.sizeScale;
 check('shape.sizeScale 有效 (0 < s <= 1.2)', Number.isFinite(SS) && SS > 0 && SS <= 1.2, String(SS));
 const eff = (l) => [(3.3 + 1.2 * l.hRand[0]) * l.hScale * SS, (3.3 + 1.2 * l.hRand[1]) * l.hScale * SS];
 const E = LV.map(eff);
-check('上屏后三档仍严格不重叠 (大min > 中max > 小max)',
-  E[0][0] > E[1][1] && E[1][0] > E[2][1],
-  `大${E[0][0].toFixed(2)}~${E[0][1].toFixed(2)} / 中${E[1][0].toFixed(2)}~${E[1][1].toFixed(2)} / 小${E[2][0].toFixed(2)}~${E[2][1].toFixed(2)}`);
+check('上屏后四档仍严格不重叠 (大min > 中max > 小max > 从属max)',
+  E[0][0] > E[1][1] && E[1][0] > E[2][1] && E[2][0] > E[3][1],
+  `大${E[0][0].toFixed(2)}~${E[0][1].toFixed(2)} / 中${E[1][0].toFixed(2)}~${E[1][1].toFixed(2)} / 小${E[2][0].toFixed(2)}~${E[2][1].toFixed(2)} / 从属${E[3][0].toFixed(2)}~${E[3][1].toFixed(2)}`);
 check('大档上屏高 ≤ 3.6 uR (≈1.8 格高: 单格灵脉不越格成灾)', E[0][1] <= 3.6, E[0][1].toFixed(2) + ' uR');
 console.log('  上屏高度 (uR × sizeScale=' + SS + ') 大 ' + E[0][0].toFixed(2) + '~' + E[0][1].toFixed(2) +
             ' | 中 ' + E[1][0].toFixed(2) + '~' + E[1][1].toFixed(2) +
-            ' | 小 ' + E[2][0].toFixed(2) + '~' + E[2][1].toFixed(2));
+            ' | 小 ' + E[2][0].toFixed(2) + '~' + E[2][1].toFixed(2) +
+            ' | 从属 ' + E[3][0].toFixed(2) + '~' + E[3][1].toFixed(2));
+/* 11 版 D1: u16 复合通道的除数必须等于档位总数 (main.js 写 (等级+海拔)/N, shader ×N)。
+   这里只做「上界不溢出」的数值断言: (档位总数-1 + 1) / 档位总数 <= 1 */
+check('复合通道上界不溢出 ((档位数-1 + 1)/档位数 <= 1, 除数 = ' + LV.length + ')',
+  (LV.length - 1 + 1) / LV.length <= 1, String((LV.length - 1 + 1) / LV.length));
 
 /* 信息: 解出屏幕方框的 W/H (renderer.js PROP_VS 的公式), 提示是否近似正方 */
 const h2 = 0.5;
@@ -190,6 +205,25 @@ check('shape.terrainBase 有效 (0 <= tb <= 2)', Number.isFinite(TB) && TB >= 0 
 const TBW = sh.terrainBaseW;
 check('shape.terrainBaseW 有效 (0 <= tbw <= 1.2, 底座宽度倍率; 0 = 只加高不加宽)',
   Number.isFinite(TBW) && TBW >= 0 && TBW <= 1.2, String(TBW));
+/* 17. **底座下限** (2026-09-15 十一版 R3-a) —— 用户: "小灵脉 高度偏低了"。
+   底座判档是**严格大于** (`ve > 0.84` / `ve > 0.70`), 而 LIFT_CORE[2] 恰好 = 0.70
+   ⇒ 无下限时小灵脉底座**恒为 0** (只有峰体、没有山脚)。这里用"严格口径"的 mtnHsStrict
+   复现该情形, 再断言 terrainBaseMin 把它兜起来。 */
+const TBM = sh.terrainBaseMin;
+check('shape.terrainBaseMin 有效 (0 <= tbm <= 1.2)', Number.isFinite(TBM) && TBM >= 0 && TBM <= 1.2, String(TBM));
+const mtnHsStrict = (e) => (e > 0.84 ? 0.95 + 0.60 * Math.min(1, (e - 0.84) / 0.12)
+                            : (e > 0.70 ? 0.55 + 0.75 * Math.min(1, (e - 0.70) / 0.14) : 0));
+const LC0 = MG.CFG && MG.CFG.LIFT_CORE;
+if (Array.isArray(LC0) && LC0.length >= 3) {
+  const hNo = (3.3 + 1.2 * 0.5) * mtnHsStrict(LC0[2]) * TB;
+  const hYes = (3.3 + 1.2 * 0.5) * Math.max(mtnHsStrict(LC0[2]), TBM) * TB;
+  check('小档底座不为 0 (LIFT_CORE[2]=' + LC0[2] + ' 压在严格边界上 ⇒ 无下限时恒 0)',
+    hNo === 0 && hYes >= 1,
+    `无下限 ${hNo.toFixed(2)} uR → 有下限 ${hYes.toFixed(2)} uR (terrainBaseMin=${TBM})`);
+  console.log('  底座 (中位 hash, 严格判档) 大 ' + ((3.3 + 1.2 * 0.5) * Math.max(mtnHsStrict(LC0[0]), TBM) * TB).toFixed(2) +
+              ' / 中 ' + ((3.3 + 1.2 * 0.5) * Math.max(mtnHsStrict(LC0[1]), TBM) * TB).toFixed(2) +
+              ' / 小 ' + hYes.toFixed(2) + ' uR  (下限 ' + TBM + ' 只兜小档: 大/中档海拔 0.80/0.75 本就在山地档内)');
+}
 const LC = MG.CFG && MG.CFG.LIFT_CORE;
 check('引擎 LIFT_CORE 三档均 >= 0.70 (⇒ 灵脉格必在山地档以上, 底座不为 0)',
   Array.isArray(LC) && LC.length === 3 && LC.every((v) => v >= 0.70), JSON.stringify(LC));

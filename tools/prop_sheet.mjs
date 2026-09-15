@@ -125,6 +125,9 @@ function boxOf(id, z, hashSeed, level) {
     tbw = (VS.shape.terrainBaseW != null) ? VS.shape.terrainBaseW : 0;
     bhs = E_BASE > 0.84 ? 0.95 + 0.60 * Math.min(1, (E_BASE - 0.84) / 0.12)
         : (E_BASE > 0.70 ? 0.55 + 0.75 * Math.min(1, (E_BASE - 0.70) / 0.14) : 0);
+    /* 十一版 R3-a: 底座下限 (vein-skin.js shape.terrainBaseMin) —— 与 renderer.js PROP_VS 同口径 */
+    var tbMin = (VS.shape.terrainBaseMin != null) ? VS.shape.terrainBaseMin : 0;
+    if (bhs < tbMin) bhs = tbMin;
   }
   var W = 3.4641016 * R * (1.55 + 0.65 * h2) * (0.82 + 0.22 * hs) * ss * ws
         + tbw * 3.4641016 * R * (1.55 + 0.65 * h2) * (0.82 + 0.22 * bhs);

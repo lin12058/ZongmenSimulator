@@ -161,7 +161,9 @@ list.forEach((it) => {
   bodySvg += BI.svgBody({
     kind: b.kind, cx: it.x, cy: it.y, R, q: b.q, r: b.r,
     variant: v, tier: b.tier, face: it.fi.face, water: it.fi.water,
-    detail: 3, plate: true, plateA: 0.20
+    detail: 3, plate: true, plateA: 0.20,
+    /* R5b: 建筑格是水 → 生产代码会垫干栏木台 (水上人家)。地类真值取自引擎。 */
+    onWater: (() => { const f = MG.fields(b.q, b.r); return !!f && f.biome <= 1; })()
   });
   if (!NO_LABEL) {
     /* 名牌带浅底描边 (paint-order=stroke), 密集聚落里也压不糊 */
@@ -186,7 +188,7 @@ const PAD = 0.35 * R;
 x0 -= PAD; x1 += PAD; y0 -= PAD; y1 += PAD;
 const VB = [x0, y0, x1 - x0, y1 - y0];
 
-const TIER_NAME = { sect: '宗门', city: '城', town: '镇', village: '村' };
+const TIER_NAME = { sect: '宗门', city: '城', town: '镇', village: '村', fishing: '渔村' };
 const title = `${st.name} · ${TIER_NAME[st.type] || st.type} 平面（格位 ${st.q},${st.r}）`;
 const sub = `种子「${SEED}」· 真源 web/js/bldg_ink.js + 引擎真值地类 · ` +
   `${list.length} 座建筑 · 半径 ${R}px · 六边格为地图同款网格 · 朝向/贴格/遮挡序均由生产代码推出`;

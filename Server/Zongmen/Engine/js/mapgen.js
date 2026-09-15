@@ -59,12 +59,15 @@
     COMM_P_MIN: 0.60, COMM_P_SPIRIT: 0.50,
     SUB_ATTEMPTS: 14,
     LIFT_CORE: [0.80, 0.75, 0.70], LIFT_ARM_OFF: 0.05,
+    VEIN_SAT_LEVEL: 3,
     ECO_WATER: 0.25, ECO_WOOD: 0.18,
     ECO_FIRE_DRY: 0.22, ECO_FIRE_HEAT: 0.15, ECO_METAL: 0.08,
     ROAD_COST_MAX: 120, ROAD_STEPS_MAX: 40, ROAD_W: [8, 6, 4, 3, 4, 5, 8, 8],
     ROAD_W_ROAD: 2, ROAD_DI_MAX10: 14,
     PROSPECT_R: 4, PROSPECT_REFINE: 6, TOWN_R: 3, TOWN_INNER_R: 1, TOWN_HOUSE_RATIO: 0.3, TERR_SCAN_R: 1, FARM_SPIRIT: 0.35,
-    TOWN_BUILD_MAX: { village: 8, town: 16, city: 25, sect: 16 },
+    TOWN_BUILD_MAX: { village: 8, town: 16, city: 25, sect: 16, fishing: 8 },
+    SETTLE_MIN_DIST: 7,
+    SEA_TERR: -10, SEA_SETTLE_MIN_SPIRIT: 0.20, SEA_SETTLE_NEAR_LAND: 1,
     TRADE_REACH: 40
   };
   /* A10 一致性校验: 若 config 已加载, 兜底表与真源的键集必须一致 (防止只改一处)。
@@ -108,14 +111,25 @@
   /* 邻居槽位 (轴坐标) 按 60°*k 排列: 0:东 1:东南 2:西南 3:西 4:西北 5:东北 */
   var NEIGH_SLOTS = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
 
-  /* 灵脉占地 (2026-09-14 六版): **三档一律只占本格** ——
-     灵脉是「一根独立的灵峰」, 不是一个山脉群。早先按等级铺 7/3/1 格, 密排后连成
-     一片尖顶山簇, 实机读作「三角形山」, 与美术方向 (一峰独立 + 山脚化进地形) 不符。
-     等级**只影响前端高度倍率** (web/js/vein-skin.js levels[]), **不影响占地**。
+  /* 灵脉占地 (2026-09-15 十一版): **按档占地** ——
+     大 → 本格 + 六邻 = **7 格** (「一主六从」的七星群);
+     中 → 本格 + 西南(-1,+1) + 东南(0,+1) = **3 格** (用户: "左下角也右下角比他低的");
+     小 → 本格 = **1 格** (无从属)。
+     ⚠ 六版曾把它砍成「一律只占本格」, 理由是 7/3/1 密排后连成一片**等高**尖顶山簇,
+       实机读作「三角形山」。十一版加回来时同步做了两件事, 专门破解当初那个问题:
+         ① 从属格改用**专用第 4 档高度** (vein-skin.js levels[3]「从属」, 比小灵脉还矮还收)
+            ⇒ 中心与从属落差明显, 读作"一主众从", 不是"一堆山尖";
+         ② 从属格**不进 comm.veins[]** ⇒ 不出名牌、不进统计、不污染群落发育 (§2.2)。
+     槽位口径 = NEIGH_SLOTS (0东 1东南 2西南 3西 4西北 5东北) ⇒ 左下 = 西南, 右下 = 东南。
      纯函数 (只依赖 level 与该格相对灵脉中心的轴向偏移 dq,dr) ⇒ 跨区块/跨会话一致。
-     ⚠ level 参数保留: 「等级契约」由 verify/check_vein_skin.mjs 逐档断言占地 (三档同 1 格)。 */
+     ⚠ level 语义: 0/1/2 = 独立灵脉的大/中/小; **从属格不会走到这里** (它按"所属灵脉的
+       level"判定占地) —— 契约由 verify/check_vein_skin.mjs 与 verify/check_vein_cluster.mjs 断言。 */
   function veinFootKeep(level, dq, dr) {
-    return dq === 0 && dr === 0;
+    if (level <= 0) return hexDist(0, 0, dq, dr) <= 1;      // 大: 本格 + 六邻 (七星)
+    if (level === 1) {                                       // 中: 本格 + 西南 + 东南
+      return (dq === 0 && dr === 0) || (dq === -1 && dr === 1) || (dq === 0 && dr === 1);
+    }
+    return dq === 0 && dr === 0;                             // 小: 仅本格
   }
 
   /* ---------- 命名词库 (觅长生风) ---------- */
@@ -148,7 +162,8 @@
   var elevCache = new Map();
   var fieldCache = new Map();
   var regionCache = new Map();   // "i,j" -> 区域信息
-  var settleCache = new Map();   // "i,j" -> 聚落数组
+  var settleCache = new Map();   // "i,j" -> 聚落数组 (对外: 已过 R7 最小间距抑制)
+  var settleRawCache = new Map();// "i,j" -> 聚落数组 (**无**抑制; 仅内部供邻域间距判定查询)
   var roadCache = new Map();     // "a|b" -> 道路
   /* ⚠ B (2026-09-14) 起**无建路顺序依赖**: 每条边的折线只由「该边 + 静态地形」决定
      (纯地形 A*, 不再把已建路格当 2 费高速路骑) ⇒ 扫描顺序 / 缓存冷热 / reload 都不改路形。
@@ -249,7 +264,7 @@
     nMask = new NL.SimplexNoise(rng);
     nDetail = new NL.SimplexNoise(rng);
     elevCache.clear(); fieldCache.clear();
-    regionCache.clear(); settleCache.clear();
+    regionCache.clear(); settleCache.clear(); settleRawCache.clear();
     roadCache.clear(); demandCache.clear(); commCache.clear(); veinNearCache.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     skeletonCache.clear();  // A2
@@ -363,13 +378,16 @@
 
     /* 灵脉格: 覆写显示用 biome (8..12 = 金木水火土灵脉格)
        仅陆地出灵脉 —— 边界带被沉海的灵脉不再覆写, 否则会在海面上留"无根灵脉峰"。
-       占地**三档一律只占本格** (2026-09-14 六版, 见 veinFootKeep()); 高度分档在前端
-       vein-skin.js levels。 */
+       占地**按档**: 大 7 格 (本格 + 六邻) / 中 3 格 / 小 1 格 (2026-09-15 十一版,
+       见 veinFootKeep()); 高度分档在前端 vein-skin.js levels。
+       ⚠ 从属格 (d ≥ 1) 的 level 写**专用第 4 档** CFG.VEIN_SAT_LEVEL(=3), 而**不是**"中心档+1"
+         —— 它是"从属峰"的独立高度档, 与"独立小灵脉"区分开 (前者更矮更收)。 */
     var vinfo = null;
     if (vn && vn.d <= 1 && e >= SEA_LEVEL) {
       if (veinFootKeep(vn.v.level, q - vn.v.q, r - vn.v.r)) {
         vinfo = { element: vn.v.element, variant: vn.v.variant,
-                  level: vn.v.level, d: vn.d, name: vn.v.name };
+                  level: vn.d === 0 ? vn.v.level : (CFG.VEIN_SAT_LEVEL | 0),
+                  d: vn.d, name: vn.v.name };
       }
     }
     var disp = vinfo ? 8 + vinfo.element : biome;
@@ -406,7 +424,8 @@
    *   第 7 行: 56/57 山地·横岭变体, 58/59 雪峰·横岭变体, 60/61 草地小山包, 62/63 草地孤树
    * 灵脉峰取色/造型在**前端** (web/js/vein-skin.js): 本函数只负责「给哪个精灵位」。
    * 灵脉峰**高度分档**也在前端 (vein-skin.js levels[]), 等级经实例通道 iElev 下发
-   * (buildChunk 里 `e: f.vein ? f.vein.level : f.e`); **占地**在本文件 veinFootKeep() (恒本格)。 */
+   * (buildChunk 里 `e: f.vein ? f.vein.level : f.e`); **占地**在本文件 veinFootKeep()
+   * (十一版起按档: 大 7 格 / 中 3 格 / 小 1 格)。 */
   function propSpriteFor(f) {
     var b = f.disp != null ? f.disp : f.biome;
     if (b >= 8) {
@@ -611,6 +630,7 @@
     if (type === 'city') return pick(NAME.cityPre, 3) + '城';
     if (type === 'town') return pick(NAME.townPre, 4) + pick(NAME.townSuf || ['坊市', '镇', '集'], 5);
     if (type === 'poi') return pick(NAME.poi, 6);
+    if (type === 'fishing') return pick(NAME.villPre, 7) + '渔村';   // R5: 海上渔村
     return pick(NAME.villPre, 7) + '村';
   }
   NAME.townSuf = ['坊市', '镇', '集'];
@@ -626,12 +646,29 @@
    * 三者皆为纯函数 (只依赖 seed 地形/灵脉/坐标), 结果按 key 缓存 → 跨区块、
    * 跨会话完全一致 (服务端与客户端各自算出的中心/足迹必须逐格相同)。
    * ============================================================ */
-  var LANDUSE_PRI = { '灵枢': 0, '高阶灵地': 1, '水岸': 2, '良田': 3, '矿脉': 4, '林地': 5, '灼壤': 6, '村落': 9 };
+  /* 地皮优先级 (越小越先占外环名额)。⚠ 2026-09-15 十一版:
+     · '灵枢' / '高阶灵地' 两片地皮**作废** (R4: 灵脉格禁建; D4: 5 种建筑改判宗门附属);
+     · 新增 '宗门附属' (D4): 只出现在 **sect 聚落** 的外环, 优先级最高 (1) ⇒ 宗门先把
+       「灵枢殿/聚灵阵/祭坛/炼丹殿/炼器殿」铺满, 再谈其他;
+     · 'vein' (灵脉格) **不在本表** —— 它根本不会进入建筑分支 (growTownFootprint 里
+       显式 `continue`), 放进优先级表反而会被当成"合法地皮"。 */
+  var LANDUSE_PRI = { '宗门附属': 1, '水岸': 2, '渔家': 2, '良田': 3, '矿脉': 4, '林地': 5, '灼壤': 6, '村落': 9 };
   /* 地皮 → 建筑候选池 (r/a = 主产出, x/xa = 附加产出); 村落皮为民房/仓库 (无产出) */
   var BUILDINGS = {
-    '灵枢':     [{ k: '灵枢殿', r: '灵', a: 3 }, { k: '聚灵阵', r: '灵', a: 2 }, { k: '祭坛', r: '灵', a: 2 }],
-    '高阶灵地': [{ k: '炼丹殿', r: '丹', a: 2 }, { k: '炼器殿', r: '器', a: 2 }],
+    /* D4 (2026-09-15 十一版): 宗门附属 —— 原「灵枢 / 高阶灵地」两片地皮的 5 种建筑,
+       改判到宗门聚落 (不再与灵脉格绑定)。宗门因此成为 灵/丹/器 的主产地。 */
+    '宗门附属': [{ k: '灵枢殿', r: '灵', a: 3 }, { k: '聚灵阵', r: '灵', a: 2 }, { k: '祭坛', r: '灵', a: 2 },
+                 { k: '炼丹殿', r: '丹', a: 2 }, { k: '炼器殿', r: '器', a: 2 }],
     '水岸':     [{ k: '码头', r: '渔', a: 2 }, { k: '渔船坞', r: '渔', a: 2 }, { k: '渔亭', r: '渔', a: 1 }],
+    /* R5b (2026-09-15 十一版): **渔家** —— 海上渔村的**水上格**专用地皮。
+       旧口径把浅海/沙岸一律判 '水岸', 而水岸池只有码头/渔船坞/渔亭 ⇒ 渔村 8 格全是
+       水工设施, 用户看到的是"一片栈桥/桥梁群"而不是渔村 ("渔村是渔村不是一个桥梁,
+       你要有渔村的样子")。本池以**水上民居**为主 (民房/仓库), 水工只占少数,
+       另附渔船出没的渔获产出 (仍出 '渔', 免得渔村把渔产归零)。
+       权重靠**重复条目**表达 (池内等概率抽取 ⇒ 条目数即权重), 逐格按 hash 抽,
+       与扫描顺序无关 ⇒ 确定性。 */
+    '渔家':     [{ k: '民房' }, { k: '民房' }, { k: '民房' }, { k: '仓库' }, { k: '仓库' },
+                 { k: '码头', r: '渔', a: 2 }, { k: '渔船坞', r: '渔', a: 2 }, { k: '渔亭', r: '渔', a: 1 }],
     '良田':     [{ k: '农田', r: '粮', a: 2 }, { k: '磨坊', r: '粮', a: 3 }, { k: '谷仓', r: '粮', a: 1 }],
     '矿脉':     [{ k: '矿山', r: '矿', a: 2 }, { k: '熔炉', r: '矿', a: 3 }],
     '林地':     [{ k: '伐木场', r: '木', a: 2 }, { k: '药圃', r: '木', a: 1, x: '灵', xa: 1 }],
@@ -640,18 +677,29 @@
   };
   var CORE_KIND = {
     city: ['官衙', '集市', '宗祠'], town: ['集市', '祠堂'],
-    village: ['祠堂', '村口'], sect: ['宗门大殿', '祖师殿']
+    village: ['祠堂', '村口'], sect: ['宗门大殿', '祖师殿'],
+    /* R5 (2026-09-15 十一版): 海上渔村 —— 中心落水, 只出村口/祠堂 (无大殿/官衙) */
+    fishing: ['村口', '祠堂']
   };
   var RES_ORDER = ['粮', '木', '矿', '渔', '炭', '灵', '丹', '器'];
   var STYLE_NAME = { spirit: '灵修', river: '水乡', farm: '田园', mine: '矿镇',
-                     wood: '山林', desert: '沙镇', plain: '平原', coast: '海滨', mountain: '山城' };
-  var STYLE_BY_LANDUSE = { '灵枢': 'spirit', '高阶灵地': 'spirit', '水岸': 'river',
+                     wood: '山林', desert: '沙镇', plain: '平原', coast: '海滨', mountain: '山城',
+                     fishing: '渔村' };
+  var STYLE_BY_LANDUSE = { '宗门附属': 'spirit', '水岸': 'river',
                            '良田': 'farm', '矿脉': 'mine', '林地': 'wood', '灼壤': 'desert' };
 
-  /* 地皮判定: 灵脉(灵枢/高阶灵地) > 邻水(水岸) > 地貌 (林/荒漠/山 → 木材/灼壤/矿脉,
-     草地按灵气分 良田 / 村落) —— 即「灵气 → 地皮」, 地皮再决定建筑种类 */
+  /* 地皮判定: 灵脉(不可建) > 浅海/邻水(水岸) > 地貌 (林/荒漠/山 → 木材/灼壤/矿脉,
+     草地按灵气分 良田 / 村落) —— 即「灵气 → 地皮」, 地皮再决定建筑种类。
+     ⚠ 2026-09-15 十一版三处改动:
+       · R4/D3 —— **灵脉格 (中心 + 从属) 一律不可建**: 返回 'vein' (BUILDINGS 里没有这个键
+         ⇒ growTownFootprint 会 `continue`)。旧版把灵脉格当「灵枢 / 高阶灵地」可建地皮,
+         配合 siteScore 的 +60 灵脉加分, 城镇中心会被**主动吸到灵脉上**、殿宇压着灵脉峰长。
+       · D4 —— 原「灵枢 / 高阶灵地」两片地皮作废; 5 种建筑改判 sect 聚落的 '宗门附属'
+         (判定在 growTownFootprint: 那里才知道聚落 type)。
+       · R5 —— **浅海格 → '水岸'**, 海上渔村才有码头/渔船坞/渔亭可出 (深海不给城, 见 siteScore)。 */
   function landuseOf(f) {
-    if (f.vein) return f.vein.d === 0 ? '灵枢' : '高阶灵地';
+    if (f.vein) return 'vein';
+    if (f.biome <= BIOME.OCEAN) return '水岸';          // R5: 浅海(OCEAN) 与深海(DEEP) → 水岸地皮
     if (f.biome === BIOME.BEACH) return '水岸';
     if (f.biome === BIOME.FOREST) return '林地';
     if (f.biome === BIOME.DESERT) return '灼壤';
@@ -668,25 +716,59 @@
     }
     return false;
   }
+  /* R5 (2026-09-15 十一版): 半径 rad 格内是否存在**陆地**格 (biome > OCEAN)。
+     海上渔村的第一道闸 —— 只允许"近岸浅海"设中心, 远洋不给聚落 (否则会漂出一堆孤岛渔村)。 */
+  function nearLandAt(q, r, rad) {
+    if (!(rad > 0)) rad = 1;
+    for (var dq = -rad; dq <= rad; dq++) {
+      for (var dr = -rad; dr <= rad; dr++) {
+        if (hexDist(q, r, q + dq, r + dr) > rad) continue;
+        if (fields(q + dq, r + dr).biome > BIOME.OCEAN) return true;
+      }
+    }
+    return false;
+  }
 
   /* 单格选址基础分: 地形宜居 + 海拔适中 + 灵气。水/雪峰 → -Inf (排除)。
-     资源邻近项不在这里做 (它要扫邻域, 贵) —— 由 prospectArea 对头部候选精算。 */
+     资源邻近项不在这里做 (它要扫邻域, 贵) —— 由 prospectArea 对头部候选精算。
+     ⚠ 2026-09-15 十一版:
+       · R4/D3 —— **灵脉格 (中心 + 从属) 一律排除**。旧版不但允许, `spir` 项还给灵脉格
+         **+60** 主动把城镇中心吸过去, 于是灵枢殿/炼丹殿压着灵脉峰长 (用户: "建筑不能在灵脉上建造")。
+       · R5 —— **浅海可作渔村中心**, 但必须: 近陆 (SEA_SETTLE_NEAR_LAND 格内有陆地) +
+         灵气达标 (SEA_SETTLE_MIN_SPIRIT) + 地形基分很低 (SEA_TERR = -10, 草地 80 / 沙岸 20)
+         ⇒ 只在陆地候选都很差时才中选, 不会把正常陆镇变成渔村。**深海与雪峰仍排除**。 */
   function siteScore(q, r) {
     var key = q + ',' + r;
     var c = siteScoreCache.get(key);
     if (c !== undefined) return c;
     var f = fields(q, r);
     var s;
-    if (f.biome <= BIOME.OCEAN || f.biome === BIOME.SNOW) {
-      s = -1e18;                                  // 海洋 / 雪峰: 排除
+    if (f.vein) {
+      s = -1e18;                                          // R4: 灵脉格 (中心 + 从属) 禁建
+    } else if (f.biome === BIOME.DEEP || f.biome === BIOME.SNOW) {
+      s = -1e18;                                          // 深海 / 雪峰: 排除
+    } else if (f.biome === BIOME.OCEAN &&
+               (!nearLandAt(q, r, CFG.SEA_SETTLE_NEAR_LAND | 0) ||
+                spiritAt(q, r) < CFG.SEA_SETTLE_MIN_SPIRIT)) {
+      s = -1e18;                                          // R5: 远洋 / 无灵浅海: 排除
     } else {
-      var terr = [0, 0, 20, 80, 60, 30, 20, 0][f.biome];   // 草地80 林地60 沙漠30 沙岸/山地20
+      var terr = [0, CFG.SEA_TERR, 20, 80, 60, 30, 20, 0][f.biome];   // 草地80 林地60 沙漠30 沙岸/山地20 浅海-10
       var e = f.e, elev;
       if (e >= 0.45 && e <= 0.75) elev = 100;               // 海拔 0.45~0.75 最优
       else if (e < 0.45) elev = Math.max(0, 100 - (0.45 - e) * 400);
       else elev = Math.max(0, 100 - (e - 0.75) * 400);
-      var vn = veinNear(q, r);
-      var spir = (vn ? (vn.d === 0 ? 60 : vn.d <= 1 ? 30 : 10) : 0) + spiritAt(q, r) * 20;
+      /* R11 (2026-09-15 十二版): 灵脉邻近由「吸引」改「避让」 —— 用户: "有些城镇距离
+         灵脉太近了"。旧版给灵脉邻格 +30 (d<=1) / +10 (d<=3), 主动把中心吸到灵脉脚下
+         (实测 32/382 座中心距灵脉仅 1 格)。现按距离逐级**扣分**, 中心自然退到 d>=3;
+         足迹层的第二道闸 (growTownFootprint 的 FOOT_PAD) 再保证建筑不贴着峰长。
+         ⚠ 旧式的 `vn.d === 0 ? 60` 是**死分支**: 灵脉格已在上面 `f.vein` 处 return -1e18,
+           能走到这里的格必然 d >= 1。顺手清掉, 免得后人以为"灵脉格有 +60 加成"。 */
+      var vn = veinNear(q, r), vpen = 0;
+      if (vn) {
+        if (vn.d <= 1) vpen = -(CFG.SETTLE_VEIN_CENTER_PEN || 0);
+        else if (vn.d === 2) vpen = -(CFG.SETTLE_VEIN_CENTER_PEN2 || 0);
+      }
+      var spir = vpen + spiritAt(q, r) * 20;
       s = terr + elev + spir;
     }
     cacheSet(siteScoreCache, key, s, SITE_SCORE_CAP);
@@ -863,22 +945,47 @@
 
     var maxN = (CFG.TOWN_BUILD_MAX && CFG.TOWN_BUILD_MAX[type]) || 8;
     var coreNames = CORE_KIND[type] || CORE_KIND.village;
+    var isSect = (type === 'sect');
     var core = null, inner = [], outer = [];
     for (var i = 0; i < cells.length; i++) {
       var cell = cells[i];
       var f = fields(cell.q, cell.r);
-      if (f.biome <= BIOME.OCEAN) continue;                 // 水上不落建筑
+      /* R4/D3 (2026-09-15 十一版): 灵脉格 (中心 + 从属) **一律不落建筑**。
+         必须放在 core 判定**之前** —— 否则灵脉格会被当成核心格。 */
+      if (f.vein) continue;
+      /* R5: 只有**深海**排除; 浅海 (海上渔村) 允许落建筑, 地皮经 landuseOf 归为 '水岸' */
+      if (f.biome === BIOME.DEEP) continue;
       if (cell.d === 0) {
         core = { q: cell.q, r: cell.r, kind: coreNames[(hash01(cq, cr, 301) * coreNames.length) | 0],
                  terrain: 'core', tier: 3 };
         continue;
       }
+      /* R11 (2026-09-15 十二版): 灵脉**缓冲圈** —— 距最近灵脉中心 d <= SETTLE_VEIN_FOOT_PAD
+         的格不落建筑 (灵脉格本身已在上面 `f.vein` 处剔掉)。作用: 建筑群与灵脉峰之间留出
+         空地, 消除"城镇贴着灵脉长"的观感。
+         ⚠ 放在 `cell.d === 0` **之后**: 中心格豁免 —— 中心位置已由 siteScore 的灵脉扣分
+           保证退到 d>=3 (见 CFG.SETTLE_VEIN_CENTER_PEN*); 若把缓冲也套在中心上,
+           灵脉密布的群落会产出"有卫星无主殿"的残缺聚落。
+         ⚠ veinNear 只在 d<=3 时非 null ⇒ 判 d<=PAD 安全 (null 直接跳过)。 */
+      var fpad = CFG.SETTLE_VEIN_FOOT_PAD | 0;
+      if (fpad > 0) {
+        var vnc = veinNear(cell.q, cell.r);
+        if (vnc && vnc.d <= fpad) continue;
+      }
       var lu = landuseOf(f);
-      var special = (lu === '灵枢' || lu === '高阶灵地');
-      if (!special && lu !== '水岸' && f.biome !== BIOME.BEACH &&
-          coastalAt(cell.q, cell.r)) lu = '水岸';           // 邻水 (且非灵脉) → 水岸地皮
-      /* 内环: 非灵脉地皮一律作城区民居 (城区不种田不开矿) */
-      if (!special && lu !== '水岸' && cell.d <= innerR) lu = '村落';
+      if (lu !== '水岸' && coastalAt(cell.q, cell.r)) lu = '水岸';   // 邻水 (且非灵脉/浅海) → 水岸地皮
+      /* D4 (2026-09-15 十一版): **宗门聚落的外环 = 宗门附属建筑**
+         (灵枢殿 / 聚灵阵 / 祭坛 / 炼丹殿 / 炼器殿) —— 原「灵枢 / 高阶灵地」两片灵脉地皮的
+         唯一产物搬到这里: 宗门因此成为 灵/丹/器 的主产地, 且与"灵脉格禁建"不再冲突。
+         水岸照旧保留 (临水宗门仍可出码头/渔船坞)。 */
+      if (isSect && cell.d > innerR && lu !== '水岸') lu = '宗门附属';
+      /* 内环: 非水岸地皮一律作城区民居 (城区不种田不开矿) */
+      if (lu !== '水岸' && lu !== '宗门附属' && cell.d <= innerR) lu = '村落';
+      /* R5b (2026-09-15 十一版): **海上渔村的水上格 → '渔家'**。
+         必须放在上面"内环改判村落"之后 —— 否则会被那句 `lu = '村落'` 抢走。
+         只换水上格 (lu 仍是 '水岸' 的那些): 陆上格照旧走村落/林地/良田等。
+         效果: 渔村从「1 核心 + 7 座栈桥」变成「1 核心 + 若干水上民居 + 少数水工」。 */
+      if (type === 'fishing' && lu === '水岸') lu = '渔家';
       var pool = BUILDINGS[lu] || BUILDINGS['村落'];
       var b = pool[(hash01(cell.q, cell.r, 311) * pool.length) | 0];
       var item = { q: cell.q, r: cell.r, kind: b.k, terrain: lu,
@@ -940,6 +1047,8 @@
       cnt[kk] = (cnt[kk] || 0) + 1;
       if (cnt[kk] > bn) { bn = cnt[kk]; styleKey = kk; }
     }
+    /* R5: 海上渔村直接定风格 (它的建筑全是水岸 → 否则会被 STYLE_BY_LANDUSE 读成"水乡") */
+    if (type === 'fishing') styleKey = 'fishing';
     if (!styleKey) {
       var rs = regionSeedOf(cq, cr);
       var rb = regionInfo(rs.i, rs.j).biome;
@@ -1025,10 +1134,15 @@
     return out;
   }
 
-  /* ---------- 聚落 (区域格内的城镇/宗门/村庄 + 秘境) ---------- */
-  function settlementsFor(i, j) {
+  /* ---------- 聚落 (区域格内的城镇/宗门/村庄/渔村 + 秘境) ----------
+     两层 (2026-09-15 十一版 R7):
+       · rawSettlementsFor(i,j) —— 原始聚落 (只做同格 B2 去重), 不施加任何间距抑制。
+         它**只**供 settlementsFor 查邻域用; 外部一律用 settlementsFor。
+       · settlementsFor(i,j)   —— 对外结果 = 原始 - 抑制 (与"字典序更小的邻格 + 同格更早者"
+         距离 < CFG.SETTLE_MIN_DIST 的聚落被剔除) ⇒ 用户要求"自动生成的城镇之间不能挨太近"。 */
+  function rawSettlementsFor(i, j) {
     var key = i + ',' + j;
-    var c = settleCache.get(key);
+    var c = settleRawCache.get(key);
     if (c) return c;
     var arr = [];
     var h0 = hash01(i, j, 7);
@@ -1052,13 +1166,20 @@
         if (!center) continue;
         usedCenters[center.q + ',' + center.r] = 1;      // B2: 占位, 后续 k 不再选同一格
         var placed = fields(center.q, center.r);
+        /* R5 (2026-09-15 十一版): 中心落在**浅海** ⇒ 强制海上渔村 (不参与 sect/city/town 掷骰)。
+           siteScore 已保证浅海候选必近陆 + 灵气达标, 故这里是"近岸渔村"而非远洋孤岛。 */
+        var onSea = placed.biome === BIOME.OCEAN;
         /* 灵脉亲和 (设定 §十一): 灵脉域内宗门概率与人口提升 */
         var cn = communityNear(placed.q, placed.r);
         var inVeinDomain = !!(cn && cn.dist < CFG.COMM_R * 1.4);
         var hr = hash01(i, j, 81 + k);
-        var type = hr < (inVeinDomain ? 0.24 : 0.14) ? 'sect'
-                 : hr < 0.28 ? 'city' : hr < 0.52 ? 'town' : 'village';
-        if (type === 'sect' && !mountainNear(placed.q, placed.r, 6)) type = 'town';
+        var type;
+        if (onSea) type = 'fishing';
+        else {
+          type = hr < (inVeinDomain ? 0.24 : 0.14) ? 'sect'
+               : hr < 0.28 ? 'city' : hr < 0.52 ? 'town' : 'village';
+          if (type === 'sect' && !mountainNear(placed.q, placed.r, 6)) type = 'town';
+        }
         /* B3: 规模/等级 salt 必须含 k —— 原先四个 pop 与 tier 的 salt 都不含 k,
            于是同格两座聚落 (id 差一个 k) 的 pop/tier 逐位相同, 看起来像「复制体」。
            ⚠ 会改变同格双聚落的 pop/tier ⇒ 世界内容变, 需清 db/zongmen.sqlite*
@@ -1066,6 +1187,7 @@
         var pop = type === 'sect' ? (hash01(i, j, 91 + k) * 4000 + 2000) | 0
                 : type === 'city' ? (hash01(i, j, 92 + k) * 30000 + 40000) | 0
                 : type === 'town' ? (hash01(i, j, 93 + k) * 6000 + 4000) | 0
+                : type === 'fishing' ? (hash01(i, j, 94 + k) * 700 + 150) | 0
                 : (hash01(i, j, 94 + k) * 900 + 200) | 0;
         if (inVeinDomain && type !== 'sect') pop = (pop * 1.3) | 0;
         /* 实体骨架字段 (WebSocket 单块接口设计 §3.4): tier 等级/规模,
@@ -1094,8 +1216,51 @@
         }
       }
     }
-    cacheSet(settleCache, key, arr, SETTLE_CAP);
+    cacheSet(settleRawCache, key, arr, SETTLE_CAP);
     return arr;
+  }
+
+  /* 对外聚落 = 原始聚落 − R7 间距抑制 (2026-09-15 十一版)。
+     抑制规则: 一个聚落被剔除 ⇔ 存在另一个**已被接受**的聚落 (来自"字典序更小的 1 环邻格"
+     或"同格内更早的聚落") 与其中心距离 < CFG.SETTLE_MIN_DIST。
+     ⚠ 只与**字典序更小**的邻格比较 ⇒ 抑制关系天然无环、结果与"谁先被扫到"无关、
+       不递归 (邻格自己也不看更大的格) ⇒ 服务端/预览页/跨会话完全一致。
+     ⚠ 为什么 1 环就够: 聚落中心离所在区域格中心的偏移 ≤ (锚点抖动 6.3 + 勘测半径 4.5) ≈ 10.8 格,
+       而 2 环邻格的中心距 ≥ REGION_M×2 的对角 = 36 格 ⇒ 最近也 ≥ 36−2×10.8 = 14.4 > 7,
+       不可能触发抑制。选 1 环 = 用最少的邻域查询覆盖全部可能的冲突。
+     秘境界 (poi) 不是聚落, 不参与抑制 (否则秘境会把城镇挤掉)。 */
+  function settlementsFor(i, j) {
+    var key = i + ',' + j;
+    var c = settleCache.get(key);
+    if (c) return c;
+    var raw = rawSettlementsFor(i, j);
+    var minD = CFG.SETTLE_MIN_DIST | 0;
+    var out = [];
+    if (minD <= 1) {                       // 抑制关闭 (<=1 视为不抑制)
+      for (var z = 0; z < raw.length; z++) out.push(raw[z]);
+    } else {
+      var prior = [];                      // 已接受者 (供后续候选比对)
+      for (var di = -1; di <= 1; di++) {
+        for (var dj = -1; dj <= 1; dj++) {
+          if (!di && !dj) continue;
+          var ni = i + di, nj = j + dj;
+          if (!(ni < i || (ni === i && nj < j))) continue;   // 只取字典序更小的邻格
+          var na = rawSettlementsFor(ni, nj);
+          for (var p = 0; p < na.length; p++) if (na[p].type !== 'poi') prior.push(na[p]);
+        }
+      }
+      for (var r0 = 0; r0 < raw.length; r0++) {
+        var s = raw[r0];
+        if (s.type === 'poi') { out.push(s); continue; }
+        var ok = true;
+        for (var a = 0; a < prior.length; a++) {
+          if (hexDist(s.q, s.r, prior[a].q, prior[a].r) < minD) { ok = false; break; }
+        }
+        if (ok) { prior.push(s); out.push(s); }
+      }
+    }
+    cacheSet(settleCache, key, out, SETTLE_CAP);
+    return out;
   }
 
   /* ---------- 道路 (A* 寻路: Dial 桶优先队列 + 三重剪枝; 路网优先拓扑) ----------
@@ -1349,7 +1514,7 @@
        ~50ms; 先用紧凑镜头 40 搜索, 未中 (骑路长径 / 真不可达) 再用 60 步重搜兜底。
        ⚠ 有界次优: 第一段命中时, 41-60 步的更便宜骑路路径不会返回 —— 只影响已退役的
        复用模式; 生产 (纯地形) 走单段, 不受影响。 */
-    function search(maxSteps) {
+    function search(maxSteps, allowVein) {
       var buckets = [];
       for (var b = 0; b <= maxCost; b++) buckets.push([]);
       var dist = new Map(), prev = new Map(), closed = new Set();
@@ -1391,8 +1556,12 @@
             if (g + h > maxCost) continue;                       // 下界剪枝: 该分支必超预算 (省一次 fields)
             var nk = nx + ',' + ny;
             if (closed.has(nk)) continue;
+            /* ⚠ R9 (2026-09-15 十一版): **灵脉格 (中心 + 从属) 禁路** —— 道路必须绕行。
+               严格模式 (allowVein=false) 直接不展开该邻格; 兜底模式才允许穿过 (见函数尾)。 */
+            var nf2 = fields(nx, ny);
+            if (!allowVein && nf2.vein) continue;
             /* 已铺路格全局折扣 (不限走廊): 并线副作用由调用方 DI 闸兜底 */
-            var ng = g + (roadTiles && roadTiles.has(nk) ? roadW : roadWeight(fields(nx, ny)));
+            var ng = g + (roadTiles && roadTiles.has(nk) ? roadW : roadWeight(nf2));
             if (ng + h > maxCost) continue;                      // 权重剪枝 (实际权重 ≥ 下界)
             var old = dist.has(nk) ? dist.get(nk) : 1e18;
             if (ng < old) {
@@ -1407,9 +1576,16 @@
       return null;
     }
 
-    if (!roadTiles) return search(stepsTight);                    // 纯地形: 单段
-    var p1 = search(stepsTight);                                  // 第一段: 紧凑镜头 (快)
-    return p1 || search(cap);                                     // 第二段: 骑路长径兜底
+    /* ⚠ R9 (2026-09-15 十一版): 灵脉格禁路 —— **严格模式优先** (allowVein=false, 路绕行灵脉);
+       严格模式无路时才退化到"允许穿灵脉"再搜一次: 宁可破例穿一次, 也不让两座聚落
+       因为一条灵脉 (7 格群) 变成互不连通的孤岛 (连通性优先级高于"绝不穿灵脉")。
+       两遍都是纯地形 + 固定展开序 ⇒ 仍是 (该边, 静态地形) 的纯函数, 顺序无关性不变。 */
+    if (!roadTiles) {                                              // 纯地形: 单段 × 两模式
+      var pS = search(stepsTight, false);
+      return pS || search(stepsTight, true);
+    }
+    var p1 = search(stepsTight, false) || search(stepsTight, true);  // 第一段: 紧凑镜头 (快)
+    return p1 || search(cap, false) || search(cap, true);            // 第二段: 骑路长径兜底
   }
 
   /* 某区域格内聚落的对外道路 (路网优先 Network-First, 缓存, 全局去重, 预算制)
@@ -1648,7 +1824,7 @@
     }
     commCache.clear(); veinNearCache.clear();
     elevCache.clear(); fieldCache.clear();
-    regionCache.clear(); settleCache.clear();
+    regionCache.clear(); settleCache.clear(); settleRawCache.clear();
     roadCache.clear(); demandCache.clear(); roadFail.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     skeletonCache.clear();  // A2
@@ -1678,6 +1854,8 @@
     regionSeedOf: regionSeedOf,
     regionInfo: regionInfo,
     settlementsFor: settlementsFor,
+    /* R7: 无间距抑制的原始聚落 (诊断/回归对照用, 业务一律用 settlementsFor) */
+    rawSettlementsFor: rawSettlementsFor,
     roadsNear: roadsNear,
     /* 城镇三段式生成 (§三): 供 mapgen-server.regionJson 与预览页/前端直接调用。
        prospectArea = 勘测适宜度图; pickSettlementCenter = 选址中心;
