@@ -39,6 +39,9 @@ verify/_*.mjs
 verify/_head_mapgen.js
 verify/_old_mapgen.js
 verify/_eng_head/
+verify/_*.md
+verify/_*.json
+verify/_*/
 
 # 隔离 .NET 验证实例的运行时产物 (ClearScript/SQLite/protobuf DLL + native runtimes)
 verify/_vmsrv/
