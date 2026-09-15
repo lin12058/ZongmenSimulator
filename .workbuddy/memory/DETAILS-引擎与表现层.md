@@ -31,3 +31,9 @@
 - **游标消费**：`pending[]` + `pendingIdx`(取代 `Array.shift()` 的 O(n) 搬移)；容量 `PENDING_CAP=400000`/`TERRAIN_CAP=400000`，**超额不再静默丢弃**，`sampleTick` 超额时按插入序删 `terrainCache` 最旧 **1/4**（整表清空会重新露底）。
 - **重建时机**：`tick()` 里「层级/视野签名 `ep`」变化且**列表已排空**才 `rebuildPending`（拖动中不重建）。
 - `probe()` 暴露 `queueLen(=pending.length-pendingIdx)/pendingLen/sampleM/blocks/miss/draws/enqDrop/enq`；`?mm=full|hide`、`?mmwpp=N`(全屏档初始缩放)、`?mmdrive=1`(真 WheelEvent/鼠标事件驱动)、`?mmprobe=1`(按时间点采 probe 并 POST `/api/debug/snap`)。
+
+## 小地图 U4 块色 / 面板几何 (2026-09-15 · 从 MEMORY.md 迁入)
+- **U4 块色 = 金字塔多数表决**：`cell(mD)` = 4 个 `cell(mD/2)` 子格取众数(`AGG_DIV=2`、`rawM=mD/2`；`mD<2` 时与旧角点口径**逐字节完全相同**)。效果：与「块内 mD×mD 原生格真值多数」一致率 86.3%→**91.6%**(混合区 70→81%)，实机椒盐量 `isoPct` **6.29%→4.61%**。⚠ 代价 = 原始样本 **×4**(mD=8 实测 3.0万→12.1万格，浏览器约 10s 排空；粗层先铺满 ⇒ `miss` 全程 0、不卡帧)。A/B 做法 = 只翻 `AGG_DIV` 2↔1，**验完必 grep 复核**。`probe()` 新增 `rawM/agg/iso/isoBase/isoPct`(iso = 位图块级「与四邻全不同」的孤立块数)。
+- **面板几何参数化 + 窄屏铺满窗体**(2026-09-15 手机报「不占满」)：`#minimapBox` 是 `position:absolute` ⇒ **收缩包裹盒**，宽度取最宽子孙；窄屏档画布 `150×98` 而头行/提示行固有宽 **188px** ⇒ 面板 204px、画布只铺满 **79.8%**、右留 **38px** 空白纸(桌面档 `216=216` 恰好相等 ⇒ 只 ≤760px 暴露)。修法：`--mm-h/--mm-chrome(57)/--mm-bottom/--mm-gap` 参数化，`#info.bottom` 改 `calc()` 推导(**删掉写死的 230px/168px**——窄屏那个本就差 5px，山川志一直压住小地图)；窄屏 `#minimapBox{left:10;right:10}` + `#minimap{width:100%;height:min(132px,22vh)}`。⚠ **桌面档禁止 `width:100%`**：收缩盒百分比宽回落画布 `width` 属性，模块每帧又改它 ⇒ 反馈环。
+- 契约 `verify/check_mm_layout.mjs`(同源 iframe 探针页 + 旧版 headless `--dump-dom`，**不用 CDP**；12 档 × 8 条，含「桌面档锁死 232×198/216×141」防误伤)；**改样式表必跑**——CSS 几何不在 `frontend_smoke` 源码守卫内。固化手法：改前临时换回旧文件跑一次**必须红**(反向对照)，跑完按 sha256 还原。
+- ⚠ 面板 `clip-path` 裁整棵子树 ⇒ 全屏浮层/tooltip 须与 `.panel` 同级兄弟。

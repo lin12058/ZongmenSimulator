@@ -5,9 +5,9 @@
  * 用途: 把散在 verify/ 下的判据脚本按固定顺序跑一遍, 汇总「红 N / 共 M」, 避免每次手拼命令行。
  *
  * 用法:
- *   node verify/run_regression.mjs                     # 16 条离线判据 + frontend_smoke(对 127.0.0.1:8140)
+ *   node verify/run_regression.mjs                     # 18 条离线 + 4 条需活服务端(对 127.0.0.1:8140)
  *   node verify/run_regression.mjs --base=192.168.63.62:8140
- *   node verify/run_regression.mjs --offline-only      # 只跑不需要活服务端的 15 条
+ *   node verify/run_regression.mjs --offline-only      # 只跑不需要活服务端的 18 条
  *   node verify/run_regression.mjs --with-server       # 追加 verify_map/w1/w2/w4(建议对着隔离 8141 跑)
  *   node verify/run_regression.mjs --only=vein         # 只跑文件名含 "vein" 的
  *   node verify/run_regression.mjs --skip=w3,w5        # 跳过含这些片段的
@@ -23,6 +23,7 @@
  *      本 runner 会把这**两条**失败单独降级为「墙钟(非回归)」warn, 不计入红; 若失败的是别的断言,
  *      仍算真红。想要更松/更严: `--w3-ms=600`。
  *   4. `check_cloud_zoom.mjs` 需要实机截图参数, 裸跑 rc=2 属正常 ⇒ 不在默认清单内(要跑请单独调)。
+ *      同理 `check_mm_layout.mjs` 与 `check_mm_ui.mjs` 无 Chrome / 服务端不通时 rc=2 (跳过, 不算红)。
  *   5. 退出码: 有真红 ⇒ 1, 否则 0 (warn 不影响退出码)。
  */
 
@@ -57,6 +58,17 @@ const LIST_ONLY = has('list');
  *   ⚠ frontend_smoke 既跑源码守卫也问服务端要 meta/tile ⇒ 归 live。 */
 const JOBS = [
   ['check_vein_skin.mjs', [], 'off'],
+  /* 匾额/名牌落点对齐 (C-a 聚落落点扎真建筑格 / C-c 灵脉签位=峰尖 / D 文案) ——
+     纯离线: 裸 eval vein-skin.js + bldg_ink.js, 再对三份前端文件做"禁第二真源"源码守卫。 */
+  ['check_plaque_align.mjs', [], 'off'],
+  /* 渔村皮肤 (A): 裸 eval bldg_ink.js (+ stub canvas 真跑 spriteOf) —— 钉死水陆分叉、
+     表外 kind 不越权、缓存不串图 (不加缓存皮肤位就会串图, 本契约的主断言)。 */
+  ['check_fish_skin.mjs', [], 'off'],
+  /* 归属势力底图 (B): 抠 main.js 里 factionOf/factionColor/factionSig/townColor 等
+     9 段**真源码** eval (注入可控 settleCells) + stub canvas 真跑 plateAt 记路径操作 ——
+     钉死 ①辖区半径镜像引擎 CFG.COMM_R×1.4 ②同宗同色 (?fac=0 的 A/B 铁证)
+     ③记号同源 (8 型印纹互异/刻痕长度角度)。 */
+  ['check_faction.mjs', [], 'off'],
   ['check_vein_cluster.mjs', [], 'off'],
   ['check_no_build_on_vein.mjs', [], 'off'],
   ['check_settle_spacing.mjs', [], 'off'],
@@ -72,6 +84,19 @@ const JOBS = [
   ['w5_sprite_range.mjs', [], 'off'],
   ['w6_bldg_face.mjs', [], 'off'],
   ['frontend_smoke.mjs', [BASE_URL], 'live'],
+  /* 小地图面板响应式几何 (窄屏铺满窗体宽度): 起 headless Chrome 量 iframe 布局盒。
+     无 Chrome 或服务端不通时自己 rc=2 跳过 —— 见脚本头部注释。 */
+  ['check_mm_layout.mjs', [BASE_URL], 'live'],
+  /* 手机版: 触摸交互 (拖动/捏合/单击 + 合成鼠标事件闸) 与强制浅色 (color-scheme: only light)。
+     同样要 Chrome + 同源 iframe, 缺一 rc=2 跳过。 */
+  ['check_mm_ui.mjs', [BASE_URL], 'live'],
+  /* 地形块前端自算 (S1~S5): 真浏览器 3 档 —— hybrid(实际 mask=30 **且服务端不再下发整块地形**)
+     / ab(本地数组 ≡ 服务端块的逐位对拍) / server(老链路回退)。每档起一次独立 Chrome
+     (⚠ 同一 Chrome 里串行跑多档会被 --virtual-time-budget 串扰: 第二档恒定 0 块)。
+     无 Chrome 或服务端不通 rc=2 跳过。
+     ⚠ 需对**含 S4 的服务端**跑 (meta 必须带 engineHash): 对着未重启的旧实例会红 1 条
+       「服务端未重启到含 S4 的构建」—— 那是提示, 不是回归。 */
+  ['check_calc_local.mjs', [BASE_URL], 'live'],
 ];
 const SERVER_JOBS = [
   ['verify_map.mjs', [BASE_URL], 'live'],

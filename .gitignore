@@ -21,6 +21,7 @@ verify/.r13_*.bin
 #     verify/_vv_pick.mjs / _vv_crop.mjs 虽未入库，却被待办 md 引用为**常驻工具** ⇒ 别按前缀删。
 #   ⚠ 以后写**正式**校验脚本请别用 `_` 前缀（会被本规则忽略，容易漏提交）。
 verify/_*.mjs
+verify/_*.js
 verify/_*.md
 verify/_*.json
 verify/_*.txt

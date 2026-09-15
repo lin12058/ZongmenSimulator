@@ -40,11 +40,15 @@
         commCl: meta.commCl, commR: meta.commR, seaLevel: meta.seaLevel,
         biomeMeta: meta.biomeMeta,
         /* 色板由 meta 单点下发 (缺失时由调用方字面兜底, 见 main.js) */
-        elementRGB: meta.elementRGB, variantRGB: meta.variantRGB
+        elementRGB: meta.elementRGB, variantRGB: meta.variantRGB,
+        /* S4: 引擎指纹 (服务端下发给前端的三个 js 的哈希; 老服务端无此字段 = undefined) */
+        engineHash: meta.engineHash
       };
     }
     return geoCache;
   }
+  /* S4: 引擎指纹访问器 —— 直接读 meta (不读 geo 缓存: fetchMeta(true) 重取后缓存不会重建) */
+  function engineHash() { return (meta && meta.engineHash) || null; }
 
   /* ---------- 几何工具 (纯公式, 与原 mapgen.js 常量一致) ---------- */
   function tileToWorld(q, r) {
@@ -139,6 +143,17 @@
   /* 暴露给 main.js: 距下次可重连的毫秒数 (<0 = 立即可连) */
   function reconnectDue() { return Date.now() >= reconnectAt; }
 
+  /* S4: WS「重新登录」钩子。用途只有一个 —— 重取 meta 校验引擎指纹
+     (页面长开期间服务端升级引擎 ⇒ 前端旧引擎算地形 + 后端新引擎发聚落/道路 = 坐标口径漂移)。
+     钩子异常一律吞掉: 校验失败不该拖累连接本身。 */
+  var reLoginHooks = [], everLogged = false;
+  function onReconnect(fn) { if (typeof fn === 'function') reLoginHooks.push(fn); }
+  function fireReconnect() {
+    for (var i = 0; i < reLoginHooks.length; i++) {
+      try { reLoginHooks[i](); } catch (e) { console.warn('reconnect 钩子异常', e); }
+    }
+  }
+
   /* D8: 容错扫描 —— 在 TileResponse 顶层找 field 6 (seq, varint)。
      仅在「正常解码已失败」时调用, 用途是把失败精确归到某一条在途请求,
      而不是把全部在途请求一起 reject (帧与帧互相独立, 一帧坏不该拖死整批)。
@@ -188,6 +203,10 @@
       if (lr.ok) {
         reconnectDelay = 500;                  // 连接恢复 → 退避重置
         if (sockReadyRes) { sockReadyRes(lr); sockReadyRes = null; sockReadyRej = null; }
+        /* S4: 「重连」而非首次登录才触发钩子 —— 页面长开期间服务端可能已升级引擎。
+           (首次登录不做任何额外请求: meta 已在 boot 取过) */
+        if (everLogged) fireReconnect();
+        everLogged = true;
       }
       else {
         if (sockReadyRej) { sockReadyRej(new Error('登录失败: ' + lr.err)); sockReadyRej = null; sockReadyRes = null; }
@@ -312,8 +331,11 @@
     });
   }
 
-  /* 请求一个块 (mask 全量; rev 增量)。主块坐标 = 区块格 (i,j) = (ca,cb)。 */
-  function block(seed, i, j) {
+  /* 请求一个块 (rev 增量)。主块坐标 = 区块格 (i,j) = (ca,cb)。
+     mask 缺省 = 全量 (老行为); S3「地形块前端自算」起主视图传 `ALL & ~CHUNK`(=30):
+     服务端 needChunk 分支本就按 mask 出包 ⇒ 少算 chunkJson、不落块缓存、不传输整块地形。
+     ⚠ 调用方不要在这里再夹私货 (解析/裁剪 mask): 服务端才是 0→All 的唯一判定处。 */
+  function block(seed, i, j, mask) {
     return connect().then(function () {
       return new Promise(function (resolve, reject) {
         if (!sock || sock.readyState !== 1) { reject(new Error('WS 未就绪')); return; }
@@ -321,7 +343,7 @@
         var sseq = ++seq;
         var body = PB.encodeTileRequest({
           op: 1, seed: seed, i: i, j: j,
-          mask: PB.MASK.ALL, seq: sseq,
+          mask: mask == null ? PB.MASK.ALL : mask, seq: sseq,
           lastRevs: last || []
         });
         var frame = new Uint8Array(1 + body.length);
@@ -382,6 +404,7 @@
   g.MapClient = {
     fetchMeta: fetchMeta,
     geo: geo,
+    engineHash: engineHash,
     tileToWorld: tileToWorld,
     pxToTile: pxToTile,
     clamp: clamp,
@@ -390,6 +413,7 @@
     blockForget: blockForget,
     blockForgetAll: blockForgetAll,
     reconnectDue: reconnectDue,
+    onReconnect: onReconnect,
     /* R11: 引擎脚本 (WS 下发, 前端按 seed 自算地形) */
     requestScript: requestScript,
     /* HTTP 辅助接口 */

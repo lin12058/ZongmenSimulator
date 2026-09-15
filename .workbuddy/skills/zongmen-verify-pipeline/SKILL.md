@@ -295,12 +295,13 @@ tasklist | grep -i zongmen || echo "无进程"
 - 离线套件现为 **14 个脚本**全绿（§13 表格 5 个 + `check_vein_skin` / `check_preview_draw` / `check_preview_settle_road` / `check_preview_terrain` / `check_preview_vein_marker` / `check_edge_falloff` / `w3_bfs_road` / `w5_sprite_range` / `w6_bldg_face`）；
   ⚠ `check_cloud_zoom.mjs` **需要实机截图参数**（`<zoom>:<on.png>:<off.png>`），裸跑只打印用法并 `rc=2` —— 别当成回归失败。
 
-- **总 runner（2026-09-15 新增）**：`verify/run_regression.mjs` —— 一条命令跑完上表全部离线判据（默认 16 条，含对 8140 的 `frontend_smoke`），汇总「红 N / 共 M / warn W」。
-  `--offline-only` 跳过需活服务端的项；`--with-server` 追加 `verify_map/w1/w2/w4`（⚠ 先起隔离 8141，见 §11）；`--base=host:port` 换基址；`--only=/--skip=` 按文件名片段过滤；`--list` 只列计划不回显。
+- **总 runner（2026-09-15 新增；同夜扩到 22 条）**：`verify/run_regression.mjs` —— 一条命令跑完上表全部离线判据（默认 **18 条离线 + 4 条 live = 22 条**：`frontend_smoke` / `check_mm_layout` / `check_mm_ui` / `check_calc_local`），汇总「红 N / 共 M / warn W」。
+  `--offline-only` 跳过需活服务端的项；`--with-server` 追加 `verify_map/w1/w2/w4`（⚠ 先起隔离实例，见 §22）；`--base=host:port` 换基址；`--only=/--skip=` 按文件名片段过滤；`--list` 只列计划不回显。
   ⚠ 它统一清掉 `HTTP_PROXY`/`HTTPS_PROXY` 并置 `NO_PROXY=*`（本机 `HTTP_PROXY=127.0.0.1:9105` 会劫持内网请求 ⇒ 502），
   并把 `w3_bfs_road` 的 ⑦ 两条**墙钟**失败自动降级为 `warn`（机器绝对速度门槛，非回归；`--w3-ms=` 可改阈值）。
   `check_cloud_zoom.mjs` 需实机截图参数 ⇒ **不在**默认清单内，要跑请单独调。
-  服务端侧仍走 §3 的 `verify_map/w1/w2/w4` + `frontend_smoke`（对**隔离实例**跑，见 §11）。
+  ⚠ **live 四条会连跑多个 Chrome**，对**隔离实例**跑（见 §22）。跑出红时**先单独复跑那一条**再下结论 —— 联跑抖动（Chrome 争用 / 实例 `MaxSeeds` 跑满）会伪装成回归，见 §22 第 0 条与 §31。
+  服务端侧仍走 §3 的 `verify_map/w1/w2/w4` + `frontend_smoke`。
 
 ## 14. 「场地」表现与聚落形态的改法（2026-09-15 R10 / R5b）
 
@@ -360,38 +361,38 @@ tasklist | grep -i zongmen || echo "无进程"
 - **做「改前/改后」对照图的正确姿势**：临时把 `SEL_K` 改成 1 → 同一 URL 截一张 → 改回 `1/3` → 再截一张
   （Chrome 每次加载都重读磁盘 js，**不需要重启服务端**）。
   ⚠ 改回后**必须 grep `var SEL_K` 复核**，别把对照值留在生产代码里。
-
-## 16. 小地图灵脉化：独立模块 + 全 WS 数据（2026-09-15 十三版 R12）
-
-> 触发：用户「右下角小地图**一直请求**导致到了请求速率上限」。根因 = 旧小地图每 1.5s 轮询
-> HTTP `/api/map/fields`（132×88 后端采样，`main.js requestMinimap` → `MC.fieldGrid`），撞
-> `ApiRateLimitMiddleware`。要求：融合 `灵脉预览.html` 风格重做、可最大化、**独立文件热拔插**、数据走 WS。
-
-### 16.1 交付物与热拔插点
-- 新模块 `web/js/minimap-vein.js`（独立 IIFE → `global.MiniMapVein`，约 680 行）。
-- **唯一接线点** = `main.js initMinimap()`：`var M = window.MiniMapVein;` → `M.init({panel, full, snapshot, jump})`。
-  换小地图 = 换这一个文件 + `index.html` 一行 `<script>`，壳层零改动。
-- ⚠⚠ **`main.js` 是 `(function () {`，没有 `g` 形参**（`mapclient.js` 是 `(function(g){`）。写 `g.MiniMapVein`
-  会 `g is not defined` → 整页 fatal「后端世界服务不可用」。**必须写 `window.MiniMapVein`**（本版踩过，
-  现象是 `--dump-dom` 里 fatal 文本 + canvas 不挂载）。
-
-### 16.2 三层数据口径（改小地图必守）
-| 层 | 数据源 | 铁律 |
-|----|--------|------|
-| L1 地形 | **前端按 seed 自算**：`MapGen.fields(q,r).biome/.e` → 位图 | ⚠ **绝不读 `onRoad`**（道路语义依赖引擎 `roadCache` 冷热，见 `mapgen.js`）；色板取 `geo.biomeMeta[i].color` |
-| L2 世界 | **全部来自 WS 快照**：`commCells` / `settleCells` / `regionCells` | 世界是动态的 ⇒ 前端**绝不自算**灵脉/聚落/道路（自算必与服务端不一致） |
-| L3 视野 | 默认档跟随主相机（`FOLLOW_WPP=6`，不可拖）；全屏档独立相机 | 全屏浮层/tooltip 必须与 `.panel` **同级兄弟**（面板 `clip-path` 会裁整棵子树） |
-
-### 16.3 引擎脚本经 WS 下发（D3）
-- 协议：帧 `Script = 4`；`ScriptRequest{Name}` C→S → `ScriptPack{Name, Source}` S→C。
-- 服务端 `MapWsHandler.EngineScriptOrder = [noise.js, mapgen-config.js, mapgen.js]`，**按序拼接**（`mapgen-server.js` 不下发）；
-  文件名走**白名单**（杜绝目录穿越），缺文件回空 `Source`（`name="missing"/"denied"`）。
-- 前端 `mapclient.requestScript(name)` → `gunzip(source)` → `(0, eval)("'use strict';\n" + src)` 注入全局 → `window.MapGen`；
-  `finally` 还原 `window.NoiseLib`（引擎 noise.js 会覆盖它，但引擎内部已捕获自身引用 ⇒ 还原无副作用）。
-- ⚠ **ScriptPack 帧本身不 gzip，只有 `Source` 字段 gzip**。第一版在 `onFrame` 里先 `gunzip(payload)` 再解码 ⇒
-  `Z_DATA_ERROR` + `.then is not a function`。正确顺序：`PB.decodeScriptPack(payload)` → `gunzip(pack.source)`。
-- **单真源**：绝不把 `mapgen.js` 拷进 `web/js/`（副本漂移 ⇒ 前端世界 ≠ 服务端；`灵脉预览.html` 当年就是内联副本）。
-
+
+## 16. 小地图灵脉化：独立模块 + 全 WS 数据（2026-09-15 十三版 R12）
+
+> 触发：用户「右下角小地图**一直请求**导致到了请求速率上限」。根因 = 旧小地图每 1.5s 轮询
+> HTTP `/api/map/fields`（132×88 后端采样，`main.js requestMinimap` → `MC.fieldGrid`），撞
+> `ApiRateLimitMiddleware`。要求：融合 `灵脉预览.html` 风格重做、可最大化、**独立文件热拔插**、数据走 WS。
+
+### 16.1 交付物与热拔插点
+- 新模块 `web/js/minimap-vein.js`（独立 IIFE → `global.MiniMapVein`，约 680 行）。
+- **唯一接线点** = `main.js initMinimap()`：`var M = window.MiniMapVein;` → `M.init({panel, full, snapshot, jump})`。
+  换小地图 = 换这一个文件 + `index.html` 一行 `<script>`，壳层零改动。
+- ⚠⚠ **`main.js` 是 `(function () {`，没有 `g` 形参**（`mapclient.js` 是 `(function(g){`）。写 `g.MiniMapVein`
+  会 `g is not defined` → 整页 fatal「后端世界服务不可用」。**必须写 `window.MiniMapVein`**（本版踩过，
+  现象是 `--dump-dom` 里 fatal 文本 + canvas 不挂载）。
+
+### 16.2 三层数据口径（改小地图必守）
+| 层 | 数据源 | 铁律 |
+|----|--------|------|
+| L1 地形 | **前端按 seed 自算**：`MapGen.fields(q,r).biome/.e` → 位图 | ⚠ **绝不读 `onRoad`**（道路语义依赖引擎 `roadCache` 冷热，见 `mapgen.js`）；色板取 `geo.biomeMeta[i].color` |
+| L2 世界 | **全部来自 WS 快照**：`commCells` / `settleCells` / `regionCells` | 世界是动态的 ⇒ 前端**绝不自算**灵脉/聚落/道路（自算必与服务端不一致） |
+| L3 视野 | 默认档跟随主相机（`FOLLOW_WPP=6`，不可拖）；全屏档独立相机 | 全屏浮层/tooltip 必须与 `.panel` **同级兄弟**（面板 `clip-path` 会裁整棵子树） |
+
+### 16.3 引擎脚本经 WS 下发（D3）
+- 协议：帧 `Script = 4`；`ScriptRequest{Name}` C→S → `ScriptPack{Name, Source}` S→C。
+- 服务端 `MapWsHandler.EngineScriptOrder = [noise.js, mapgen-config.js, mapgen.js]`，**按序拼接**（`mapgen-server.js` 不下发）；
+  文件名走**白名单**（杜绝目录穿越），缺文件回空 `Source`（`name="missing"/"denied"`）。
+- 前端 `mapclient.requestScript(name)` → `gunzip(source)` → `(0, eval)("'use strict';\n" + src)` 注入全局 → `window.MapGen`；
+  `finally` 还原 `window.NoiseLib`（引擎 noise.js 会覆盖它，但引擎内部已捕获自身引用 ⇒ 还原无副作用）。
+- ⚠ **ScriptPack 帧本身不 gzip，只有 `Source` 字段 gzip**。第一版在 `onFrame` 里先 `gunzip(payload)` 再解码 ⇒
+  `Z_DATA_ERROR` + `.then is not a function`。正确顺序：`PB.decodeScriptPack(payload)` → `gunzip(pack.source)`。
+- **单真源**：绝不把 `mapgen.js` 拷进 `web/js/`（副本漂移 ⇒ 前端世界 ≠ 服务端；`灵脉预览.html` 当年就是内联副本）。
+
 ### 16.4 防卡与收敛（全屏档大范围抽样）
 - 每帧按**时间额度**抽样 `clamp(dtMs * 0.35, SAMPLE_BUDGET_MS=10, 110)` ms（不是按个数），
   配 `SAMPLE_CELLS_MAX`（显示位图 / 抽样层级）与 `REDRAW_MS` 节流；未算到的画「未探测」斜纹占位。
@@ -399,12 +400,12 @@ tasklist | grep -i zongmen || echo "无进程"
   **视图锁定**的：平移 5 世界单位只剩 55% 复用，每次交互都重新露底。详见 §17。
 - **隐藏 = 真停摆**（`tick()` 直接 return，停 rAF / 停抽样 / 停绘制），不是只 `display:none`。
 - 实测成本基准：`MapGen.fields` 单格 **0.019 ms**（Node 冷缓存；浏览器约 0.06~0.11 ms/格）⇒ 前端自算可行。
-### 16.5 验收姿势
-- 端到端：登录 → `ScriptRequest` → `ScriptPack`（约 95KB js，gzip 26ms）→ eval → 抽样 `MapGen.fields`
-  与 `/api/map/tile` 地形**逐格比对必须一致**（本次 6/6）。
-- 实机三态截图：默认左下 / 全屏 / 隐藏（`verify/live_r11_mm_*.png`）。
-- 契约：`verify/frontend_smoke.mjs::checkMinimap`（16 项）。
-- ⚠ **环境更正**：本机 8140 **`127.0.0.1` 与 LAN IP `192.168.63.62` 都通**（Kestrel 绑全网卡）。
+### 16.5 验收姿势
+- 端到端：登录 → `ScriptRequest` → `ScriptPack`（约 95KB js，gzip 26ms）→ eval → 抽样 `MapGen.fields`
+  与 `/api/map/tile` 地形**逐格比对必须一致**（本次 6/6）。
+- 实机三态截图：默认左下 / 全屏 / 隐藏（`verify/live_r11_mm_*.png`）。
+- 契约：`verify/frontend_smoke.mjs::checkMinimap`（16 项）。
+- ⚠ **环境更正**：本机 8140 **`127.0.0.1` 与 LAN IP `192.168.63.62` 都通**（Kestrel 绑全网卡）。
   旧记录「只绑 LAN IP、127.0.0.1 不通」是把「服务没在跑」误当成绑定问题 —— 早先的 `ECONNREFUSED` 请先探活服务。
 
 ## 17. 小地图地形层：抽样格必须「世界对齐」（2026-09-15 R12 修复 · 大面积未探测）
@@ -544,13 +545,21 @@ N="C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2-3/node.exe"
 "$N" verify/check_edge_falloff.mjs
 "$N" verify/check_preview_draw.mjs              # 期望 32 通过 / 0 失败
 "$N" verify/check_preview_settle_road.mjs       # 期望 305 条（多圈收敛 7 圈）
-"$N" verify/check_vein_skin.mjs                 # 前端灵脉配色/形状/等级契约（现 40 项）
+"$N" verify/check_vein_skin.mjs                 # 前端灵脉配色/形状/等级契约（现 42 项）
+"$N" verify/check_plaque_align.mjs              # 匾额/名牌落点对齐（C-a 真建筑格 / C-c 签位=峰尖 / D 文案）· 39 项
+"$N" verify/check_fish_skin.mjs                 # 渔村皮肤（A）· 44 项，含 stub canvas 真跑 spriteOf 验缓存不串图
+"$N" verify/check_faction.mjs                   # 归属势力底图（B）· 72 项，抠 main.js 真源码 eval + 真跑 plateAt
 "$N" verify/w5_sprite_range.mjs
 "$N" verify/w6_bldg_face.mjs                    # 期望 23 / 0
 "$N" verify/w3_bfs_road.mjs                     # 17 项；约 60~100s，前台跑并放宽 timeout
 ```
 
 - **批量驱动已固化**：直接用 `verify/run_regression.mjs`（见 §13 的「总 runner」条目），别再手拼命令行。
+- ⚠ 「**把生产代码抠出来 eval**」是本项目写离线契约的首选手法（别把逻辑重写一遍 —— 测的必须是上屏那份代码）。范式在 `check_faction.mjs`：用括号配平 + 字符串/注释感知的扫描器从 `main.js` 抠出 `factionOf/factionColor/factionSig/townColor/…` 共 9 段，注入可控 `settleCells` 与 `location` 后 `new Function(...)` 跑。
+  - ⚠ 抠片段必须在**原文**上做（去注释版会把字符串内容一起毁掉，抠出来就不能 eval 了）；但**源码守卫**要用去注释版（否则文档注释里的示例代码被当成真实调用）。两份都留着。
+  - ⚠ `scanTo` 这类括号配平扫描器：`}` 必须先 `depth--` **再**问「是否到达 depth 0」，否则配平的收尾括号永远问不到（写成 `depth--; continue;` 就恒返回 -1，症状是「所有片段都抠不出来」）。
+- ⚠ Canvas 绘制函数（`plateAt` / `spriteOf`）能在 Node 里**真跑**：装一个 `document.createElement('canvas')` 返回假 canvas + 一个**记录型 2D 上下文**（把 `beginPath/moveTo/lineTo/arc/rect/stroke` 全记下来）。于是可以逐值断言「刻痕长 0.11R」「8 型印纹的图形描述符两两互异」「无归属时恰 3 笔且不出 arc/rect」。见 `check_fish_skin.mjs` / `check_faction.mjs`。
+- ⚠ **测散列/随机分布前先验证测试数据本身不退化** —— 踩过两次：① `q=(i*53)%400-200 / r=(i*149)%400-200` 时 `53≡149≡5 (mod 16)` ⇒ q,r 低 4 位恒相等 ⇒ 颜色唯一率从 100% 假跌到 52%；② LCG 取**低位** `%12` 周期极短 ⇒ 坐标本身大量重复。正确做法：xorshift32 **只取高位**（`(r32()>>>20) % n`）。
 - ⚠ 实机 A/B 抓图（验证渲染改动）务必带 URL 参数 **`capmin=N`**（截屏前预热 N 秒）：页面自截的就绪门槛常写得松（`chunkData>=3`），不加则同一 URL 两帧可差 ~20%，A/B 会被噪声吞掉。详见 skill `webgl-headless-verify`。
 
 ## 22. 服务端回归 —— 起**隔离实例**（绝不动用户的 8140）
@@ -560,17 +569,29 @@ N="C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2-3/node.exe"
 dotnet build Server/Zongmen/ZongMen.csproj -o verify/_vmsrv -p:UseAppHost=false
 
 # 起实例：env 用「双下划线」映射配置节
+# ⚠ MaxSeeds 必须显式放大，见下方第 1 条
 Zongmen__Port=8150 \
+Zongmen__MaxSeeds=64 \
 Zongmen__DbPath="C:/Users/Administrator/AppData/Local/Temp/wb/reg.sqlite" \
 dotnet verify/_vmsrv/ZongMen.dll
 
 curl -s --noproxy "*" http://127.0.0.1:8150/api/map/stats
 ```
 
-- `Options.FindRoot` 自 ContentRoot（= exe 目录）**向上找含 `web/index.html` 的目录** ⇒ 从 `verify/_vmsrv` 起步会命中仓库根，**自动用仓库 `web/` 与 `Engine/js`**，不用拷资产。
-- 跑完 **kill 该实例 + 删 `verify/_vmsrv`**（46 个文件 / 约 292MB），最后 `git status` 与 `git status --ignored verify/` 双净。
-- 探端口用 `net.connect` 确认起来/关闭；**别用 `taskkill /IM`**（会连带杀用户实例）。
-- 然后都传该端口：
+0. ⚠ **`Zongmen__MaxSeeds` 必须显式放大（2026-09-15 新增，最容易误判成回归）**
+   `appsettings.json` 的 `MaxSeeds` 是 **3**。而 live 组里 `check_mm_ui` 每次用**新的随机 seed**、`frontend_smoke`/`check_mm_layout` 也会各占一个 ⇒ **连跑三四轮回归就把名额用满**，之后新 seed 一律被服务端拒绝 ⇒ 页面拿不到世界/快照 ⇒ 判据报「`模块/快照 25s 内未就绪 (MiniMapVein=true)`」或「引擎未 ready」。
+   **症状与产品回归几乎一样**，但 `check_mm_ui` 单跑也红、且**失败得很快（~1.6s，不是 25s 超时）**就是它的指纹。
+   - 查法：`curl -s --noproxy "*" http://127.0.0.1:PORT/api/map/stats` → 看 `liveSeeds` 是否 **等于** `maxSeeds`。
+   - 修法：起实例时带 `Zongmen__MaxSeeds=64`（并换新 `DbPath`，旧库里的 seed 也会占名额）。
+1. `Options.FindRoot` 自 ContentRoot（= exe 目录）**向上找含 `web/index.html` 的目录** ⇒ 从 `verify/_vmsrv` 起步会命中仓库根，**自动用仓库 `web/` 与 `Engine/js`**，不用拷资产。
+2. 跑完 **kill 该实例 + 删 `verify/_vmsrv`**（46 个文件 / 约 292MB），最后 `git status` 与 `git status --ignored verify/` 双净。
+3. 探端口用 `net.connect` 确认起来/关闭；**别用 `taskkill /IM`**（会连带杀用户实例）。按命令行精确定位才安全（`wmic` 在本机可用）：
+   ```bash
+   wmic process where "name='dotnet.exe'" get processid,commandline /format:csv | tr -d '\r' | grep -i 'vmsrv' | awk -F',' '{print $NF}'
+   # 再对拿到的 PID 逐个 taskkill /F /PID <pid>
+   ```
+4. ⚠ **别在回归跑动中去清 `%TEMP%/wb-*`**：那批目录里就有正在跑的 Chrome profile，删了会当场假红（实测 `check_calc_local` 一次红 4 条，单跑立刻 11/11 绿）。要清就等跑完。
+5. 然后都传该端口：
 
   ```bash
   "$N" verify/frontend_smoke.mjs    http://127.0.0.1:8150
@@ -695,3 +716,160 @@ for (const v of VS.variants)  assertEq(v.glow, MG.VARIANT_RGB[v.key]);
 - 精灵位/载荷变了 ⇒ **停服清 `db/zongmen.sqlite*`** 再起（否则实机看旧内容）。
 
 > 本节内容原在**用户级** skill `zongmen-regression`（2026-09-15 夜归并到本仓库版；用户级那份已删除，避免「同名异实、改了这处忘了那处」）。
+## 28. 响应式几何缺陷：「绝对定位收缩盒」+ 量盒才是唯一证据（2026-09-15 手机小地图「不占满窗体」）
+
+**症状**（用户手机截图）：小地图面板右侧一条空白纸，画布只占左边一块。
+
+**根因**：`#minimapBox` 是 `position:absolute` ⇒ **收缩包裹盒 (shrink-to-fit)**，宽度 = 最宽子孙的固有宽。
+窄屏档 `@media (max-width:760px)` 把画布缩到 `150×98`，但头行「山河小图 归心 全屏 隐藏」与提示行的固有宽**都是 188px**
+⇒ 面板 204px 而画布 150px ⇒ **右侧空白 38px**（手机截图上量到的 61 物理像素 = 38 CSS px × 1.6 DPR，对得上）。
+桌面档 `216=216` 恰好相等 ⇒ **只在窄屏暴露**。
+> 教训：`position:absolute` 的面板里若同时有「固定像素宽的画布」和「文本行」，两者宽度必须显式对齐；
+> 只量桌面档看不出来，**必须在断点两侧各量一次**。
+
+**修法**（`web/index.html`，纯 CSS）：
+1. **几何参数化**：`--mm-h`（画布高）/ `--mm-chrome`（57px：头行+提示+内边距）/ `--mm-bottom` / `--mm-gap`；
+   `#info`（山川志）的 `bottom` 改成 `calc()` 由变量推出。原先写死 `230px`（桌面）/`168px`（窄屏），
+   而窄屏那个**本身就是错的**：面板顶边在 173px、山川志底边在 168px ⇒ **压住小地图 5px**，只有反向对照时才暴露。
+2. 窄屏 `#minimapBox{left:10px;right:10px}` ⇒ 宽度确定；再 `#minimap{width:100%;height:var(--mm-h)}` ⇒ 铺满窗体。
+   ⚠ **桌面档绝不能给 `width:100%`**：收缩盒里百分比宽会回落到画布自身的 `width` **属性**，而模块每帧都在改这个属性
+   （`clientWidth×dpr`）⇒ **反馈环**。所以桌面档保留固定 `216px`，只让窄屏走百分比。
+3. 窄屏画布高 `min(132px, 22vh)`（横屏时不至于吃掉半屏）。
+
+**怎么量**（本机 CDP `Runtime.evaluate` 对本页**永久挂起** ⇒ 不能用来取数）：
+写**同源探针页**（`web/_*.html`，已被 `.gitignore` 的 `web/_*` 覆盖），把 `index.html` 装进**各档宽度的 iframe**，
+读 `getBoundingClientRect()` + `scrollWidth/clientWidth`，结果写进 `<pre>`，再用**旧版** headless 取回：
+
+```bash
+chrome --headless --disable-gpu --window-size=1400,900 --virtual-time-budget=90000 \
+       --dump-dom "http://127.0.0.1:8140/_mmlayout_probe.html?w=280,390,760,761"
+```
+
+iframe 的布局视口 = iframe 尺寸 ⇒ **一次 Chrome 跑完十几档宽度**（媒体查询 / `100vw` / `vw` 单位全部按该档生效），
+而且 DOM、`window`、模块的 `MiniMapVein.probe()` 都读得到（同源）⇒ **不碰 CDP、不读图、纯数字**。
+⚠ 必须用**旧版** `--headless`（`--headless=new` 忽略 `--window-size`），且 `--virtual-time-budget` 要够长
+（本脚本按 `20000 + 5000×档数` ms 给）。
+
+**固化成判据**：`verify/check_mm_layout.mjs`（自包含：生成探针页 → 跑 Chrome → 断言 → 删探针），
+12 档宽度 × 8 条：数据齐全 / **画布铺满内容框 ≤1px** / 窄屏左右贴边 10px / 窄屏画布高 = min(132,22vh) /
+**宽屏桌面档锁死 232×198 与 216×141（防误伤）** / 头行与提示行不溢出不截字 / 山川志净距 ≥6px / 画布不出视口。
+已挂进 `run_regression.mjs` 的 live 组（**17 条**）；无 Chrome 或服务端不通 ⇒ 自己 rc=2 跳过，不算红。
+
+**⚠ 检查必须有牙 —— 反向对照**：改完把**改前**的 `index.html` 临时换回去再跑一次，必须**红**
+（本轮实测 5 条 FAIL / rc=1），跑完按 **sha256 核对还原**。
+只证明「修改后是绿的」等于什么都没证明 —— 判据写歪了、选择器写错了，一样是绿的。
+
+**边界（CSS 改动不在 `frontend_smoke` 的源码守卫内）**：`frontend_smoke.mjs` 的 51 条里，源码守卫只 grep
+「零轮询/旧符号/单点注入」这类符号事实，**CSS 几何完全不在其中**。改样式表后**必须**跑
+`verify/check_mm_layout.mjs`（或整条回归），否则「手机上又留一条空白纸」这类缺陷会静默回归。
+
+## 29. 手机触摸档：事件根本没绑（2026-09-15 · 「手机版的不能放大或者拖动」）
+
+**症状**：手机上小地图捏合/拖动全无反应，桌面鼠标一切正常。
+
+**根因不在几何在事件**：`bindPanel()` / `bindFull()` 只绑了 `mousedown/mousemove/mouseup/wheel`，
+**零个 `touch*`**。触屏上鼠标事件只在「点击」时被合成，拖动/捏合**不会**补 ⇒ 等于没接交互。
+⇒ **排查「某个交互没反应」时，第一步永远是 grep 事件绑定，而不是看坐标/尺寸。**
+
+**改法（照抄主地图 `main.js` 已有口径，别另创）**：单指拖 = 平移且 `followCam=false`；
+双指捏合 = **等价滚轮**（面板档只改 `baseWpp`，别碰上屏 wpp，否则 R13 的恒定比例就毁了）；
+未移动的抬指 = 单击（展开全屏 / 跳转）；`TOUCH_SLOP=8`（比鼠标 3px 宽，手指抖）；
+捏合抬一指 ⇒ 剩指接着拖并标 `moved:true`；画布加 `touch-action: none`。
+
+**⚠⚠ 必踩的坑 —— 合成鼠标事件**：一次触摸结束后浏览器 ~300ms 内**补发** `mousedown/mouseup`。
+原 `mouseup` 写着「未拖动 ⇒ 单击 ⇒ 展开全屏」⇒ **手机上一拖动松手就自己弹全屏**。
+对策：`lastTouchTs` + `fromTouch(e)`，四条鼠标处理全挂闸。
+⚠ 比较用 **`e.timeStamp`**（合成事件与真事件同一时钟），用 `Date.now()` 会跨时钟误判。
+
+**验证手法**：合成 `TouchEvent`（`new Touch({identifier,target,clientX,clientY})` +
+`new TouchEvent(type,{touches,targetTouches,changedTouches,bubbles,cancelable})`）打进
+**同源 iframe 里的真页面**，再读 `probe()`。抬最后一指 = `touches: []`；
+拖完再补发一对合成 `MouseEvent` —— 这一条专门验「一拖就弹全屏」的坑。
+
+**⚠ 判据自欺的一种**：全屏档平移我一开始断言 `panelCx` 变化 —— 但 `probe()` 只有 `fullWpp`，
+`panelCx` 是**面板档**的字段，压根不反映全屏中心 ⇒ 判据恒 FAIL（这次是**假红**，反方向的自欺）。
+处理：给 `probe()` 补 `fullCx/fullCy`（诊断字段本就该齐），别在判据里将就现有字段。
+**推论**：断言用的字段必须**是你真正在测的那个量** —— 假绿与假红都源于「字段与语义不对齐」。
+
+## 30. 手机浏览器「算法暗化」→ 强制浅色（2026-09-15 · 「ui不应该跟随系统变化」）
+
+**症状**：系统切深色，整张纸白 UI 变墨黑。
+
+**排除顺序（先排除自己，再怀疑宿主）**：
+1. 全 `web/` grep `prefers-color-scheme|matchMedia|color-scheme|darkMode` → **0 命中**，配色全写死。
+2. 本机桌面 Chrome：`--force-dark-mode` / `--enable-features=WebContentsForceDark` / 两者叠加，
+   各截 480×700 逐像素比 → 最大差 **0**（另一组 3614px 只是抗锯齿抖动），亮度完全一致。
+   ⇒ **本机复现不出**，别硬造复现。
+3. 结论：变暗来自**宿主浏览器/WebView 的算法暗化**（Chrome Android 自动深色 / Android WebView
+   algorithmic darkening / 微信·QQ X5 夜间模式）—— 它们对**未声明 `color-scheme` 的页面**强行反色。
+
+**修法（标准退出方式）**：`<meta name="color-scheme" content="only light">` **+**
+`:root { color-scheme: only light; }`。**`only`** 才是退出关键字（`light` 只说「支持浅色」）。
+meta 给浏览器、CSS 给渲染引擎，两条都写才稳。
+
+**⚠ 诚实边界**：本机证明不了「手机上就好了」，只能断言「退出声明在位 + 全表无反向规则」。
+写判据时**把这条限制写进脚本头部注释**，别让后来人以为它验过了实机观感。
+
+**固化成判据**：`verify/check_mm_ui.mjs`（自包含：生成同源 iframe 探针页 → 合成触摸/鼠标事件 →
+断言 → 删探针），①强制浅色 3 条 + ②触摸交互 8 条 + ③鼠标回归 2 条 = **14 条**，已挂进
+`run_regression.mjs` 的 live 组（**18 条**）。无 Chrome / 服务端不通 ⇒ 自己 rc=2 跳过，不算红。
+
+**反向对照（有牙的证明）**：把改前的 `minimap-vein.js` + `index.html` 临时换回去再跑 ⇒
+**10 条 FAIL / rc=1**，其中「拖动后合成鼠标事件把 maximized 打成 true」直接复现了 §29 的坑；
+且 `colorScheme` 由 `"light only"` 退回 `"normal"`、`<meta>` 由 `"only light"` 退回 `null`。
+跑完按 **sha256 核对**还原（`ebedc942…` / `481fefbd…`）。
+
+---
+
+## 31. 判据自己会「假红」：两类必须归因的断言（2026-09-15 收口 · A/B/C + 地形自算）
+
+收口时遇到的两个「红」**都不是产品 bug，而是判据写错了**。它们的形态不同，但都属同一类错误：
+**用绝对值阈值去判一件「和基线比才有意义」的事。**
+
+### 31.1 绝对值阈值 ⇒ 必须改成 A/B 归因
+
+`check_calc_local.mjs` 的 S5 原本断「hybrid 档首屏最长任务 ≤ 50ms」，实测**恒红 ~250ms**。
+做**归因 A/B** 后（把三档的最长任务一起打出来）：
+
+| 档 | 本地算 | 首屏最长任务 |
+|----|--------|--------------|
+| hybrid | ✅ 48 块本地算 | 253 ms |
+| ab | ✅ 48 块 + 服务端对拍 | 252 ms |
+| **server** | ❌ **零本地算** | **245 ms** |
+
+`server` 档一行本地算都不跑，照样 250ms ⇒ 那钱花在 **WebGL 上下文 / 着色器编译 / 图集构建**上。
+判据已改为 **「hybrid ≤ server + 40ms 余量」**，并把三档数字打进摘要行（**数字不许被藏起来**）。
+> 教训：**给判据加绝对值阈值前，先问「这个量在「老路径」上是多少」**。拿不到基线就别下这个断言 ——
+> 只需一行 A/B 就能把「本次改造引入的」与「本来就在的」分开。
+> 结论同时带出一个决策：S5 观测 = 分帧预算够用，**不需要 Worker 化**（实施单 S7 免做）。
+
+### 31.2 结构审计的白名单要按**约定**推断，别逐个补
+
+`frontend_smoke.mjs` 的「前端读取的解码字段必须落在解码器字段集内」把 B 新增的
+`st._fac` / `st._facV` 判红。它们是**客户端本地 memo**（与既有 `st._anc` 同类，纯前端缓存，非线路字段）。
+- 修法：按项目约定 **整体放行 `_` 前缀**属性 —— 线路 protobuf 字段一律不带下划线 ⇒ `_xxx` 只可能是前端自挂缓存。
+- ⚠ 这类误报**已发生两次**（`_anc`，然后 `_fac`/`_facV`）。**第二次就该改规则**，不要再补一条白名单。
+
+### 31.3 harness 自己泄漏：`setTimeout` 里的清理 + 紧跟的 `process.exit`
+
+`live_cap.mjs` 与 `check_mm_layout.mjs` 把 `fs.rmSync(profile)` 放进 `setTimeout(..., 800~1500)`，
+而 `finish()` / `cleanup()` 里**紧接着就 `process.exit()`** ⇒ **定时器永不触发** ⇒
+每次跑都漏一个 Chrome profile 目录。本机 `%TEMP%` 已积 **255 个 `wb-*` / 3.54 GB**（`wb-livecap-*` 127 个最多）。
+
+- 修法：**同步删**（`Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)` 可当同步小睡），带重试 ——
+  `taskkill` 返回后 Chrome 释放文件锁还有几百 ms 延迟。
+- 顺手修掉 `check_mm_layout.mjs` 里 `KEEP` 的两个分支**写反**（`KEEP=true`「留档」反而立刻删）。
+- 清理姿势（**跑完后**再清，别在回归跑动中清）：
+  ```bash
+  # 只碰 wb-<name>；⚠ 绝不碰无短横的 wb/（隔离实例的 sqlite 就在里面）
+  node -e "const fs=require('fs'),p=require('path'),os=require('os');const t=os.tmpdir();
+    for(const d of fs.readdirSync(t).filter(x=>/^wb-/.test(x))) fs.rmSync(p.join(t,d),{recursive:true,force:true});"
+  ```
+
+### 31.4 「红」的三种归因顺序（省钱）
+
+1. **单跑那一条**：立刻绿 ⇒ 联跑抖动（Chrome 争用 / `MaxSeeds` 跑满，见 §22 第 0 条）。
+2. **对比 `?fac=0` / `?calc=server` / 老链路副本**：确认是不是本次改造引入（§23 的副本 A/B 手法）。
+3. **查环境**：`/api/map/stats` 的 `liveSeeds == maxSeeds`？`%TEMP%/wb-*` 堆了多少？端口上是哪个构建（meta 有没有新字段）？
+
+> 本次收口的最终验收：**`--base=<隔离实例>` 全量 22 条，红 0**（离线 18 + live 4）。

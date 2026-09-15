@@ -44,7 +44,8 @@
 (function (g) {
   'use strict';
 
-  var MC = g.MapClient;
+  /* 壳层依赖全部经 deps 注入 (snapshot/jump), 引擎经 window.EngineLocal ——
+     R11 起本模块不再直接摸 MapClient (原 MC.requestScript 已迁入 EngineLocal)。 */
 
   /* ---------- 常量 ---------- */
   var FOLLOW_WPP = 6;            // 面板档基准缩放: 世界单位/像素 (主相机处于 DEFAULT_ZOOM 时的观感 = 旧版观感)
@@ -53,6 +54,9 @@
   var LS_KEY = 'zongmen.mmView';  // 倍率持久化键 (跨刷新保存「与大地图的大小比例」)
   var FULL_WPP_INIT = 3.5;       // 全屏档初始缩放
   var WPP_MIN = 0.30, WPP_MAX = 48;
+  /* 触摸档 (手机) */
+  var TOUCH_SLOP = 8;            // 单指位移阈值 (px, 曼哈顿): 超过算拖动, 否则算点按 —— 比鼠标的 3px 宽 (手指抖动大)
+  var TOUCH_GUARD_MS = 600;      // 触摸后这段时间内的「合成鼠标事件」一律丢弃 (见 fromTouch)
   var SAMPLE_BUDGET_MS = 10;     // 兜底: 首次抽样前的额度 (之后按帧间隔自适应, 见 tick)
   var REDRAW_MS = 110;           // 非拖动时的重绘节流
   var SAMPLE_CELLS_MAX = 24000;  // 单视图抽样格上限 (决定抽样层级 m; 越小越省, 见 levelFor)
@@ -81,7 +85,7 @@
   var running = false, rafId = 0;
   var hidden = false, maximized = false, destroyed = false;
 
-  var engine = null, engineReady = false, enginePromise = null, engineSeed = null;
+  var engine = null, engineReady = false, engineSeed = null;
   /* L1 地形缓存 —— 键是「世界格 q,r」, 与视图无关。
      ⚠ 这是 R12 修「大地图大面积未探测」的关键: 旧实现按「画布像素格」投影成采样点,
        视图一平移/缩放, 采样点几乎全部落到新格上 ⇒ 缓存复用率 36%~11% (实测),
@@ -108,6 +112,8 @@
   var dragPanel = null, persistTimer = 0;
   var hintEl = null, fullTitleEl = null;
   var lastDraw = 0, dragState = null, cardDirty = true;
+  var pinchPanelD = 0, pinchFullD = 0;   // 上一帧双指间距 (0 = 当前没有捏合)
+  var lastTouchTs = -1e9;                // 最近一次触摸的 timeStamp (拦合成鼠标事件用)
   var hover = null;                 // {x,y,info}
   var terrainBmp = null, terrainBc = null;   // 离屏地形位图
   var bmpBiome = null;                       // 上一次位图的逐块群系 (椒盐诊断计数用, 不参与绘制)
@@ -152,37 +158,26 @@
   }
   function rgbOf(arr, i) { return (arr && arr[i]) || null; }
 
-  /* ---------- 引擎脚本: WS 下发 + 前端执行 ----------
-     单真源: 服务端读 Engine/js 原文件下发 (noise → mapgen-config → mapgen),
-     前端不保存副本。执行后立刻把 window.NoiseLib 还原成前端视觉噪声库
-     (引擎 noise.js 会覆盖它; 引擎内部已在 IIFE 期捕获自己的引用, 还原无副作用)。 */
+  /* ---------- 引擎: 收敛到全站单实例 EngineLocal (web/js/engine-local.js) ----------
+     本模块**不得**再自行 eval 引擎、也**不得**自行 init(seed):
+       · MapGen.init() 会 clear() 引擎内全部 14 张缓存 (mapgen.js) ⇒ 主视图每次重铸世界
+         都会把小地图已算好的格全部作废 (实测热算 0.62ms/块 → 冷算 2.46ms/块, 4×);
+       · window.NoiseLib 同名覆盖的保存/还原也必须留在唯一 eval 点里 (本模块无从插手中途)。
+     加载与换 seed 统一由 EngineLocal 负责, 这里只保留只读访问器。 */
+  function EL() { return g.EngineLocal || null; }
+
   function ensureEngine() {
-    if (enginePromise) return enginePromise;
-    if (!MC || typeof MC.requestScript !== 'function') {
-      enginePromise = Promise.resolve(false);
-      return enginePromise;
+    var E = EL();
+    if (!E) {
+      console.warn('[小地图] EngineLocal 未加载 (web/js/engine-local.js) — 地形层降级为「未探测」');
+      return Promise.resolve(false);
     }
-    enginePromise = MC.requestScript().then(function (pack) {
-      var savedNoise = g.NoiseLib;
-      try {
-        (0, eval)("'use strict';\n" + pack.text);      // 间接 eval: 全局作用域, 等价 <script>
-      } catch (e) {
-        throw new Error('引擎脚本执行失败: ' + e.message);
-      } finally {
-        if (savedNoise) g.NoiseLib = savedNoise;
-      }
-      if (!g.MapGen || typeof g.MapGen.fields !== 'function') {
-        throw new Error('引擎脚本已执行但未导出 MapGen');
-      }
-      engine = g.MapGen;
-      engineReady = true;
-      return true;
-    }).catch(function (err) {
-      console.warn('[小地图] 引擎脚本不可用, 地形层降级为「未探测」:', err && err.message);
-      engineReady = false;
-      return false;
+    return E.load().then(function (ok) {
+      engine = ok ? E.mapgen() : null;
+      engineReady = !!ok;
+      if (ok) cardDirty = true;                 // 脚本到货 → 尽快把「未探测」换成真地形
+      return ok;
     });
-    return enginePromise;
   }
 
   /* 地形层全量重置 (换 seed / 世界重铸) */
@@ -192,14 +187,6 @@
     pending.length = 0; pendingIdx = 0;
     pendingSet.clear(); pendingEpoch = null;
     sampleM = 1; rawM = 1;
-  }
-
-  function syncEngineSeed(seed) {
-    if (!engine || !seed || seed === engineSeed) return;
-    engineSeed = seed;
-    resetTerrain();
-    try { engine.init(seed); } catch (e) { console.warn('[小地图] MapGen.init 失败', e); }
-    cardDirty = true;
   }
 
   /* ---------- L1 地形: 世界对齐抽样 ----------
@@ -644,9 +631,12 @@
     }
     veinRGB = s.variantRGB || veinRGB;
 
-    if (engineSeed !== s.seed) {       // 世界重铸 → 引擎重 init + 地形层全量重置
+    if (engineSeed !== s.seed) {       // 世界重铸 → 地形层全量重置 (+ 引擎换 seed)
       resetTerrain();
-      if (engineReady && engine) syncEngineSeed(s.seed);
+      engineSeed = s.seed;             // 本地记账: 引擎侧 init 统一由 EngineLocal 管
+      var E2 = EL();
+      if (engineReady && E2) E2.setSeed(s.seed);
+      cardDirty = true;
     }
     if (s.rev !== lastRev) { lastRev = s.rev; cardDirty = true; }
 
@@ -698,6 +688,15 @@
   }
 
   /* ---------- 提示层 ---------- */
+  /* 灵脉呈示名: 真源在 vein-skin.js 的 VeinSkin.label (大地图匾额 / 侧栏 / 这里三处共用)。
+     懒取 g.VeinSkin 而非模块初始化时缓存 —— 将来若调整 index.html 的加载顺序, 这里会
+     立刻退回「只有名字」而不是静默拿到 null。⚠ 兜底刻意不写档名数组: 档名真源只有
+     vein-skin.js LEVELS[].key 一处 (历史上这里另有一份长度还不同的副本, 已删)。 */
+  function veinLabel(v) {
+    var V = g.VeinSkin;
+    if (V && V.label) return V.label(v, v && v.level);
+    return (v && v.name) ? v.name : '灵脉';
+  }
   function tipTextAt(wx, wy, v) {
     var t = pxToTile(wx, wy);
     var out = [];
@@ -718,9 +717,9 @@
       });
     }
     if (best) {
-      var LV = ['大', '中', '小', '从属'];
-      /* 2026-09-15: 去括号, 等级用全角间隔号 (与大地图匾额同款) */
-      out.push((best.name || '灵脉') + '灵脉·' + (LV[best.level] || '小') + ' · ' + bestD + '格');
+      /* 2026-09-15: 去括号 + 去「灵脉」叠字, 等级用全角间隔号 (与大地图匾额同款)。
+         ⚠ 文案真源在 vein-skin.js 的 VeinSkin.label —— 别在这里再写一份档名数组。 */
+      out.push(veinLabel(best) + ' · ' + bestD + '格');
     }
     var st = null;
     if (snap.settles) {
@@ -732,7 +731,15 @@
         }
       });
     }
-    if (st) out.push(st.name + ' · ' + ({ sect: '宗门', city: '城', town: '镇', village: '村', fishing: '渔村' }[st.type] || st.type));
+    if (st) {
+      out.push(st.name + ' · ' + ({ sect: '宗门', city: '城', town: '镇', village: '村', fishing: '渔村' }[st.type] || st.type));
+      /* R6b (B, 2026-09-15): 归属势力 —— 解析器由 main.js 注入 (本模块只读地物, 不认"辖区")。
+         ⚠ 必须容忍注入缺失 (main.js 可单独回退到旧版) ⇒ 先查函数存在再调。 */
+      if (typeof deps.factionOf === 'function' && st.type !== 'sect') {
+        var fac = deps.factionOf(st);
+        if (fac && fac.name) out.push('归属 ' + fac.name);
+      }
+    }
     return out.join('\n');
   }
   function showTip(sx, sy, text) {
@@ -777,15 +784,62 @@
     var zn = fmtX(panelZoomX());
     if (hintEl) {
       hintEl.textContent = (followCam ? '跟随视野' : '自由视角') + ' · 倍率 ' + zn;
-      hintEl.title = '滚轮缩放 · 拖动平移 (拖过会自动转自由视角) · 单击展开全屏 · 归心恢复跟随';
+      hintEl.title = '滚轮/捏合缩放 · 拖动平移 (拖过会自动转自由视角) · 单击展开全屏 · 归心恢复跟随';
     }
     if (fullTitleEl) {
       fullTitleEl.textContent = '山河小图 · 全屏（倍率 ' + fmtX(FULL_WPP_INIT / viewFull.wpp) +
-        ' · 拖动平移 · 滚轮缩放 · 单击跳转）';
+        ' · 拖动平移 · 滚轮/捏合缩放 · 单击跳转）';
     }
   }
 
   /* ---------- 交互 ---------- */
+  /* 触摸档 (手机) —— 原实现只绑了 mouse*, 手机上压根没有对应事件 ⇒ 「既不能放大也不能拖动」。
+     ⚠ 合成鼠标事件: 一次触摸结束后浏览器会在 ~300ms 内补发 mousedown/mouseup,
+       不拦就会被 mouseup 的「未拖动 ⇒ 展开全屏」接住 —— 于是「一拖动就自己弹全屏」。 */
+  function touchMark(e) { lastTouchTs = e.timeStamp; }
+  function fromTouch(e) { return (e.timeStamp - lastTouchTs) < TOUCH_GUARD_MS; }
+  function touchDist(e) {
+    var a = e.touches[0], b = e.touches[1];
+    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
+  }
+  function touchMid(e) {
+    var a = e.touches[0], b = e.touches[1];
+    return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+  }
+  /* 面板档捏合 = 滚轮同口径: 只改「与大地图恒定大小比例」的载体 baseWpp,
+     上屏 wpp 仍由 panelWppNow() 按主相机 zoom 反比推出 —— 直接改上屏 wpp 会把恒定比例毁掉。
+     自由视角下再补一次中心偏移, 让两指中点下的世界点不动 (跟随态中心被主相机锁死, 补了也会被下一帧覆盖)。 */
+  function onPanelPinch(e) {
+    var d = touchDist(e);
+    if (!pinchPanelD) { pinchPanelD = d; return; }
+    var f = pinchPanelD / d;                 // 两指张开 ⇒ f<1 ⇒ baseWpp 变小 ⇒ 更放大
+    pinchPanelD = d;
+    var L = canvasLogical(canvas), rect = canvas.getBoundingClientRect(), m = touchMid(e);
+    var before = screenToWorld(m.x - rect.left, m.y - rect.top, curView(), L.w, L.h);
+    baseWpp = clamp(baseWpp * f, BASE_WPP_MIN, BASE_WPP_MAX);
+    var after = screenToWorld(m.x - rect.left, m.y - rect.top, curView(), L.w, L.h);
+    if (!followCam) { viewPanel.cx += before.x - after.x; viewPanel.cy += before.y - after.y; }
+    cardDirty = true;
+    updateHint();
+    saveViewSoon();
+  }
+  /* 全屏档捏合 = 滚轮同口径 (滚轮锚在光标, 这里锚在两指中点) */
+  function onFullPinch(e) {
+    var d = touchDist(e);
+    if (!pinchFullD) { pinchFullD = d; return; }
+    var f = pinchFullD / d;
+    pinchFullD = d;
+    var rect = fcanvas.getBoundingClientRect(), L = canvasLogical(fcanvas), m = touchMid(e);
+    var mx = m.x - rect.left, my = m.y - rect.top;
+    var before = screenToWorld(mx, my, viewFull, L.w, L.h);
+    viewFull.wpp = clamp(viewFull.wpp * f, WPP_MIN, WPP_MAX);
+    var after = screenToWorld(mx, my, viewFull, L.w, L.h);
+    viewFull.cx += before.x - after.x;
+    viewFull.cy += before.y - after.y;
+    cardDirty = true;
+    updateHint();
+    saveViewSoon();
+  }
   function onPanelMove(e) {
     if (!snap) return;
     if (dragPanel && dragPanel.moved) { hideTip(); return; }
@@ -801,7 +855,7 @@
        ⚠ 拖动的起始中心必须锁成「按下瞬间的实际中心」: followCam 为真时 viewPanel.cx 是旧值,
          直接拿它算会在第一帧跳一大跳。 */
     canvas.addEventListener('mousedown', function (e) {
-      if (e.button !== 0) return;
+      if (fromTouch(e) || e.button !== 0) return;
       e.preventDefault();
       var v = curView();
       dragPanel = { sx: e.clientX, sy: e.clientY, cx: v.cx, cy: v.cy, wpp: v.wpp, moved: false };
@@ -820,8 +874,9 @@
         cardDirty = true;
       }
     });
-    g.addEventListener('mouseup', function () {
+    g.addEventListener('mouseup', function (e) {
       if (!dragPanel) return;
+      if (fromTouch(e)) { dragPanel = null; return; }   // 合成事件: 丢弃, 但清状态免卡死
       var moved = dragPanel.moved;
       dragPanel = null;
       if (canvas) canvas.style.cursor = '';
@@ -838,6 +893,57 @@
       updateHint();
       saveViewSoon();
     }, { passive: false });
+    /* —— 触摸档 —— */
+    canvas.addEventListener('touchstart', function (e) {
+      e.preventDefault();
+      touchMark(e);
+      if (e.touches.length >= 2) {
+        dragPanel = null;                       // 两指 = 捏合: 不作平移, 更不能把抬手当成「点按展开」
+        pinchPanelD = touchDist(e);
+        hideTip();
+        return;
+      }
+      var v = curView();                        // 同鼠标: 锁「按下瞬间的实际中心」(followCam 时 viewPanel.cx 是旧值)
+      dragPanel = { sx: e.touches[0].clientX, sy: e.touches[0].clientY,
+                    cx: v.cx, cy: v.cy, wpp: v.wpp, moved: false };
+    }, { passive: false });
+    canvas.addEventListener('touchmove', function (e) {
+      e.preventDefault();
+      touchMark(e);
+      if (e.touches.length >= 2) { onPanelPinch(e); return; }
+      if (!dragPanel || maximized) return;
+      var dx = e.touches[0].clientX - dragPanel.sx, dy = e.touches[0].clientY - dragPanel.sy;
+      if (!dragPanel.moved && Math.abs(dx) + Math.abs(dy) > TOUCH_SLOP) {
+        dragPanel.moved = true;
+        followCam = false;                      // 一拖动就脱离跟随 (与鼠标同口径)
+        hideTip();
+      }
+      if (dragPanel.moved) {
+        viewPanel.cx = dragPanel.cx - dx * dragPanel.wpp;
+        viewPanel.cy = dragPanel.cy - dy * dragPanel.wpp;
+        cardDirty = true;
+      }
+    }, { passive: false });
+    canvas.addEventListener('touchend', function (e) {
+      e.preventDefault();
+      touchMark(e);
+      var left = e.touches ? e.touches.length : 0;
+      if (left >= 1) {
+        /* 捏合抬起一指 ⇒ 剩下那指接着拖 (不该要求松手重按); moved:true 保证不会被当成点按 */
+        var v2 = curView();
+        dragPanel = { sx: e.touches[0].clientX, sy: e.touches[0].clientY,
+                      cx: v2.cx, cy: v2.cy, wpp: v2.wpp, moved: true };
+        pinchPanelD = 0;
+        return;
+      }
+      pinchPanelD = 0;
+      if (!dragPanel) return;
+      var moved = dragPanel.moved;
+      dragPanel = null;
+      if (moved) { updateHint(); saveViewSoon(); return; }
+      setMaximized(true);                       // 未移动 ⇒ 单击: 展开全屏
+    }, { passive: false });
+    canvas.addEventListener('touchcancel', function () { dragPanel = null; pinchPanelD = 0; });
     canvas.addEventListener('mousemove', onPanelMove);
     canvas.addEventListener('mouseleave', function () {
       hideTip();
@@ -848,7 +954,7 @@
   function bindFull() {
     if (!fcanvas) return;
     fcanvas.addEventListener('mousedown', function (e) {
-      if (e.button !== 0) return;
+      if (fromTouch(e) || e.button !== 0) return;
       e.preventDefault();
       dragState = { sx: e.clientX, sy: e.clientY, cx: viewFull.cx, cy: viewFull.cy, moved: false };
     });
@@ -863,6 +969,7 @@
       }
     });
     g.addEventListener('mouseup', function (e) {
+      if (fromTouch(e)) { dragState = null; return; }
       if (!dragState || !maximized) { dragState = null; return; }
       var moved = dragState.moved;
       dragState = null;
@@ -889,6 +996,52 @@
       updateHint();                            // 全屏头部显示当前倍率
       saveViewSoon();                          // 全屏倍率同样持久化
     }, { passive: false });
+    /* —— 触摸档 —— */
+    fcanvas.addEventListener('touchstart', function (e) {
+      e.preventDefault();
+      touchMark(e);
+      if (e.touches.length >= 2) { dragState = null; pinchFullD = touchDist(e); hideTip(); return; }
+      dragState = { sx: e.touches[0].clientX, sy: e.touches[0].clientY,
+                    cx: viewFull.cx, cy: viewFull.cy, moved: false };
+    }, { passive: false });
+    fcanvas.addEventListener('touchmove', function (e) {
+      e.preventDefault();
+      touchMark(e);
+      if (e.touches.length >= 2) { onFullPinch(e); return; }
+      if (!dragState || !maximized) return;
+      var dx = e.touches[0].clientX - dragState.sx, dy = e.touches[0].clientY - dragState.sy;
+      if (Math.abs(dx) + Math.abs(dy) > TOUCH_SLOP) dragState.moved = true;
+      if (dragState.moved) {
+        viewFull.cx = dragState.cx - dx * viewFull.wpp;
+        viewFull.cy = dragState.cy - dy * viewFull.wpp;
+        cardDirty = true;
+      }
+    }, { passive: false });
+    fcanvas.addEventListener('touchend', function (e) {
+      e.preventDefault();
+      touchMark(e);
+      var left = e.touches ? e.touches.length : 0;
+      if (left >= 1) {
+        dragState = { sx: e.touches[0].clientX, sy: e.touches[0].clientY,
+                      cx: viewFull.cx, cy: viewFull.cy, moved: true };
+        pinchFullD = 0;
+        return;
+      }
+      pinchFullD = 0;
+      if (!dragState || !maximized) { dragState = null; return; }
+      var moved = dragState.moved;
+      dragState = null;
+      if (moved) { saveViewSoon(); return; }
+      /* 单击 (未移动) → 主相机跳转 */
+      var t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      var rect = fcanvas.getBoundingClientRect();
+      var L = canvasLogical(fcanvas);
+      var w = screenToWorld(t.clientX - rect.left, t.clientY - rect.top, viewFull, L.w, L.h);
+      if (deps && deps.jump) deps.jump(w.x, w.y);
+      cardDirty = true;
+    }, { passive: false });
+    fcanvas.addEventListener('touchcancel', function () { dragState = null; pinchFullD = 0; });
     fcanvas.addEventListener('mousemove', function (e) {
       if (dragState) { hideTip(); return; }
       var rect = fcanvas.getBoundingClientRect();
@@ -948,7 +1101,8 @@
   function destroy() {
     stop();
     destroyed = true;
-    enginePromise = null;
+    /* 引擎实例归 EngineLocal 所有 (全站共享), 这里只松掉本地引用, 不 dispose/不重 init */
+    engine = null; engineReady = false;
     resetTerrain();
     if (panel) panel.innerHTML = '';
     if (full) full.classList.remove('open');
@@ -1051,7 +1205,8 @@
         panelWpp: panelWppNow(), panelZoomX: panelZoomX(),
         panelCx: followCam ? (snap ? snap.cam.x : 0) : viewPanel.cx,
         panelCy: followCam ? (snap ? snap.cam.y : 0) : viewPanel.cy,
-        fullWpp: viewFull.wpp, dragging: !!dragPanel && dragPanel.moved,
+        fullWpp: viewFull.wpp, fullCx: viewFull.cx, fullCy: viewFull.cy,
+        dragging: !!dragPanel && dragPanel.moved,
         savedRaw: saved,
         bmpW: mmStat.bmpW, bmpH: mmStat.bmpH, step: mmStat.step,
         blocks: mmStat.blocks, miss: mmStat.miss, draws: mmStat.draws,

@@ -2890,6 +2890,36 @@ function getSettlements(i, j){
     }
     void i;
   }
+  /* 势力「印纹」: 8 种确定性小记号, 画在环心 (半径 ≈ 0.50R 内)。
+     全部只用 1~3 笔直线或一笔圆 —— 缩到 8px 仍能分辨"是不是同一个记号"。
+     ⚠ 这是**归属势力**的唯一图形语言 (B, 2026-09-15): 刻痕数 + 印纹形状 + 旋转相位
+       三者同由 factionSig() 派生 ⇒ 同一势力在任意聚落上画出同一套记号; 不同势力必不同。 */
+  function sealGlyph(ctx, x, y, s, id) {
+    var k = ((id | 0) % 8 + 8) % 8;
+    ctx.beginPath();
+    if (k === 0) {                                  /* 丨 */
+      ctx.moveTo(x, y - s); ctx.lineTo(x, y + s);
+    } else if (k === 1) {                           /* 一 */
+      ctx.moveTo(x - s, y); ctx.lineTo(x + s, y);
+    } else if (k === 2) {                           /* 十 */
+      ctx.moveTo(x, y - s); ctx.lineTo(x, y + s);
+      ctx.moveTo(x - s, y); ctx.lineTo(x + s, y);
+    } else if (k === 3) {                           /* 乂 */
+      ctx.moveTo(x - s, y - s); ctx.lineTo(x + s, y + s);
+      ctx.moveTo(x + s, y - s); ctx.lineTo(x - s, y + s);
+    } else if (k === 4) {                           /* 三角 */
+      ctx.moveTo(x, y - s); ctx.lineTo(x + s * 0.92, y + s * 0.78);
+      ctx.lineTo(x - s * 0.92, y + s * 0.78); ctx.closePath();
+    } else if (k === 5) {                           /* 方 */
+      ctx.rect(x - s * 0.78, y - s * 0.78, s * 1.56, s * 1.56);
+    } else if (k === 6) {                           /* 圆 */
+      ctx.arc(x, y, s * 0.74, 0, Math.PI * 2);
+    } else {                                        /* 二 */
+      ctx.moveTo(x - s, y - s * 0.58); ctx.lineTo(x + s, y - s * 0.58);
+      ctx.moveTo(x - s, y + s * 0.58); ctx.lineTo(x + s, y + s * 0.58);
+    }
+    ctx.stroke();
+  }
   /* 5.1b 城镇地盘 (R6, 2026-09-15 十一版): 直接画在 2D 上下文 (设备像素), **不进精灵缓存**。
      ⚠ spriteOf 的缓存 key 不含 tint ⇒ 把"随城镇而变"的色塞进精灵会串色 (第一个城镇的色被
        所有城镇复用); 把 tint 加进 key 又会把 SPR_CAP 撑爆 (城镇数 × 地皮数)。故由 main.js
@@ -2959,6 +2989,50 @@ function getSettlements(i, j){
       ctx.lineWidth = (o.lw || Math.max(0.6, r * 0.038)) * 0.78;
       path(hexPts(cx, cy, rIn));
       ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    /* ============================================================
+     * B (2026-09-15): 「归属势力」记号 —— 环骨架 (R10, 0.80R~0.90R 中空) **不动**,
+     *   只在环上再加两层**纯几何**记号。三者同由调用方的 factionSig() 派生:
+     *     o.water  水上提亮   —— 深水底上单环对比不足 ⇒ 内外各补一道亮描边
+     *     o.crest  环外刻痕数 —— 3~6 道, 沿 rOut 向外的一小段
+     *     o.crestRot 刻痕起始相位 —— 由势力定, 免得不同势力的刻痕"看起来一样"
+     *     o.seal   环心印纹   —— sealGlyph 的 8 种记号之一
+     * ⚠ 确定性是**硬要求**: 同一势力在任意聚落上必须画出同一套记号, 否则"归属"读不出来。
+     * ⚠ 只在 o.seal != null / o.crest > 0 时画 —— 无归属的荒野聚落保持纯环, 不臆造记号。
+     * ============================================================ */
+    var lw0 = o.lw || Math.max(0.6, r * 0.038);
+    if (o.water) {
+      ctx.globalAlpha = (o.la == null ? 0.44 : o.la) * 0.95;
+      ctx.strokeStyle = o.wc || 'rgba(246,240,224,0.92)';
+      ctx.lineWidth = lw0 * 1.70;
+      path(hexPts(cx, cy, rOut * 1.05));
+      ctx.stroke();
+      ctx.lineWidth = lw0 * 1.15;
+      path(hexPts(cx, cy, rIn * 0.94));
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    if (o.crest > 0) {
+      ctx.globalAlpha = o.sa == null ? 0.60 : o.sa;
+      ctx.strokeStyle = o.sc || o.tint || INK3;
+      ctx.lineWidth = lw0 * 1.35;
+      var nk = o.crest | 0;
+      for (var k2 = 0; k2 < nk; k2++) {
+        var a0 = (o.crestRot || 0) + k2 * (Math.PI * 2 / nk) - Math.PI / 2;
+        var c0 = Math.cos(a0), s0 = Math.sin(a0);
+        ctx.beginPath();
+        ctx.moveTo(cx + c0 * rOut, cy + s0 * rOut);
+        ctx.lineTo(cx + c0 * (rOut + r * 0.11), cy + s0 * (rOut + r * 0.11));
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (o.seal != null) {
+      ctx.globalAlpha = o.sa == null ? 0.60 : o.sa;
+      ctx.strokeStyle = o.sc || o.tint || INK3;
+      ctx.lineWidth = lw0 * 1.15;
+      sealGlyph(ctx, cx, cy, r * 0.50, o.seal | 0);
       ctx.globalAlpha = 1;
     }
     ctx.restore();
@@ -4177,6 +4251,228 @@ function getSettlements(i, j){
     }
   };
 
+  /* ============================================================
+   * 8b. 渔村皮肤 (A · 2026-09-15) —— 「水上吊脚楼」而不是"内陆民居浮在海上"
+   * ------------------------------------------------------------
+   * 背景: 渔村 (type='fishing') 的**地皮与建筑池**在 R5b 已经调好 (水上格走『渔家』,
+   *   池子里民房占多数), 但画法一直复用内陆的 KINDS['民房'] / KINDS['仓库'] ——
+   *   落到水上就成了"几个内陆村子飘在海面", 只有一块木台 (waterDeck) 暗示它沾水。
+   *   用户原话:「之前叫你重新画渔村的贴图, 你没重画」。
+   *
+   * 方案: **不动引擎、不动协议、不清库** —— 只加一张"渔家画法表" KINDS_FISH,
+   *   由 paint() 在 spec.fishVillage 时**优先**查它, 查不到再落回 KINDS。
+   *   渔村的『码头 / 渔船坞 / 渔亭』本就为水上设计 (自带伸水栈桥 + 挂网 + 泊船),
+   *   不再单独覆盖 ⇒ 表里只有 民房 / 仓库 两项, 改动面最小。
+   *
+   * ⚠⚠ **本表唯一的坑**: `spriteOf` 的缓存 key 必须带 fishVillage 位 ——
+   *   否则同 kind/朝向/变体/R 档下 **水陆两版命中同一张缓存** ⇒ 串图
+   *   (内陆村子长出渔网, 或渔村退回民房)。加位点在 spriteOf 里, 改这里必同步。
+   * ⚠ 渔家屋一律 **茅顶 (THATCH) 不铺瓦** —— 这是与内陆民居最省笔墨的区分点, 远景
+   *   (detail=1) 也读得出来; 其余细节 (挂网/鱼干架/渔灯) 只在 detail>=2 出场。
+   * ============================================================ */
+  var KINDS_FISH = {};
+  /* 渔家变体判据: 按**格坐标**定 (不用 variant) —— 保证同屏相邻格子自动错开画法,
+     且与 bldg_town 等离线看板 (不传 variant) 口径一致。 */
+  function fishAlt(spec) {
+    return (((spec && spec.q != null ? spec.q : 0) | 0) * 31 +
+            ((spec && spec.r != null ? spec.r : 0) | 0) * 17) & 1;
+  }
+
+  /* 挂网: 上缘绳 + 两侧坠绳 + 网目 + 坠子 (檐下/两柱之间)。
+     ⚠ 网面**只给极淡一层** (0.18) —— 早期版本给 0.40 的实色梯形, 在檐口高度看过去
+       就是"屋顶上搭了块灰板" (实测放大后确认)。网的"可读性"交给**网目线**, 不靠色块。
+     ⚠ h 必须**低于**檐口: 挂网是吊在檐下的, 与 roofGable 的顶面同高就会糊成一片。
+     ⚠ 网目只在 detail>=3 出场 —— 远景 (detail=1) 连网面都不该有 (由调用方跳过本函数)。 */
+  function netHang(S, o) {
+    var u0 = o.u0, u1 = o.u1, v = o.v || 0;
+    var h = o.h == null ? 0.34 : o.h, drop = o.drop == null ? 0.24 : o.drop;
+    var n = o.n || 4, i, j;
+    var A = S.p(u0, v, h), Bp = S.p(u1, v, h);
+    var C = S.p(u1 * 0.94, v + 0.07, h - drop), D = S.p(u0 * 0.94, v + 0.07, h - drop);
+    faceOf(S, [A, Bp, C, D], '#efe6d0', 0.18);                 /* 极淡网面: 只暗示"这片有网" */
+    ink(S, [A, Bp], { w: 1.25, c: EARTH, a: 0.62, n: 1, fly: false, j: 0.3 });   /* 上缘绳 */
+    ink(S, [A, D], { w: 0.8, c: INK4, a: 0.44, n: 1, fly: false, j: 0.4 });
+    ink(S, [Bp, C], { w: 0.8, c: INK4, a: 0.44, n: 1, fly: false, j: 0.4 });
+    /* 网目: 竖 4 + 横 2 —— 这组线才是"网"的读点, detail 2 起就要有 */
+    for (i = 1; i < n; i++) {
+      var t = i / n;
+      ink(S, [S.p(u0 + (u1 - u0) * t, v, h), S.p((u0 + (u1 - u0) * t) * 0.94, v + 0.07, h - drop)],
+        { w: 0.55, c: INK4, a: 0.40, n: 1, fly: false, j: 0.4 });
+    }
+    for (j = 1; j <= 2; j++) {
+      var f = j / 3;
+      ink(S, [S.p(u0, v, h - drop * f), S.p(u1, v, h - drop * f)],
+        { w: 0.55, c: INK4, a: 0.36, n: 1, fly: false, j: 0.4 });
+    }
+    var dp = S.p(u0 * 0.94, v + 0.07, h - drop);
+    dots(S, dp[0], dp[1], 3, INK3, S.U * 0.035, S.U * 0.05, 0.5);   /* 坠子 */
+  }
+
+  /* 鱼干架: 两柱 + 横杆 + 3 枚梭形鱼干 (渔家版「晒竿」——内陆晒的是布) */
+  function dryRack(S, o) {
+    var u = o.u, v = o.v || 0, w = o.w || 0.30, h = o.h == null ? 0.32 : o.h, n = o.n || 3;
+    ink(S, [S.p(u - w, v, h), S.p(u - w, v, 0)], { w: 1.4, c: EARTH, a: 0.6, n: 1, fly: false, j: 0.3 });
+    ink(S, [S.p(u + w, v, h), S.p(u + w, v, 0)], { w: 1.4, c: EARTH, a: 0.6, n: 1, fly: false, j: 0.3 });
+    ink(S, [S.p(u - w, v, h), S.p(u + w, v, h)], { w: 1.2, c: EARTH, a: 0.56, n: 1, fly: false, j: 0.3 });
+    if (S.detail <= 1) return;
+    for (var i = 0; i < n; i++) {
+      var t = (i + 0.5) / n, uu = u - w + 2 * w * t;
+      var a = S.p(uu, v, h), b = S.p(uu, v + 0.03, h - 0.13);
+      faceOf(S, [a, S.p(uu + 0.035, v + 0.015, h - 0.05), b, S.p(uu - 0.035, v + 0.015, h - 0.05)],
+        '#cbb894', 0.9);
+      ink(S, [a, b], { w: 0.6, c: INK3, a: 0.48, n: 1, fly: false, j: 0.4 });
+    }
+  }
+
+  /* 渔灯: 短挑竿 + 一枚藤黄灯火 (带淡光晕) —— 夜里认渔村的记号, 白天读作"小灯笼" */
+  function fishLamp(S, o) {
+    var u = o.u, v = o.v || 0, h = o.h == null ? 0.46 : o.h;
+    ink(S, [S.p(u, v, h + 0.13), S.p(u, v, h)], { w: 0.9, c: EARTH, a: 0.5, n: 1, fly: false, j: 0.3 });
+    var p = S.p(u, v, h);
+    S.B.radial(p[0], p[1], S.U * 0.30, GAMBOGE, 0.30);
+    S.B.circle(p[0], p[1], S.U * 0.05, GAMBOGE, 0.85);
+  }
+
+  /* 鱼篓: 一只梯形的竹篓 (口大底小) */
+  function fishCreel(S, o) {
+    var u = o.u, v = o.v || 0, s = o.s || 0.1;
+    var A = S.p(u - s, v, 0), Bp = S.p(u + s, v, 0);
+    var C = S.p(u + s * 0.78, v, s * 1.7), D = S.p(u - s * 0.78, v, s * 1.7);
+    faceOf(S, [A, Bp, C, D], '#c9b47f', 0.92);
+    ink(S, [A, Bp, C, D, A], { w: 1.0, c: INK2, a: 0.5, n: 1, fly: false, j: 0.4 });
+    if (S.detail >= 3) {
+      ink(S, [S.p(u - s * 0.9, v, s * 1.05), S.p(u + s * 0.9, v, s * 1.05)],
+        { w: 0.6, c: INK3, a: 0.34, n: 1, fly: false, j: 0.4 });
+    }
+  }
+
+  /* 木桶 (酒桶/腌鱼桶): 略微内收的立桶 + 两道箍 —— 渔获仓替代内陆「粮囤」的那个元素 */
+  function cask(S, o) {
+    var u = o.u, v = o.v || 0, s = o.s || 0.11;
+    var A = S.p(u - s, v, 0), Bp = S.p(u + s, v, 0);
+    var C = S.p(u + s * 0.86, v, s * 2.0), D = S.p(u - s * 0.86, v, s * 2.0);
+    faceOf(S, [A, Bp, C, D], o.fill || '#a89066', 0.94);
+    ink(S, [A, Bp, C, D, A], { w: 1.05, c: INK2, a: 0.52, n: 1, fly: false, j: 0.4 });
+    ink(S, [S.p(u - s * 0.98, v, s * 0.55), S.p(u + s * 0.98, v, s * 0.55)],
+      { w: 0.75, c: INK2, a: 0.42, n: 1, fly: false, j: 0.4 });
+    ink(S, [S.p(u - s * 0.90, v, s * 1.45), S.p(u + s * 0.90, v, s * 1.45)],
+      { w: 0.75, c: INK2, a: 0.42, n: 1, fly: false, j: 0.4 });
+  }
+
+  /* 网堆 (堆在台上的渔网): 两团淡弧 + 几缕垂线, 不画网目 (堆着看不出目) */
+  function netPile(S, o) {
+    var u = o.u, v = o.v || 0, s = o.s || 0.22;
+    var p = S.p(u, v, 0.03);
+    S.B.radial(p[0], p[1], S.U * s, '#efe6d0', 0.42);
+    S.B.radial(p[0], p[1], S.U * s * 0.6, '#d9cdb2', 0.38);
+    if (S.detail >= 3) {
+      for (var i = 0; i < 4; i++) {
+        var t = i / 3 - 0.5;
+        ink(S, [S.p(u + t * s * 1.2, v - 0.02, 0.07), S.p(u + (t + 0.12) * s, v + 0.10, 0.01)],
+          { w: 0.55, c: INK4, a: 0.34, n: 1, fly: false, j: 0.45 });
+      }
+    }
+  }
+
+  /* 舢板 (小渔船): 平底梭形壳 + 横座板 + 斜桨, 泊在挑台外的水面上 (h≈0)。
+     ★ 这是"渔村"最省笔墨的识别物 —— 缩到 10px 的远景里, 一叶扁舟比挂网/渔灯都读得出来。
+     ⚠ 只占地面平面 (h≈0), 所以不会被屋体遮挡; 放在挑台之外 (v>0.72) 避免压住板缝。 */
+  function skiff(S, o) {
+    var u = o.u, v = o.v == null ? 0.80 : o.v, w = o.w == null ? 0.32 : o.w;
+    var h = o.h == null ? 0.015 : o.h, a = o.a || 0;
+    var du = Math.cos(a), dv = Math.sin(a), nu = -dv, nv = du;
+    var P = S.p(u + du * w, v + dv * w), Q = S.p(u + nu * w * 0.34, v + nv * w * 0.34);
+    var Rr = S.p(u - du * w, v - dv * w), T = S.p(u - nu * w * 0.34, v - nv * w * 0.34);
+    faceOf(S, [P, Q, Rr, T], o.fill || WOOD, 0.95);
+    ink(S, [P, Q, Rr, T, P], { w: 1.3, c: INK2, a: 0.56, n: 1, fly: false, j: 0.35 });
+    if (S.detail >= 3) {
+      ink(S, [Q, T], { w: 0.9, c: EARTH, a: 0.5, n: 1, fly: false, j: 0.4 });         /* 横座板 */
+      ink(S, [S.p(u - du * w * 0.15, v - dv * w * 0.15, h + 0.03),
+              S.p(u + nu * w * 1.15, v + nv * w * 1.15, h - 0.05)],
+        { w: 0.85, c: EARTH, a: 0.48, n: 1, fly: false, j: 0.4 });                    /* 斜桨 */
+    }
+  }
+
+  /* F1/F2 渔家吊脚楼 —— 内陆『民房』的水上版:
+     干栏桩脚 (露在木台之下) + 抬高的木地板 + 茅顶 + 檐下挂网 + 渔灯 + 鱼篓 + 鱼干架
+     + 泊在台外的舢板 (远景档也保留: 一叶扁舟是"渔"的最强信号) */
+  KINDS_FISH['民房'] = function (S, spec) {
+    var alt = fishAlt(spec);
+    /* 干栏桩脚: 先画。桩脚是**双排** (后排 v=0.34 会被屋/台盖住, 前排 v=0.70 露在挑台之下),
+       h1 抬到 0.13 = 地板高度 ⇒ 露出水面的那一段正好读作"台下的桩"。 */
+    stiltPosts(S, { u0: -0.52, u1: 0.52, v0: 0.34, v1: 0.70, h0: -0.24, h1: 0.13, n: 4 });
+    /* 主屋 (抬到 0.13: 石台即"木地板", 桩脚在台下) */
+    houseCore(S, { at: [-0.14, 0.10], w: 0.62, d: 0.46, plat: 0.13, platFill: '#c2a377',
+      wall: 0.25, rise: 0.19, tiles: 6, cun: 4, fill: '#d2c6a6', roofFill: THATCH,
+      door: { c: '#4b3a2c' }, wins: [['left', 0.72, 0.5, 0.06, 0.055]] });
+    /* 副屋 (错落收在后侧, 略小略低) */
+    houseCore(S, { at: [0.44, -0.26], w: 0.46, d: 0.36, plat: 0.11, platFill: '#c2a377',
+      wall: 0.21, rise: 0.16, tiles: 5, eave: 0.1, cun: 3, fill: '#cdc0a0', roofFill: THATCH,
+      door: { c: '#4b3a2c' } });
+    /* 前挑台: ⚠ v 必须**从主屋前缘 (0.33) 起**, 否则这块盖在墙面下半段上, 把门糊掉
+       (早期版本 v0=0.02, 实测门只剩一道缝)。现在纯在屋前悬挑。 */
+    var dk = [S.p(-0.62, 0.30, 0.13), S.p(0.62, 0.30, 0.13), S.p(0.62, 0.72, 0.13), S.p(-0.62, 0.72, 0.13)];
+    faceOf(S, dk, '#c2a377', 0.46);
+    ink(S, [dk[0], dk[1], dk[2], dk[3], dk[0]], { w: 1.5, c: EARTH, a: 0.58, n: 1, fly: false, j: 0.42 });
+    if (S.detail >= 2) {                       /* 板缝 + 台沿压线 */
+      ink(S, [S.p(-0.58, 0.51, 0.13), S.p(0.58, 0.51, 0.13)],
+        { w: 0.8, c: EARTH, a: 0.32, n: 1, fly: false, j: 0.3 });
+    }
+    /* 竹梯 / 登台跳板 (自挑台前缘斜插入水) */
+    ink(S, [S.p(-0.54, 0.72, 0.13), S.p(-0.72, 1.00, -0.08)],
+      { w: 1.2, c: EARTH, a: 0.6, n: 1, fly: false, j: 0.35 });
+    /* 舢板: **放在 detail 判定之外** —— 远景 (detail=1) 就靠它 + 桩脚 + 茅顶识别渔家。 */
+    skiff(S, { u: alt === 0 ? 0.30 : -0.36, v: 0.82, w: 0.32, a: alt === 0 ? -0.22 : 0.18 });
+    /* 渔具 (挂网/渔灯/鱼篓/鱼干架/网堆) 只在 detail>=2 出场 —— 远景 (detail=1) 靠
+       "干栏桩脚 + 茅顶" 两点识别渔家, 再多就是脏点。
+       ⚠ 挂网的 h 必须**低于檐口** (主屋檐口 h≈0.38): 取 0.35 吊在檐下,
+         与屋顶顶面拉开距离, 否则读作"屋顶上搭了块板"(实测放大后确认过)。 */
+    if (S.detail >= 2) {
+      if (alt === 0) netHang(S, { u0: -0.48, u1: -0.06, v: 0.40, h: 0.35, drop: 0.22 });
+      else           netHang(S, { u0: 0.14, u1: 0.56, v: 0.40, h: 0.34, drop: 0.20 });
+      fishLamp(S, { u: 0.40, v: -0.06, h: 0.34 });
+      if (alt === 0) {
+        fishCreel(S, { u: -0.44, v: 0.56, s: 0.10 });
+        dryRack(S, { u: 0.40, v: 0.56, w: 0.24, h: 0.30, n: 3 });
+      } else {
+        fishCreel(S, { u: 0.52, v: 0.52, s: 0.09 });
+        fishCreel(S, { u: 0.32, v: 0.64, s: 0.08 });
+        netPile(S, { u: -0.48, v: 0.50, s: 0.20 });
+      }
+    }
+    smoke(S, { u: 0.36, v: -0.42, h0: 0.36, h: 0.46, n: 3, a: 0.14 });
+  };
+
+  /* F3 渔获仓 —— 内陆『仓库』的水上版:
+     干栏仓 + 木桶 (替粮囤) + 鱼干架双列 + 网堆 (替板车) */
+  KINDS_FISH['仓库'] = function (S, spec) {
+    var alt = fishAlt(spec);
+    /* 干栏桩脚: 同样双排 (v0=0.24 后排 / v1=0.74 前排), 前排露在挑台之下 */
+    stiltPosts(S, { u0: -0.62, u1: 0.62, v0: 0.24, v1: 0.74, h0: -0.26, h1: 0.14, n: 5 });
+    houseCore(S, { at: [0, -0.04], w: 1.14, d: 0.56, plat: 0.14, platFill: '#c2a377',
+      wall: 0.27, rise: 0.21, tiles: 8, postsN: 5, fill: '#cfc4a8', roofFill: THATCH,
+      door: { c: '#7a6042', a: 0.9, hw: 0.13, h: 0.2 } });
+    /* 门闩 */
+    ink(S, [S.p(-0.14, 0.27, 0.20), S.p(0.14, 0.27, 0.20)],
+      { w: 1.5, c: INK2, a: 0.6, n: 1, fly: false, j: 0.35 });
+    /* 前挑台: 自仓前缘 (0.24) 起, 同样不与墙面交叠 */
+    var dk = [S.p(-0.74, 0.24, 0.14), S.p(0.74, 0.24, 0.14), S.p(0.74, 0.76, 0.14), S.p(-0.74, 0.76, 0.14)];
+    faceOf(S, dk, '#c2a377', 0.44);
+    ink(S, [dk[0], dk[1], dk[2], dk[3], dk[0]], { w: 1.5, c: EARTH, a: 0.56, n: 1, fly: false, j: 0.42 });
+    /* 腌鱼桶 (两侧, 替内陆粮囤) / 鱼干架 / 网堆 / 渔灯 —— 同民房, 只在 detail>=2 出场 */
+    if (S.detail >= 2) {
+      cask(S, { u: -0.62, v: 0.44, s: 0.12 });
+      cask(S, { u: -0.38, v: 0.56, s: 0.10, fill: '#b39a72' });
+      cask(S, { u: 0.64, v: 0.46, s: 0.11 });
+      dryRack(S, { u: 0.28, v: 0.62, w: 0.20, h: 0.34, n: 3 });   /* 仓前晒场 */
+      netPile(S, { u: 0.02, v: 0.68, s: 0.22 });                   /* 替内陆那辆板车 */
+      fishLamp(S, { u: -0.72, v: 0.26, h: 0.40 });
+      if (alt === 0) fishCreel(S, { u: 0.72, v: 0.26, s: 0.09 });  /* 第三只篓, 仅半数格子 */
+    }
+    /* 渔获仓外的泊船: 仓必临水, 两版各一 (远景档也在) */
+    skiff(S, { u: alt === 0 ? -0.34 : 0.40, v: 0.84, w: 0.34, a: alt === 0 ? 0.16 : -0.20 });
+  };
+
   /* --- 村落 --- */
   KINDS['民房'] = function (S) {
     /* 前屋 (略大) + 后屋错落 */
@@ -4290,6 +4586,103 @@ function getSettlements(i, j){
     var a = dq < 0 ? -dq : dq, b = dr < 0 ? -dr : dr, c = dq + dr;
     return (a + b + (c < 0 ? -c : c)) >> 1;
   }
+
+  /* ============================================================
+   * 9a. 建筑群「挂牌锚点」(C-a 2026-09-15 · C-a 二修 2026-09-16)
+   * ------------------------------------------------------------
+   * 背景: 聚落名牌的落点曾是**合成点** —— 横向取「聚落中心格 x」, 纵向取「建筑格 y 的
+   *   p25」⇒ 两者不同源, 落点通常**不对应任何一座真实建筑**, 用户看到的是
+   *   「竖线/圆点扎在村里的空地或边缘, 跟村子对不上」。
+   *
+   * C-a 初版改成「世界 x 离聚落中心列最近的那座真实建筑」, 点确实落在房子上了,
+   * 但**选的是哪一座**仍不对: 它按"聚落中心格所在的那一条竖列"挑, 而聚落中心格是
+   *   `siteScore` 选的**选址格**, 未必在建筑群中间 —— 实测 seed42 的归元宗: 选中的
+   *   房子离建筑簇质心 3.0R (16 座里第 5 近), 签子挂在宗门北缘一座孤立小屋上,
+   *   而宗门本体在南边 3 格 ⇒ 用户第二次报「竖线和点跟村子对不上」。
+   *
+   * C-a 二修: 落点 = **中位建筑 (medoid)** —— 「到其余所有建筑的距离之和最小」的那座。
+   *   它天然落在建筑群的正中, 且**一定是真实建筑**;
+   *   ⚠ 为什么不用均值/包围盒中心: 建筑清单里混着**离群地物** (远处农田/码头/林地),
+   *     均值与包围盒都会被它们拉偏 (这正是初版注释里"横向不能用包围盒中心"的原因),
+   *     中位数/中位建筑对离群值免疫。
+   *   ⚠ 并列 (等距) → 取更北 (y 小) 的那座: 签子挂在建筑群上沿, 视觉更稳。
+   *   复杂度 O(n²) (n = 该聚落建筑数, 通常 < 60) 且只算一次 (调用方缓存) —— 可忽略。
+   *
+   * 为什么放在本文件: 这里是「建筑几何」模块, 且已有 Node 侧出口 (svgBody) ⇒
+   *   verify 脚本能直接跑本函数做离线断言, 不必起浏览器。
+   *
+   * 参数:
+   *   buildings  [{q,r}] 服务端下发的建筑格 (含农田/码头等离群地物)
+   *   hexW,hexR  几何常量 —— 世界坐标公式 x = hexW*(q + r/2), y = 1.5*hexR*r
+   *              (与 mapclient.tileToWorld / 本文件 DIRS 注释同一式)
+   *   centerX    聚落中心格的世界 x (st.x) —— 只在 mode='col' 用 (A/B 对拍)
+   *   mode       ''      → 中位格 (默认, 二修; 见 centerPiece)
+   *              'sum'   → 中位建筑 medoid (分布更内, 但对离群地皮更敏感)
+   *              'box'   → 建筑世界包围盒中心 (?ancgeo=1, 旧 A/B 差分)
+   *              'col'   → 离中心列最近 (?ancgeo=col, 初版行为, 只留给契约对拍)
+   *              ⚠ 布尔 true 视同 'box' (兼容 ?ancgeo=1 的老调用)
+   * 返回: { x, y, q, r, y0, real } | null (无建筑时 null, 由调用方兜底且**不要缓存**)
+   *   y0 = 建筑格 y 的 p25 (旧路径与"让位"逻辑还要用)。
+   * ============================================================ */
+  function anchorOf(buildings, hexW, hexR, centerX, mode) {
+    if (!buildings || !buildings.length) return null;
+    if (mode === true) mode = 'box';
+    var i, j, b, w, x0 = Infinity, x1 = -Infinity, rs = [], best = null, bd = Infinity;
+    var ws = [];
+    for (i = 0; i < buildings.length; i++) {
+      b = buildings[i];
+      w = { q: b.q, r: b.r, x: hexW * (b.q + b.r / 2), y: 1.5 * hexR * b.r };
+      ws.push(w);
+      rs.push(w.y);
+      if (w.x < x0) x0 = w.x;
+      if (w.x > x1) x1 = w.x;
+      var d = w.x < centerX ? centerX - w.x : w.x - centerX;
+      /* 并列 (同 x) → 取更北 (y 小) 的那座: 与「签子挂建筑群上沿」的观感一致。
+         ⚠ 用 1e-9 容差比较 d: 浮点相等的概率不高, 但同列建筑是常态。 */
+      if (d < bd - 1e-9 || (best && d <= bd + 1e-9 && w.y < best.y)) { bd = d; best = w; }
+    }
+    rs.sort(function (a, c) { return a - c; });
+    var y0 = rs[Math.min(rs.length - 1, Math.floor(0.25 * rs.length))];
+    if (mode === 'box') return { x: (x0 + x1) / 2, y: y0, q: null, r: null, y0: y0, real: false };
+    if (mode === 'col') return { x: best.x, y: best.y, q: best.q, r: best.r, y0: y0, real: true };
+    var m = centerPiece(ws, mode);
+    return { x: m.x, y: m.y, q: m.q, r: m.r, y0: y0, real: true };
+  }
+
+  /* 「建筑群正中那**一座**」的求解器 (C-a 二修) —— 两种口径都可选, 默认按中位:
+       ''    (默认) **中位格**: 分别取建筑 x / y 的**中位数**得"中位点", 再取离它最近的
+             那座真实建筑。中位数对离群值免疫 (要到 50% 的格子都离群才会动) —— 正是
+             旧注释里"横向不能用包围盒中心 / 均值"要解决的问题。
+       'sum' 中位建筑 (medoid): 到其余建筑距离之和最小的那座。分布意义上更"内", 但
+             **单座远处农田就能把它拉走一两格** (每座权重相同), 对离群地皮不如中位稳。
+     ⚠ 两者都保证返回值**是输入里的一座真实建筑** (q/r 直接来自输入), 且并列时取更北。 */
+  function centerPiece(ws, mode) {
+    var i, j, n = ws.length;
+    if (mode === 'sum') {
+      var bi = 0, bs = Infinity;
+      for (i = 0; i < n; i++) {
+        var s = 0;
+        for (j = 0; j < n; j++) {
+          if (i === j) continue;
+          var dx = ws[i].x - ws[j].x, dy = ws[i].y - ws[j].y;
+          s += Math.sqrt(dx * dx + dy * dy);
+        }
+        if (s < bs - 1e-9 || (s <= bs + 1e-9 && ws[i].y < ws[bi].y)) { bs = s; bi = i; }
+      }
+      return ws[bi];
+    }
+    var xs2 = [], ys2 = [];
+    for (i = 0; i < n; i++) { xs2.push(ws[i].x); ys2.push(ws[i].y); }
+    xs2.sort(function (a, b) { return a - b; });
+    ys2.sort(function (a, b) { return a - b; });
+    var mx = xs2[(n - 1) >> 1], my = ys2[(n - 1) >> 1];   // 下中位数 (n 偶时取靠前的那个)
+    var mi = 0, md = Infinity;
+    for (i = 0; i < n; i++) {
+      var ex = ws[i].x - mx, ey = ws[i].y - my, e2 = ex * ex + ey * ey;
+      if (e2 < md - 1e-9 || (e2 <= md + 1e-9 && ws[i].y < ws[mi].y)) { md = e2; mi = i; }
+    }
+    return ws[mi];
+  }
   /* o = { biome(q,r) -> 0..7 或 -1(未知), hexW, hexR, ringMax=3 } */
   function faceSolver(o) {
     var biome = o.biome, hw = o.hexW, h15 = 1.5 * o.hexR;
@@ -4400,7 +4793,9 @@ function getSettlements(i, j){
     /* 朝向: 未显式给定则按规则 + 探针推导 */
     if (!spec.face) S.setFace(resolveFace(spec.kind, S, spec.probe));
     else S.setFace(spec.face);
-    var fn = KINDS[spec.kind] || KINDS['民房'];
+    /* 画法分派 (A · 2026-09-15): 渔村建筑**优先**查渔家画法表 —— 表里没这一 kind
+       (码头/渔船坞/渔亭/祠堂/村口…) 时落回通用 KINDS, 不强制覆盖。 */
+    var fn = (spec.fishVillage && KINDS_FISH[spec.kind]) || KINDS[spec.kind] || KINDS['民房'];
     /* 六边格基座 = 「场地」(网格感 + 地皮色 + 墨边 + 柔光) + 落影 */
     if (spec.plate !== false) {
       hexPlate(S, { tint: spec.tint || LANDUSE_TINT[KIND_TERRAIN[spec.kind]] || STONE,
@@ -4446,7 +4841,10 @@ function getSettlements(i, j){
     var key = spec.kind + '|' + dirIdxOf(spec.face) + '|' + (spec.variant | 0) + '|' +
               (Math.round(R * 2) / 2) + '|' + detail + '|' + (spec.tier | 0) + '|' +
               (spec.water === false ? 'd' : 'w') + '|' + (spec.plate === false ? 'n' : 'p') + '|' +
-              (spec.onWater ? 'W' : '-');        // R5b: 水上木台随格水质而变
+              (spec.onWater ? 'W' : '-') + '|' +
+              /* ⚠ A (2026-09-15): 渔村皮肤位。**绝不可省** —— 渔家民房与内陆民房同 kind/
+                 同朝向/同变体/同 R 档, 不加这一位就命中同一张缓存 ⇒ 鱼村/陆地串图。 */
+              (spec.fishVillage ? 'F' : '-');
     var hit = _spr.get(key);
     if (hit) return hit;
     var w = Math.max(6, Math.ceil((SPR_BOX.x1 - SPR_BOX.x0) * R));
@@ -4458,7 +4856,8 @@ function getSettlements(i, j){
       kind: spec.kind, q: spec.q, r: spec.r, variant: spec.variant, tier: spec.tier,
       face: spec.face, probe: spec.probe, R: R, detail: detail, water: spec.water,
       cx: -SPR_BOX.x0 * R, cy: -SPR_BOX.y0 * R,
-      plate: spec.plate, tint: spec.tint, plateA: spec.plateA, onWater: spec.onWater
+      plate: spec.plate, tint: spec.tint, plateA: spec.plateA, onWater: spec.onWater,
+      fishVillage: spec.fishVillage      /* A: 必须透传, 否则画出来仍是内陆民房 */
     });
     var rec = { cv: cv, ox: SPR_BOX.x0 * R, oy: SPR_BOX.y0 * R, w: w, h: h };
     if (_spr.size >= SPR_CAP) {
@@ -4478,15 +4877,15 @@ function getSettlements(i, j){
     LANDUSE_TINT: LANDUSE_TINT, KIND_LIST: KIND_LIST, KIND_TERRAIN: KIND_TERRAIN,
     FACE_RULE: FACE_RULE, FACE_DESC: FACE_DESC, DIRS: DIRS, SOUTH: SOUTH,
     resolveFace: resolveFace, dirIdxOf: dirIdxOf, kindIdOf: function (k) { return KIND_ID[k] || 0; },
-    faceSolver: faceSolver, axDist: axDist,
+    faceSolver: faceSolver, axDist: axDist, anchorOf: anchorOf,
     canvasBackend: function (ctx) { return new CanvasBk(ctx); },
     svgBackend: function () { return new SvgBk(); },
     frameOf: frameOf, hash3: hash3, mulberry32: mulberry32,
-    paint: paint, svgBody: svgBody, KINDS: KINDS,
+    paint: paint, svgBody: svgBody, KINDS: KINDS, KINDS_FISH: KINDS_FISH,
     spriteOf: spriteOf, spriteClear: spriteClear, SPR_BOX: SPR_BOX,
     hexPts: hexPts, gpOf: gpOf,
     _ink: ink, _face: faceOf, _dots: dots, _shade: shade,
-    _rgba: rgba, hexPlate: hexPlate, plateAt: plateAt, boxWalls: boxWalls, wallRect: wallRect,
+    _rgba: rgba, hexPlate: hexPlate, plateAt: plateAt, sealGlyph: sealGlyph, boxWalls: boxWalls, wallRect: wallRect,
     placeDoor: placeDoor, placeWin: placeWin, roofGable: roofGable, roofHip: roofHip,
     roofPyr: roofPyr, roofCone: roofCone, slab: slab, stairs: stairs, posts: posts,
     flag: flag, tree: tree, smoke: smoke, aura: aura, fence: fence,

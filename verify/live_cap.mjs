@@ -54,13 +54,22 @@ const args = [
 const proc = spawn(CHROME, args, { stdio: 'ignore' });
 const t0 = Date.now();
 
+/* 同步小睡 (不引入依赖): setTimeout 在被 process.exit 打断时不会触发, 故用 Atomics.wait */
+const nap = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* noop */ } };
+
 function finish(ok, note) {
   /* 只杀自己起的进程树 */
   try { spawnSync('taskkill', ['/F', '/T', '/PID', String(proc.pid)], { stdio: 'ignore' }); } catch { /* noop */ }
   try { proc.kill(); } catch { /* noop */ }
-  setTimeout(() => {
+  /* ⚠ 必须**同步**删 profile —— 旧版把 rmSync 放进 setTimeout(…,1500), 而紧接着就
+     `process.exit()` ⇒ 定时器永远不触发 ⇒ **每次截图都漏一个 ~10MB 的 profile 目录**
+     (2026-09-15 实测本机已积 127 个 `%TEMP%/wb-livecap-*`)。
+     taskkill 返回后 Chrome 释放文件锁还有几百 ms 延迟, 故带重试。 */
+  for (let i = 0; i < 10; i++) {
     try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* noop */ }
-  }, 1500);
+    if (!fs.existsSync(profile)) break;
+    nap(200);
+  }
   if (ok) {
     fs.copyFileSync(SNAP, OUT);
     const kb = (fs.statSync(OUT).size / 1024).toFixed(0);

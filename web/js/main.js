@@ -53,17 +53,36 @@
      本文件只用它两处: ① 灵脉签的垂直锚点 (峰体高度 = 山地底座 + 灵脉峰);
      ② 山地底座倍率 shape.terrainBase (详见 PROP_VS 灵脉分支)。 */
   var VS = (typeof window !== 'undefined' && window.VeinSkin) || null;
-  /* 灵脉等级 → 中文 (名牌文案): 与 vein-skin.js levels[] 的 key 一一对应 (0大/1中/2小/3从属)。
-     ⚠ 从属档 (3) 只出现在"大/中灵脉的从属格", 而**从属格不进 comm.veins[]** ⇒ 名牌里
-       理论上不会出现 3; 这里仍列全, 避免将来改口径时静默显示成 undefined。 */
+  /* 档名兜底表: 档序与 vein-skin.js LEVELS[].key 一一对应 (0大/1中/2小/3从属)。
+     ⚠ 只给下面 VS 缺失时的兜底分支用; 正常路径走 VS.label ⇒ 只有一份真源。
+     从属格不进 comm.veins[], 列全只为防将来改口径时静默 undefined。 */
   var VEIN_LV_NAME = ['大', '中', '小', '从属'];
+  /* 灵脉「呈示名」=「<地貌名>·<档>」。真源在 vein-skin.js 的 VS.label (三处消费点共用:
+     匾额名牌 / 侧栏「灵脉」字段 / 小地图悬停提示), 这里只做缺失兜底 —— 免得各处
+     再各写一份档名数组 (历史上 main.js 有两份、minimap-vein.js 有一份, 且长度不一)。
+     ⚠ 旧写法 `v.name + '灵脉·' + 档` 会叠字 (金属矿脉 + 灵脉·大), 见 VS.label 注释。 */
+  function veinLabel(v) {
+    if (VS && VS.label) return VS.label(v, v.level);
+    return ((v && v.name) ? v.name : '灵脉') + '·' + (VEIN_LV_NAME[v.level] || '小');
+  }
   /* 匾额锚点调试层 (headless 定位「牌匾 vs 地物」用): plaqdbg=1
-     绿=聚落中心 st.x/y · 黄=聚落格 tileToWorld(q,r) · 青=建筑包围盒锚点 ·
-     橙点=每个建筑格 · 品红=灵脉 v.x/y。日常游玩不传此参数。 */
+     绿=聚落中心 st.x/y · 黄=聚落格 tileToWorld(q,r) · 青=锚点(默认中位建筑) ·
+     橙点=每个建筑格 · 品红=灵脉格心 · 青点=灵脉峰尖(签子实际落点)。日常游玩不传。 */
   var PLAQ_DBG = new URLSearchParams(location.search).get('plaqdbg') === '1';
-  /* 聚落牌匾锚点退回「建筑包围盒中心」(headless A/B 用): ancgeo=1。
-     默认用聚落中心 st.x —— 包围盒会被农田/码头等离群地皮拉偏。日常不传。 */
-  var ANC_GEO = new URLSearchParams(location.search).get('ancgeo') === '1';
+  /* 聚落牌匾锚点规则的 A/B (headless 对拍用):
+       ?ancgeo=1|box → 建筑包围盒中心 (初版)      ?ancgeo=col → 离聚落中心列最近 (一修)
+       ?ancgeo=med   → 中位格 (二修)              ?ancgeo=sum → medoid (二修备选)
+       默认 (C-a 三修 2026-09-16)  = **最密格** (2R 邻域邻居最多, 平手取近截尾质心者)。
+     ⚠ 包围盒/列最近/medoid 都会被离群地皮(农田/码头)或偏心的选址格带偏,
+       见 BI.anchorOf 注释里的两种子实测对比表。 */
+  var ANC_GEO = (function () {
+    var v = new URLSearchParams(location.search).get('ancgeo');
+    if (v === '1' || v === 'box') return 'box';
+    if (v === 'col') return 'col';
+    if (v === 'med') return 'med';
+    if (v === 'sum') return 'sum';
+    return '';
+  })();
 
   /* ---------- 宗门录 (左上角水墨面板) ----------
      数据源: 地图实体层 settleCells 中 type==='sect' 的实体 (id/name/pop/tier/
@@ -97,9 +116,134 @@
     retryBaseMs: 800,      // 失败重试指数退避基数
     retryMaxMs: 30000      // 单次退避上限
   };
+  /* ---------- S3: 地形块「前端自算」档位 ----------
+     拍板 (2026-09-15): 主视图地形块改由前端按 seed 本地算 (MapGen.buildChunk),
+     WS 请求的 mask 去掉 CHUNK 位 (31 → 30) —— 服务端 needChunk 分支本就支持, **零改动**。
+     其余四层 (region/settle/poi/comm) 照旧走 WS: 世界是动态的, 只有静态地形可自算。
+     · armed  = 用户档位 (?calc=server 关掉 ⇒ 老链路一行不改地长期保留作降级通道)
+     · local  = **实际生效**, 由 armed + 引擎就绪 + 指纹未漂移三者共同决定 (calcRefresh)
+     · 降级是静默且无损: local 转 false 后 mask 回到 31, 请求/落表全部走原路径。 */
+  var QSC = new URLSearchParams(location.search);
+  var CALC = {
+    armed: QSC.get('calc') !== 'server',
+    local: false,                     // 初始 false: 引擎脚本到货前先按老链路跑 (避免首屏空白)
+    budgetMs: (QSC.get('chunkbudget') == null ? 6 : (+QSC.get('chunkbudget') || 0)),
+    frameUsed: 0,                     // 本帧已花在本地算块上的毫秒 (每帧开头归零)
+    localFail: 0, localFailMax: 8,    // 本地连续失败计数 / 阈值 (超阈本会话回退服务端)
+    ab: QSC.get('chunkab') === '1',   // 开发自检: 每块额外带 CHUNK 位取一次做逐位比对
+    probe: QSC.get('chunkprobe') === '1',
+    /* S3 闸门: false = 先不发块请求 (等引擎定案)。calc=server 档无需等待 ⇒ 直接放行。 */
+    settled: QSC.get('calc') === 'server'
+  };
+  /* 本地档的请求掩码 —— ⚠ 全项目**只此一处**出现「去掉 CHUNK 位」的运算
+     (契约守卫: verify/frontend_smoke.mjs 断言该表达式仅出现 1 次, 防有人另起炉灶) */
+  var CALC_MASK = PB.MASK.ALL & ~PB.MASK.CHUNK;      // 31 & ~1 = 30
+  function EL() { return window.EngineLocal || null; }
+  /* 档位生效判定: armed && 引擎就绪 && 指纹未漂移 */
+  function calcRefresh() {
+    var E = EL();
+    var want = CALC.armed && !!(E && E.ready()) && !(E && E.hashStale());
+    if (want !== CALC.local) {
+      CALC.local = want;
+      CALC.localFail = 0;
+      console.log('[自算] 地形块来源: ' + (want ? '前端本地 (mask=30)' : '服务端下发 (mask=31)'));
+    }
+  }
+  /* 分帧预算: 一次算太多块会顶出长任务 (25 块冷算 61ms, 低端机 ×5~10)。
+     超预算的块挂进轻队列, **下一帧再算** —— ⚠ 不能走 scheduleChunkRetry
+     (那是 0.8s 起步的惩罚性退避), 否则首屏会被人为拖慢。
+     队列元素带 resp: 响应已在手, 不重发 WS 请求。 */
+  var chunkDefer = [];
+  var deferKeys = new Set();          // 只在队键集: updateStreaming 不再为它们重复发请求
+  function deferChunk(job, resp, gen) {
+    if (chunkDefer.length >= 4096) return;
+    chunkDefer.push({ job: job, resp: resp, gen: gen });
+    deferKeys.add(job.key);
+  }
+  function pumpDeferred() {
+    while (chunkDefer.length) {
+      if (CALC.budgetMs > 0 && CALC.frameUsed > CALC.budgetMs) return;
+      var it = chunkDefer.shift();
+      deferKeys.delete(it.job.key);
+      if (it.gen !== worldSeed) continue;                 // 旧世界的块: 直接丢
+      if (!keepChunk.has(it.job.key)) { MC.blockForget(it.job.key); continue; }
+      finishChunk(it.job, it.resp, it.gen);
+    }
+  }
+  /* 开发自检 (?chunkab=1 / ?chunkprobe=1): 真页面里比「本地算的数组」与
+     「服务端下发的数组」是否逐位相同 —— Node 侧脚本只能证明文件里的引擎一致,
+     证明不了浏览器里 eval 出来的那份也一致 (见待办单 §7)。 */
+  var CALC_SEGS = ['centers', 'tiles', 'elevs', 'hashes', 'neigh',
+                   'propCenters', 'propSprites', 'propHashes', 'propElevs'];
+  var calcStat = { blocks: 0, diff: 0, badBlocks: 0, seg: {}, chunkPkts: 0 };
+  function calcAB(local, resp) {
+    if (!local || !resp || !resp.chunk) return;
+    var srv;
+    try { srv = PB.chunkToArrays(resp.chunk, geo); }
+    catch (e) { console.warn('[chunkab] 服务端块解码失败', e); return; }
+    calcStat.blocks++;
+    var bad = 0;
+    for (var s = 0; s < CALC_SEGS.length; s++) {
+      var nm = CALC_SEGS[s], A = local[nm], B = srv[nm];
+      if (!calcStat.seg[nm]) calcStat.seg[nm] = { n: 0, d: 0 };
+      var rec = calcStat.seg[nm];
+      if (A == null && B == null) continue;               // 纯海区块: 两侧同为 null
+      if (A == null || B == null || A.length !== B.length) {
+        rec.d += Math.abs((A ? A.length : 0) - (B ? B.length : 0)) || 1; bad++;
+        continue;
+      }
+      for (var i = 0; i < A.length; i++) {
+        rec.n++;
+        if (A[i] !== B[i]) { rec.d++; calcStat.diff++; bad++; }
+      }
+    }
+    if (bad) { calcStat.badBlocks++; console.warn('[chunkab] 块不一致', resp.i + ',' + resp.j); }
+  }
+  /* S5: 长任务观测 —— 首屏 25 块冷算 61ms 在桌面端无感, 低端机 ×5~10 就可能顶出
+     长任务 (>50ms)。这里只**观测**不干预 (干预手段是 budgetMs 分帧 / 将来上 Worker)。
+     ⚠ 只在调试/契约档挂 observer: 产品路径不留任何额外开销 (longtask 采样本身有成本)。 */
+  var longStat = { n: 0, maxMs: 0, list: [] };
+  if (DEBUG || CALC.probe || CALC.ab) {
+    try {
+      var LOT = window.PerformanceObserver;
+      if (typeof LOT === 'function' && LOT.supportedEntryTypes &&
+          LOT.supportedEntryTypes.indexOf('longtask') >= 0) {
+        new LOT(function (l) {
+          var es = l.getEntries();
+          for (var i = 0; i < es.length; i++) {
+            longStat.n++;
+            if (es[i].duration > longStat.maxMs) longStat.maxMs = es[i].duration;
+            if (longStat.list.length < 8) longStat.list.push(Math.round(es[i].duration));
+          }
+        }).observe({ entryTypes: ['longtask'] });
+      }
+    } catch (e) { /* 老浏览器无 longtask: 保持 n=0/hexOk 语义, 契约按「无从判定」处理 */ }
+  }
+
+  /* 门控与既有调试句柄同族: 平时不向全局泄漏内部状态 */
+  if (DEBUG || CALC.probe || CALC.ab) {
+    window.__calcProbe = function () {
+      var E = EL();
+      return {
+        armed: CALC.armed, local: CALC.local, mask: CALC.local ? CALC_MASK : PB.MASK.ALL,
+        /* S3 契约用: **实际**发出去的掩码 (与上面「意图值」不同 —— ?chunkab=1 时
+           为了拿服务端块做对拍, 实际仍带 CHUNK 位)。只看 `mask` 会把自检档误判为
+           「已在用 mask=30」, 所以契约断言实际值。 */
+        maskEff: lastMask,
+        settled: CALC.settled,
+        budgetMs: CALC.budgetMs, localFail: CALC.localFail, deferred: chunkDefer.length,
+        chunksLocal: chunkData.size,
+        calc: E ? E.probe() : null,
+        longTask: { n: longStat.n, maxMs: Math.round(longStat.maxMs * 10) / 10, list: longStat.list },
+        ab: { blocks: calcStat.blocks, diff: calcStat.diff, badBlocks: calcStat.badBlocks,
+              seg: calcStat.seg, chunkPkts: calcStat.chunkPkts }
+      };
+    };
+  }
   /* R4: 当前视野窗口内的 chunk/region/comm key 集合 (updateStreaming 全量重建时
      刷新; 异步回调落库前据此校验, 防止把已卸载格子数据回填/重复上传 GPU) */
   var keepChunk = new Set(), keepR = new Set(), keepC = new Set();
+  var lastMask = -1;                 // 最近一次实际发出的 mask (S3 契约断言用)
 
   var timeSec = 0, lastT = 0;
   var frameCount = 0;              // 渲染帧计数 (capture=1 截图须等「数据到达后至少渲染过一帧」)
@@ -241,6 +385,7 @@
     commCells.forEach(function (_p, k) { if (!keepC.has(k)) commCells.delete(k); });
     settleCells.forEach(function (_l, k) { if (!keepR.has(k)) settleCells.delete(k); });
     poiCells.forEach(function (_l, k) { if (!keepR.has(k)) poiCells.delete(k); });
+    settleVer++;             // R6b (B): 卸载也会改变"最近宗门"的候选集 ⇒ 归属缓存同样失效
 
     /* 单块 need 集合 (主块 = 区块格, 设计 §六 方案 A) */
     var pad = geo.hexW * 2;
@@ -273,7 +418,7 @@
     var tNow = performance.now();
     for (var key in need) {
       var rr = chunkRetry.get(key);
-      if (!chunkData.has(key) && !chunkBusy.has(key) &&
+      if (!chunkData.has(key) && !chunkBusy.has(key) && !deferKeys.has(key) &&
           (!rr || rr.at <= tNow)) {
         var cc = need[key];
         var w = MC.tileToWorld(cc.ca * geo.chunkS, cc.cb * geo.chunkS);
@@ -292,7 +437,11 @@
       最后一个 job → chunkBusy 只删掉最后一个 key, 前几个 key 永久卡死。) */
   function loadChunk(job) {
     var gen = worldSeed;
-    MC.block(gen, job.ca, job.cb).then(function (resp) {
+    /* S3: 本地算档不带 CHUNK 位 (服务端就不算不发整块地形);
+       ?chunkab=1 是显式开发自检 ⇒ 仍带 CHUNK 位, 好拿服务端的块做逐位对拍。 */
+    var mask = (CALC.local && !CALC.ab) ? CALC_MASK : PB.MASK.ALL;
+    lastMask = mask;
+    MC.block(gen, job.ca, job.cb, mask).then(function (resp) {
       /* 修复「个别色块无贴图」(待办/色块无贴图bug排查): MapClient.onFrame 收到
          响应即无条件写 revs 缓存; 若本块此刻已被丢弃 (出视野/世界重铸), 数据不会
          经 applyBlock 落 chunkData —— revs 残留会让下次请求携带旧 lastRevs,
@@ -300,7 +449,7 @@
          维持不变量「revs 有记录 ⇒ chunkData 有数据」。 */
       if (gen !== worldSeed) { MC.blockForget(job.key); return; }   // 世界已重铸, 丢弃旧响应
       if (!keepChunk.has(job.key)) { MC.blockForget(job.key); return; }  // R4: 已出视野被卸载
-      applyBlock(job, resp);
+      finishChunk(job, resp, gen);
     }).catch(function (err) {
       console.error('块加载失败', job.key, err);
       if (gen !== worldSeed) return;                 // 旧世界失败不记账
@@ -312,28 +461,73 @@
     });
   }
 
+  /* 本地算 + 落表。分帧预算不足时把 (job, resp) 挂进轻队列, **下一帧**接着算
+     (响应已在手, 不重发请求; 也不走惩罚性退避 —— 见 CALC 注释)。
+     ⚠ 必须在两道丢弃守卫**之后**才算: 别为已出视野/已重铸的块白算一遍。 */
+  function finishChunk(job, resp, gen) {
+    var local = null;
+    if (CALC.local) {
+      if (CALC.budgetMs > 0 && CALC.frameUsed > CALC.budgetMs) { deferChunk(job, resp, gen); return; }
+      var E = EL();
+      if (E && E.ready()) {
+        try {
+          var t0 = performance.now();
+          local = E.chunkArrays(job.ca, job.cb);
+          var ms = performance.now() - t0;
+          CALC.frameUsed += ms;                      // 记本帧预算 (低端机靠它摊帧)
+          E.noteBuild(ms);
+          if (CALC.ab) calcAB(local, resp);
+        } catch (e) {
+          console.error('本地块计算失败', job.key, e);
+          local = null;
+        }
+      }
+    }
+    applyBlock(job, resp, local);
+  }
+
   /* TileResponse 子消息分发 (设计 §3.2): chunk→GPU, region→道路/地名,
      settle/poi→实体层, comm→灵脉。rev 未变的图层服务端缺省, 保留旧数据。 */
-  function applyBlock(job, resp) {
+  function applyBlock(job, resp, localArrays) {
     if (resp.err) console.warn('块 ' + job.key + ' 部分图层不可用:', resp.err);
+    /* S3 契约: 统计「服务端仍在下发整块地形」的次数 —— 本地档 (mask=30) 下必须恒 0,
+       是「服务端真的不再算/不再发 chunk」的**唯一**可观测证据 (除了看服务端日志)。 */
+    if (resp.chunk) calcStat.chunkPkts++;
 
-    /* 图层0 静态地形 (子消息缺省 = rev 未变, 保留已上传 GPU 的数据) */
-    var arrays = resp.chunk ? PB.chunkToArrays(resp.chunk, geo) : null;
+    /* 图层0 静态地形 (子消息缺省 = rev 未变, 保留已上传 GPU 的数据)。
+       S3: 两条来源 —— 前端本地自算优先 (显式传入), 否则服务端下发。 */
+    var arrays = localArrays || (resp.chunk ? PB.chunkToArrays(resp.chunk, geo) : null);
     /* 兜底防御: chunk 缺省 (=服务端按 rev 未变不重发) 但本地从未持有该块 —
        说明 revs 缓存与 chunkData 不一致 (旧版竞态已造成的坏状态, 或不可达
        的遗漏路径)。清 rev 后重新入队, 下一次请求不带 lastRevs → 服务端全量
        下发, 消除永久空白。
        ★ 但服务端**明确报错**时 (resp.err) 不能直接重排: 错误响应几乎立即返回,
-         pumpChunks 会马上再发 → 无退避自旋, 单连接被打满。改走指数退避。 */
+         pumpChunks 会马上再发 → 无退避自旋, 单连接被打满。改走指数退避。
+       ★ S3 新增 (⚠ 本地算档下这段必须走另一条路): 本地档 mask 不含 CHUNK 位,
+         服务端**永远**不会下发地形 ⇒ 无脑沿用「清 rev → 重排队」会把同一块
+         无限重排 (每轮服务端照样不给 chunk), 表现为「视野反复空白 + 请求风暴」。
+         故拆成两条互不干扰的路径: 本地失败走退避重试, 连续超阈静默回退服务端。 */
     if (!arrays && !chunkData.has(job.key)) {
-      MC.blockForget(job.key);
-      if (resp.err) {
-        scheduleChunkRetry(job);       // 0.8s→30s 退避, 由 updateStreaming 到期检查重新入队
+      if (CALC.local && !CALC.ab) {
+        if (++CALC.localFail > CALC.localFailMax) {
+          CALC.local = false;            // 本会话回退 (老链路完整保留), 只 warn 一次不弹窗
+          console.warn('[自算] 本地算块连续失败 ' + CALC.localFail + ' 次, 已回退服务端下发');
+          MC.blockForget(job.key);
+          chunkQueue.push(job);
+          return;
+        }
+        scheduleChunkRetry(job);         // 本地算失败: 清 rev 重拉没有意义 ⇒ 退避后重试本块
       } else {
-        chunkQueue.push(job);          // 纯 rev 不一致: 一次往返即自愈, 无需退避
+        MC.blockForget(job.key);
+        if (resp.err) {
+          scheduleChunkRetry(job);       // 0.8s→30s 退避, 由 updateStreaming 到期检查重新入队
+        } else {
+          chunkQueue.push(job);          // 纯 rev 不一致: 一次往返即自愈, 无需退避
+        }
       }
       return;
     }
+    CALC.localFail = 0;                  // 走到这里说明本块有数据 ⇒ 「连续失败」计数清零
     if (arrays && !chunkData.has(job.key)) {
       var bb = { x0: 1e18, y0: 1e18, x1: -1e18, y1: -1e18 };
       var ct = arrays.centers;
@@ -372,6 +566,7 @@
         var gk = g.i + ',' + g.j;
         if (keepR.has(gk)) settleCells.set(gk, g.items);
       }
+      settleVer++;              // R6b (B): 新聚落到货 → 归属缓存 (st._fac) 全部失效重算
       markStaticDirty();
       rebuildPropBlock();       // 建筑占地格变 → 覆盖格重算 (聚落内的树/山让位)
       updateSectPanel(false);   // 实体层更新即刷新宗门录 (id 未变时内部直接返回)
@@ -406,6 +601,13 @@
   }
 
   function pumpChunks() {
+    /* S3 首请求闸门: 引擎「能不能本地算」未定案之前**一个块都不发**。
+       否则首帧那 concChunk(=4) 个并发请求会带着 mask=31 出去, 服务端白算白发
+       4 个整块地形 (实测 chunkPkts=4) —— 「不向后端请求地形」就没做干净。
+       等 EngineLocal.load() 定案 (成功 ⇒ 用 30; 失败 ⇒ 用 31) 再放行, 代价是
+       首屏多等一次 WS 往返 (~10~30ms), 换取服务端彻底不再生成 chunk。
+       看门狗在 armCalc() 里兜底, 不会永久挂起。 */
+    if (!CALC.settled) return;
     while (chunkBusy.size < NET_CFG.concChunk && chunkQueue.length) {
       var job = chunkQueue.shift();
       if (chunkData.has(job.key) || chunkBusy.has(job.key)) continue;
@@ -474,6 +676,35 @@
     ctx.fillRect(-1.4, 2, 2.8, 4);
     ctx.restore();
   }
+  /* A (2026-09-15): 渔村远视图标 —— 原与村落共用 drawVillage (单屋), 远景分不出来。
+     现在 = 屋 (左上, 尖顶) + 船 (右下, 梭形) + 网纹三撇 ⇒ 缩到 10px 也读得出"是渔村"。
+     构图刻意与 drawVillage 错开: 村落的屋在正中且只有一栋, 渔村的屋偏左且配船。 */
+  function drawFishing(ctx, x, y, s) {
+    ctx.save(); ctx.translate(x, y); ctx.scale(s / 16, s / 16);
+    iconBase(ctx);
+    /* 屋 (左) */
+    ctx.fillRect(-6, -1, 7, 5); ctx.strokeRect(-6, -1, 7, 5);
+    ctx.beginPath();
+    ctx.moveTo(-7.5, -1); ctx.quadraticCurveTo(-2.5, -8, 2.5, -1); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    /* 船 (右下): 梭形壳 + 一撇缆 */
+    ctx.beginPath();
+    ctx.moveTo(-1.5, 4.5); ctx.quadraticCurveTo(3.5, 8.5, 8, 4.5);
+    ctx.quadraticCurveTo(3.5, 6.2, -1.5, 4.5);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(60,50,40,0.5)';
+    ctx.fillRect(-3.4, 1, 2.2, 3);                    // 门洞
+    /* 网纹: 三道短斜撇 (挂网) */
+    ctx.strokeStyle = 'rgba(60,50,40,0.62)'; ctx.lineWidth = 1.1;
+    for (var i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(-1.2 + i * 1.5, -2.4);
+      ctx.lineTo(0.4 + i * 1.5, -0.2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
   function drawPoi(ctx, x, y, s) {
     ctx.save(); ctx.translate(x, y); ctx.scale(s / 16, s / 16);
     ctx.lineWidth = 1.5;
@@ -487,7 +718,7 @@
     ctx.restore();
   }
   var ICON_FN = { sect: drawSect, city: drawCity, town: drawTown, village: drawVillage,
-                  fishing: drawVillage, poi: drawPoi };
+                  fishing: drawFishing, poi: drawPoi };
   var TYPE_NAME = { sect: '宗门', city: '仙城', town: '坊市', village: '村落',
                     fishing: '渔村', poi: '秘境' };
   var VEIN_EL = ['金', '木', '水', '火', '土'];
@@ -520,7 +751,9 @@
     var bw = fs * 1.02 + padX * 2;                   // 签宽
     var bh = chars.length * lineH + padT + padB;     // 签高
     var lead = Math.max(5, fs * 0.62);               // 引绳长 (签子贴近地物)
-    var bottomY = anchorY - lead;                    // 签底 y
+    /* opt.gap: 签底再往上让开的额外间距 (像素) —— 给"点扎在建筑格心"用:
+       点必须压在房子上 (C-a), 但签子不能糊住屋顶, 于是把**签**抬起来、点不动。 */
+    var bottomY = anchorY - lead - (opt.gap || 0);   // 签底 y
     var topY = bottomY - bh;
     if (bottomY < -24 || topY > opt.vh + 24) return; // 整签出视野 → 不画
     var bb = { x0: x - bw * 0.5 - 2, x1: x + bw * 0.5 + 2, y0: topY - 2, y1: bottomY + 2 };
@@ -625,7 +858,12 @@
       panel: document.getElementById('minimapBox'),
       full: document.getElementById('mmFull'),
       snapshot: mmSnapshot,
-      jump: mmJump
+      jump: mmJump,
+      /* R6b (B): 归属势力解析器 —— 小地图只读地物数据, 不认识"宗门/辖区";
+         把解析器注入它, 悬停提示才能显示「归属 XX宗」而不用把逻辑复制一份过去。
+         ⚠ 模块必须容忍这两个键缺失 (main.js 可单独回退) ⇒ 那边写 `if (g.factionOf)`。 */
+      factionOf: factionOf,
+      factionColor: factionColor
     });
   }
   /* ---------- 标注层: 全部基于后端数据绘制 ---------- */
@@ -724,6 +962,9 @@
   var lastRBucket = -1;
   var bldgShown = false;           // 本帧建筑层是否已绘制 (供实体图标让位)
   var bldgPlan = [];               // 复用的绘制计划数组
+  /* DEBUG: 本帧每座聚落**实际画出去**的匾额落点 (屏幕 px) —— __plaqProbe 读它,
+     用来把「签/线/点落在哪」变成可读数 (而不是从截图目测)。空对象 = 非 DEBUG。 */
+  var plaqDrawn = {};
   /* 表现升级的验数指标 (2026-09-14): headless 无法"看"图, 改由 window.__feat()
      取这些运行期事实 —— 桥数/签数/虚线段数/让位裁掉多少精灵/灵脉峰与大世界峰各几座。
      只在 DEBUG 下读取, 计数开销可忽略 (整数自增)。 */
@@ -797,23 +1038,78 @@
     return m;
   }
 
-  /* 灵脉峰「格心 → 峰尖」的上屏高度 (uR 倍数) —— 灵脉签的垂直锚点。
-     九版: 峰体已叠上「山地底座」(该格海拔对应的那层山), 签位必须跟着抬高, 否则签子
-     会被埋进峰体里。底座口径与 renderer.js PROP_VS 完全一致 (与大世界山同档公式);
-     随机抖动项取包络中值 (hrand=0.86) —— 签位只需 ≈峰尖高度, 不必逐格精确到 hash。 */
+  /* 灵脉签的**横向**落点偏移 (世界单位): 峰尖不在格心正上方, 偏一个精灵随机抖动。
+     真源在 vein-skin.apexJx (与 renderer PROP_VS 的 jx 同式); hash 未到货时返 0
+     ⇒ 回落格心 (区块到货重绘自愈)。 */
+  function veinJxU(v) {
+    if (!VS || !VS.apexJx) return 0;
+    return VS.apexJx(propHashAt(v.q, v.r));
+  }
+
+  /* 灵脉峰「格心 → 峰尖」的上屏高度 (uR 倍数) —— 灵脉签的**垂直落点** ——
+     ★ C-c (2026-09-15): 与 renderer.js 的 PROP_VS **逐项对齐**, 不再留经验余量。
+     ★★ C-c 二修 (2026-09-16): 落点由**方框顶**改**真实峰尖** (vein-skin.tipU 内含
+        apexV 折算), 并把该精灵的 hash 传下去 (峰尖高度 hrand 与横向抖动 jx 都随 hash)。
+
+     精灵方框在 shader 里的垂直摆位 (renderer.js:272-273):
+       bottom = iCenter.y + uR*0.95;   // 方框底压向下一格 → 立体堆叠
+       world.y = bottom - (1-vv)*H;    // vv=0 是精灵顶部 ⇒ 方框顶 = center.y + uR*(0.95 - H)
+     ⚠ 但**方框顶 ≠ 峰尖**: 128 逻辑格里峰尖上方还有一段空白 (格 y 0..~21 是空的),
+       峰尖在方框里的相对位置 = apexV() (vein-skin.js 复算, 现值 0.1489)。于是
+         **峰尖相对格心的上探量 = (1 - apexV())*H - 0.95** (uR), 其中 (renderer.js:220/238)
+         H = (3.3+1.2*hrand)*hs*sizeScale + (3.3+1.2*hrand)*bhs
+
+     ⚠ 旧实现返回 `H_est + 0.35` ⇒ 原先的悬空 = (0.95 + 0.35) + apexV*H
+       = 1.30 + (1.19~1.49) ≈ 2.5~2.8 uR (≈64~72px @hexR=25.6) —— 用户看到的
+       「点子悬在峰上半空、竖线没搭到峰上」是这个常数差 + 方框顶口径一起造成的,
+       分两次修完 (第一次 1.30, 第二次 apexV*H)。
+     ⚠ hrand 取**本档包络的中点**, 不再写死 0.86 —— 0.86 只是「大」档的中点
+       (中 0.93 / 小 0.91 / 从属 0.78), 写死会让中/小档的底座偏矮。
+       精灵逐 hash 的真实 hrand 在包络内随机 ⇒ 拿不到 hash 时残留误差最坏
+       ≈0.33 uR (≈8px, 大档高海拔处; 区块到货即自愈)。
+     ⚠ ★ 公式**只此一份**, 在 vein-skin.js 的 VS.tipU —— 本函数只负责取海拔与 hash
+       再转调, 不再内联 (内联会在 shader 调参后静默漂移, 这正是 C-c 之前的病根)。
+     ⚠ elevAtTile 未加载时返 -1 ⇒ 走该档 coreElev 估计 (偏矮但不悬空)。区块到货会
+       markStaticDirty → 本函数重算, 自愈 (标签在静态层重绘时重建)。 */
   function veinTopU(v) {
-    var tb = (VS && VS.shape && VS.shape.terrainBase != null) ? VS.shape.terrainBase : 1.0;
-    var tbMin = (VS && VS.shape && VS.shape.terrainBaseMin != null) ? VS.shape.terrainBaseMin : 0;
     var e = elevAtTile(v.q, v.r);
-    var bhs = 0;
-    if (e > 0.84) bhs = 0.95 + 0.60 * Math.min(1, (e - 0.84) / 0.12);        // 雪峰档
-    else if (e > 0.70) bhs = 0.55 + 0.75 * Math.min(1, (e - 0.70) / 0.14);   // 山地档
-    if (bhs < tbMin) bhs = tbMin;                                            // 十一版 R3-a 底座下限
-    var baseU = (3.3 + 1.2 * 0.86) * bhs * tb;
-    var lv = (VS && VS.levelInfo) ? VS.levelInfo(v.level) : null;
-    var peakU = lv ? (3.3 + 1.2 * (lv.hRand[0] + lv.hRand[1]) * 0.5) * lv.hScale * VS.shape.sizeScale
-                   : 3.2;
-    return baseU + peakU + 0.35;      // +0.35 uR 余量: 签底不贴着峰尖
+    if (VS && VS.tipU) return VS.tipU(v.level, e, propHashAt(v.q, v.r));
+    return 2.5;   // 兜底: 与「大」档量级相当, 不在热路径上 (VS 未加载时才会走)
+  }
+
+  /* 格 → 服务端精灵实例的随机 hash。
+     只为灵脉签的落点服务 (C-c 二修 2026-09-16): 灵脉峰的**峰尖**高度与横向抖动
+     都由该精灵的 iHash 决定 (shader: hrand = fract(hash*5.17), jx = fract(hash*3.77)),
+     拿到 hash 才能把签子算到"看得见的那个尖"上, 而不是包络中点 + 格心。
+     ⚠ 用 arrays 里的原始精灵表 (不是被让位过滤后重传的 GPU 副本) —— 灵脉格永不被
+       让位, 两者对灵脉格同值, 但 arrays 不可变 ⇒ 索引可安全缓存在 info 上。
+     ⚠ 区块未到货返回 null ⇒ 调用方回落到包络中点/格心 (区块到货会重绘自愈)。 */
+  function propHashAt(q, r) {
+    if (!geo) return null;
+    var S = geo.chunkS;
+    var qb = Math.floor(q / S) * S, rb = Math.floor(r / S) * S;
+    for (var a = 0; a < 4; a++) {
+      var ca = (qb + (a % 2) * S) / S, cb = (rb + (a >> 1) * S) / S;
+      var info = chunkData.get(chunkKey(ca, cb));
+      if (!info) continue;
+      if (!info.propIdx) {
+        var arr = info.arrays, m = new Map();
+        /* ⚠ 纯海区块 pn=0 ⇒ chunkToArrays 给的是 **null 而非空数组** (见 MEMORY):
+           读 .length 会抛异常, 必须判空。 */
+        var pc = arr.propCenters, psp = arr.propSprites;
+        for (var i = 0; psp && pc && i < psp.length; i++) {
+          var t = worldToTileI(pc[i * 2], pc[i * 2 + 1]);
+          m.set(t.q + ',' + t.r, i);
+        }
+        info.propIdx = m;
+      }
+      var j = info.propIdx.get(q + ',' + r);
+      if (j != null) {
+        var hs = info.arrays.propHashes;      // 同上: 可能为 null
+        return (hs && j < hs.length) ? hs[j] : null;
+      }
+    }
+    return null;
   }
 
   /* ---------- 地表让位: 道路/建筑覆盖格上的树·山一律抹平 ----------
@@ -940,9 +1236,76 @@
   /* 稀有「地标」建筑 (全图出现 <150): 缩远时若与常规建筑一起砍掉, 这几座等于白画
      —— 战略视图下正是要找它们。名单与 `tools/stats_buildings.mjs` 的稀有档一致。 */
   var RARE_KINDS = { '炼炉': 1, '官衙': 1, '焦炭窑': 1, '宗祠': 1, '祭坛': 1, '聚灵阵': 1, '灵枢殿': 1 };
+  /* ============================================================
+   * R6b 「归属势力」(B · 2026-09-15)
+   * ------------------------------------------------------------
+   * 用户原话:「也没给渔村下面弄**归属势力**的图」。病根: 协议里早有 owner 字段
+   *   (MapMessages.cs:82), 但引擎恒写空串 (mapgen.js:1204) ⇒ 前端从来没得可读;
+   *   而现有的地盘色 (R6 townColor) 是"区分同屏不同城镇"的**位置派生色**, 与归属无关
+   *   (同镇的村子在这个口径下必然**不同色**, 恰好与"归属"相反)。
+   *
+   * 本层取 **B-A 路线: 前端派生** —— 扫已加载的聚落实体, 取**最近的宗门**当归属。
+   *   优点: 零协议改动、零清库、可单点回退; 缺点: **不是世界真值** (只覆盖已加载的
+   *   聚落包 ⇒ 视野外无宗门时该聚落暂时"无归属")。等事件系统给引擎补 owner 后,
+   *   只需把 `factionOf` 的返回改成读 `ent.owner` (B-B), 绘制层与记号层一行不用改。
+   *
+   * 判域口径**镜像引擎**: mapgen.js:1174 判"是否在灵脉域内"用的是
+   *   `cn.dist < CFG.COMM_R * 1.4` (= 25 × 1.4 = 35 格)。这里用同一个半径当
+   *   "宗门辖区"上限 —— 超出即视为荒野聚落 (不画归属记号)。
+   *   ⚠ 这是**镜像常量**: 引擎改了这里不改, 归属圈会跟着错。故 verify/check_faction.mjs
+   *     逐值断言 `SECT_DOMAIN_R === MGCfg.COMM_R * 1.4`。
+   * ============================================================ */
+  var SECT_DOMAIN_R = 35;             // = 引擎 CFG.COMM_R(25) × 1.4
+  var settleVer = 0;                  // 每有新的 settle 图层到货 ++ ⇒ factionOf 缓存失效
+  var FAC_OK = (function () {         // ?fac=0 关掉归属层 (同机位 A/B 差分用)
+    try { return !/[?&]fac=0(&|$)/.test(location.search); } catch (e) { return true; }
+  })();
+  /* 最近宗门 (轴向六边距)。结果缓存到 st._fac, 靠 settleVer 失效 ——
+     ⚠ 不能只缓存一次: 首个 settle 包到达时附近可能还没有宗门, 那样会被"
+     永久锁定为无归属"(旧 bldgAnchor 踩过同类坑, 见那里的注释)。 */
+  function factionOf(st) {
+    if (!FAC_OK || !st) return null;
+    if (st.type === 'sect') return st;                 // 宗门自己归自己
+    if (st._facV === settleVer) return st._fac || null;
+    st._facV = settleVer;
+    st._fac = null;
+    var bd = 1e9, best = null;
+    settleCells.forEach(function (ents) {
+      for (var i = 0; i < ents.length; i++) {
+        var e = ents[i];
+        if (e.type !== 'sect' || e.state === 1) continue;
+        var d = hexDist(st.q | 0, st.r | 0, e.q | 0, e.r | 0);
+        /* 并列取 id 小者 —— 纯为了"确定性": 同一局地图任何两次刷新给出同一个归属 */
+        if (d < bd - 1e-9 || (d <= bd + 1e-9 && best && (e.id || '') < (best.id || ''))) {
+          bd = d; best = e;
+        }
+      }
+    });
+    if (best && bd <= SECT_DOMAIN_R) st._fac = best;
+    return st._fac;
+  }
+  /* 势力色: **同宗同色** (这正是"归属"的意义 —— 与 R6 的"异镇异色"相反)。
+     由宗门的 (q,r) 派生 ⇒ 跨会话稳定。色相全周展开 (不用 R6 的按 type 分带,
+     因为归属色要在**不同宗门之间**互相区分, 不是在同一类型内部区分)。 */
+  function factionColor(sect) {
+    if (!sect) return null;
+    var hh = townColorHash(sect.q | 0, sect.r | 0, 0x5ec7);
+    var hue = hh % 360;
+    var sat = 44 + (hh >>> 9) % 18;                    // 44~61% (比城镇色更"旗帜"一点)
+    var lig = 38 + (hh >>> 17) % 12;                   // 38~49%
+    return 'hsl(' + hue + ',' + sat + '%,' + lig + '%)';
+  }
+  /* 势力「记号签名」: 造形三要素一次性派生 —— 刻痕数 (3~6) / 起始相位 / 印纹 (0~7)。
+     三者同源 ⇒ 同一势力处处一致; 且两两组合空间 4×6×8=192 ⇒ 同屏几家门派几乎不会撞。 */
+  function factionSig(sect) {
+    if (!sect) return null;
+    var hh = townColorHash(sect.q | 0, sect.r | 0, 0x7a11);
+    return { crest: 3 + (hh % 4), crestRot: ((hh >>> 7) % 6) * (Math.PI / 3), seal: (hh >>> 13) % 8 };
+  }
   /* R6 (2026-09-15 十一版): 城镇地盘色 —— 由聚落**位置 + 类型**派生确定性 HSL。
      同一城镇恒同色、异镇异色、跨会话稳定; 色相按 type 分带 (城/镇/村/宗门/渔村各占一段),
-     避免满屏同色; 不落协议 (纯前端派生)。⚠ 不用 st.id: 客户端实体未必带该字段 (以 q,r 为准)。 */
+     避免满屏同色; 不落协议 (纯前端派生)。⚠ 不用 st.id: 客户端实体未必带该字段 (以 q,r 为准)。
+     ★ R6b (B): **有归属时改由势力色接管** (同宗同色) —— 无归属才退回本口径。 */
   var TOWN_HUE = { city: 22, town: 46, village: 142, sect: 268, fishing: 196 };
   function townColorHash(a, b, c) {
     var h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x165667b1) ^ Math.imul(c | 0, 0x9e3779b1);
@@ -950,6 +1313,8 @@
     return h >>> 0;
   }
   function townColor(st) {
+    var fac = factionOf(st);
+    if (fac) return factionColor(fac);                 // 归属优先: 同宗同色
     var base = TOWN_HUE[st && st.type];
     if (base == null) base = 200;
     var tKey = st && st.type ? st.type.length : 0;
@@ -1013,7 +1378,8 @@
         kind: bridge ? '栈桥' : b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
         face: fi.face, water: fi.water, R: R, detail: detail,
         plate: false,                            // R6: 地盘改由城镇色**现画** (见下), 精灵内不再烘地皮色
-        onWater: onWater                         // R5b: 水上格 → 垫干栏木台 (水上人家)
+        onWater: onWater,                        // R5b: 水上格 → 垫干栏木台 (水上人家)
+        fishVillage: isFish                      // A: 渔村 → 走 KINDS_FISH (吊脚楼/渔获仓)
       });
       if (!rec) continue;
       if (bridge) statBridge++;                  // 验数: 本帧画了几座栈桥 (水→桥)
@@ -1022,8 +1388,17 @@
          R10 (2026-09-15 十一版): 地盘改**中空正六边形环** (半径带 0.80R~0.90R), 实心块作废;
          海上渔村同走本函数 ⇒ 海上的地盘也一并变成空环。 */
       if (!bridge) {
+        /* R6b (B): 归属记号 —— seal (环心印纹) / crest (环外刻痕) 都由**归属势力**派生,
+           同宗处处一致。无归属的荒野聚落传 null/0 ⇒ 保持纯环 (不臆造记号)。
+           水上聚落额外 water:true ⇒ 内外各补一道亮描边 (深水底上单环对比不足)。 */
+        var fac = factionOf(it.st), sig = factionSig(fac);
         BI.plateAt(ctx, { cx: it.x, cy: it.y, R: R * scale, tint: townColor(it.st),
-                          a: 0.40, edge: true, la: 0.44 });
+                          a: 0.40, edge: true, la: 0.44,
+                          water: !!onWater,
+                          seal: sig ? sig.seal : null,
+                          crest: sig ? sig.crest : 0,
+                          crestRot: sig ? sig.crestRot : 0,
+                          sc: fac ? factionColor(fac) : null, sa: 0.62 });
       }
       ctx.drawImage(rec.cv, it.x + rec.ox * scale, it.y + rec.oy * scale,
                     rec.w * scale, rec.h * scale);
@@ -1036,6 +1411,7 @@
     var cw = els.overlay.width, ch = els.overlay.height;
     statBanner = 0;                            // 验数: 本帧匾额计数归零
     bannerBoxes.length = 0;                     // 签位占用表同步清空 (避让用)
+    if (DEBUG) plaqDrawn = {};                  // 匾额落点记录同步归零 (只有 DEBUG 会读)
     if (!staticLayer) staticLayer = document.createElement('canvas');
     if (staticLayer.width !== cw || staticLayer.height !== ch) {
       staticLayer.width = cw; staticLayer.height = ch;
@@ -1091,6 +1467,11 @@
       for (var q = 0; q < veinLabels.length; q++) {
         var sp = w2s(veinLabels[q].x, veinLabels[q].y);
         mk(sp.x, sp.y, 'rgba(255,40,210,1)', '脉·' + veinLabels[q].name, 16);
+        /* C-c 二修验收入口: 青点 = 签子**算出来**的峰尖落点 (格心 + 抖动, 上抬 topU)。
+           它必须压在山尖的墨色最上沿 —— 偏上/偏下/偏侧都说明 apexV/jx 与 shader 脱钩。 */
+        var ap2 = w2s(veinLabels[q].x + (veinLabels[q].jxU || 0) * geo.hexR, veinLabels[q].y);
+        mk(ap2.x, ap2.y - geo.hexR * z * veinLabels[q].topU,
+           'rgba(0,226,255,1)', '峰尖·' + veinLabels[q].name, -16);
       }
     }
 
@@ -1193,8 +1574,13 @@
           ctx.stroke();
           ctx.restore();
           IT.drawVeinFlower(ctx, v.x, v.y, null, rgb, { level: v.level });
-          /* 名牌文案: 「XX灵脉·大」—— 等级用全角间隔号 (2026-09-15 用户: 去掉括号看着好一点) */
-          veinLabels.push({ x: v.x, y: v.y, name: v.name + '灵脉·' + (VEIN_LV_NAME[v.level] || '小'),
+          /* 名牌文案: 「<地貌名>·<档>」—— 由 veinLabel() 统一 (2026-09-15 用户: 去括号,
+             并用全角间隔号; 同时收掉「灵脉」叠字, 见 veinLabel 注释)。
+             C-c 二修 (2026-09-16): 签子挂在**看得见的峰尖**上 —— 高度用 apexOf().topU
+             (方框顶要按 apexV 折算, 见 veinTopU 注释), 横向要跟着精灵的随机抖动 jx
+             走 (shader `jx = (fract(hash*3.77)-0.5)*1.8uR`)。原来的"格心 x + 方框顶"
+             会让竖线落在峰的一侧、圆点悬在峰尖上方 (用户第二次报「对不上」)。 */
+          veinLabels.push({ x: v.x, y: v.y, jxU: veinJxU(v), name: veinLabel(v),
                             rgb: rgb, level: v.level, topU: veinTopU(v) });
         }
       });
@@ -1222,33 +1608,22 @@
     /* 建筑层 (地面实体 → 压在淡淡的区域名之上, 名牌/灵脉标之下) */
     drawBuildings(ctx, vw, vh, z);
 
-    /* 聚落建筑群的「挂牌锚点」(缓存):
-       · 水平 = **聚落中心** st.x —— 与服务端下发的实体坐标同源, 也是建筑围绕的核心。
-         ⚠ 不可用「建筑世界包围盒中心」: 建筑地皮里含农田/林地/码头/水车, 分布
-           常不对称 (甚至有一两格远在 2 格外), 包围盒中心会被整体拉到一侧, 牌匾
-           看起来"挂歪了"。2026-09-14 用户第 2 次反馈"名字位置还是不对"即此回归。
-       · 垂直 = **建筑群最北格** y0 —— 签子贴住镇子上沿, 而不是悬在半空
-         (第 1 次反馈"位置超出正上方太远"改的就是这里)。
-       `?ancgeo=1` 可退回包围盒中心 (同机位 A/B 差分用)。 */
+    /* 聚落建筑群的「挂牌锚点」(缓存) —— C-a (2026-09-15) / 二修 (2026-09-16):
+       落点**扎在一座真实建筑格上**, 且要是建筑群**正中**的那座 (BI.anchorOf 的
+       中位建筑 medoid) ——
+       ① 初版的「合成点」(中心格 x + 建筑格 y 的 p25) 通常落在村里空地上;
+       ② 初版改的「离聚落中心列最近的那座」点虽落在房子上, 但**选址格常偏心**
+          ⇒ 实测 seed42 归元宗挂在宗门北缘一座孤立小屋上, 离建筑簇质心 3.0R。
+       ⚠ 为什么不用包围盒中心/均值: 建筑清单含农田/码头等离群地皮, 二者都会被拉偏
+         (旧注释里的两次返工就是这个)。
+       `?ancgeo=box|col` 仍可退回这两套旧规则 (同机位 A/B 差分用)。
+       ⚠ 旧实现的隐患: 首次绘制时 st.buildings 可能还没到 ⇒ y0 = Infinity ⇒ 永久退化成
+         (st.x, st.y) 且**不再重算**。现在没建筑就**不落缓存**, 等建筑随区块到货再算。 */
     function bldgAnchor(st) {
       if (!st._anc) {
-        var x0 = Infinity, x1 = -Infinity, rs = [];
-        for (var i = 0; i < st.buildings.length; i++) {
-          var w = MC.tileToWorld(st.buildings[i].q, st.buildings[i].r);
-          rs.push(w.y);
-          if (w.x < x0) x0 = w.x;
-          if (w.x > x1) x1 = w.x;
-        }
-        rs.sort(function (a, b) { return a - b; });
-        /* 垂直 = 建筑格 y 的 **25 百分位** —— **不是**最北格 (min)。
-           ⚠ 2026-09-14 用户第 3 次反馈"村落上偏高 4 格": 聚落地皮里常有一两格
-           离群地物 (农田/水磨/渔亭/码头) 伸到主体以北 **2~3 档** (离线实测 277 个聚落:
-           中位 2 档 / 最大 3 档), 用 min 会把整张签子顶高 ≈3 档 + 抬升 ≈1 档 = **4 格**。
-           取 p25 = 内容密集区的北沿 ⇒ 配合下面 ~1 档抬升, 签子离地物 ≈1 格
-           (与灵脉签观感一致)。`?ancgeo=1` 仍可把横向退回包围盒中心。 */
-        var y0 = rs.length ? rs[Math.min(rs.length - 1, Math.floor(0.25 * rs.length))] : Infinity;
-        var ax = ANC_GEO ? (x0 + x1) / 2 : st.x;
-        st._anc = isFinite(y0) ? { x: ax, y: y0 } : { x: st.x, y: st.y };
+        var an = BI.anchorOf(st.buildings, geo.hexW, geo.hexR, st.x, ANC_GEO);
+        if (!an) return { x: st.x, y: st.y, real: false, y0: st.y };   // 不缓存: 建筑未到
+        st._anc = an;
       }
       return st._anc;
     }
@@ -1272,17 +1647,35 @@
         /* 名牌 = 竖排纸签, 一律挂在对应地物**上方** (2026-09-14 改; 旧版为横排落在下方)。
            签底锚在图标顶/建筑群上沿之上, 引绳由 drawNameBanner 自己连回锚点。 */
         if (showBanners && showName && statBanner < BANNER_MAX) {
-          var aX = ps2.x, anchorY;
+          var aX = ps2.x, anchorY, gap = 0;
           if (solid) {
+            /* C-a: 圆点**落在真实建筑格的格心**上 (不再是合成点, 也不再往上飘 1.15R) ——
+               「竖线和点对不上」的直接病因是旧代码把点抬到锚点上方 1.15R+2 (贴建筑群上沿),
+               而那个锚点本身又不在任何建筑上 ⇒ 点悬在村子上空的空地里。
+               现在: 点 = 格心; 签子腾开屋顶的间距改由 drawNameBanner 的 opt.gap 承担
+               (签仍在屋顶之上, 但点老老实实压在房子上, 引线是同列的竖线)。 */
             var anc = bldgAnchor(st);
             var ap = w2s(anc.x, anc.y);
             aX = ap.x;
-            anchorY = ap.y - (1.15 * geo.hexR * z + 2);   // 贴住建筑群上沿 (sprite 上探 ~1.5R)
+            anchorY = ap.y;
+            gap = anc.real ? (1.15 * geo.hexR * z + 2) : (0.6 * geo.hexR * z + 2);
+            if (DEBUG) {
+              plaqDrawn[String(st.id || (st.q + ',' + st.r))] = {
+                aX: aX, anchorY: anchorY, gap: gap, solid: true,
+                on: (aX > -40 && aX < vw + 40 && anchorY > -40 && anchorY < vh + 40)
+              };
+            }
           } else {
             anchorY = ps2.y - (baseSize * zoomClamp * 0.72 + 4);
+            if (DEBUG) {
+              plaqDrawn[String(st.id || (st.q + ',' + st.r))] = {
+                aX: aX, anchorY: anchorY, gap: 0, solid: false,
+                on: (aX > -40 && aX < vw + 40 && anchorY > -40 && anchorY < vh + 40)
+              };
+            }
           }
           drawNameBanner(ctx, aX, anchorY, st.name, {
-            fs: 11.5 * Math.max(z, 0.75), vh: vh, poi: st.type === 'poi'
+            fs: 11.5 * Math.max(z, 0.75), vh: vh, poi: st.type === 'poi', gap: gap
           });
         }
       }
@@ -1299,7 +1692,9 @@
     if (showBanners && z >= 0.85) {
       for (var vl = 0; vl < veinLabels.length; vl++) {
         var vb = veinLabels[vl];
-        var ps3 = w2s(vb.x, vb.y);
+        /* C-c 二修: 签子的 x 跟峰尖走 (格心 + 精灵抖动) —— 否则竖线落在峰的一侧。
+           抖动只在世界坐标上偏 jxU*hexR, 上屏仍是一根**竖直**引线 (签与点同 x)。 */
+        var ps3 = w2s(vb.x + (vb.jxU || 0) * geo.hexR, vb.y);
         if (ps3.x < -90 || ps3.y < -40 || ps3.x > vw + 90 || ps3.y > vh + 140) continue;
         if (statBanner >= BANNER_MAX) break;
         var peakTop = ps3.y - geo.hexR * z * vb.topU;
@@ -1651,6 +2046,14 @@
     chunkQueue.length = 0;
     chunkRetry.clear();
     chunkBusy.clear();                // 旧世界在途回调带 gen 守卫, 不会误删新世界标记
+    chunkDefer.length = 0;            // S3: 分帧队列里的块属于旧世界, 一并作废
+    deferKeys.clear();
+    CALC.localFail = 0;
+    /* S3: 引擎是全站单实例 ⇒ seed 只在这里推进一次 (小地图/主视图都只**读**)。
+       引擎未到货时 setSeed 只是记账, load 完成后会自动补 init (见 engine-local.js)。 */
+    var E0 = EL();
+    if (E0) E0.setSeed(worldSeed);
+    calcRefresh();
     roadsDirty = true;                // T7: 世界重铸 → 路网几何强制重建
     lastStream.x = NaN;               // P1: 重置流式增量状态 → 首帧强制全量重建
     hoverTile = null;
@@ -1683,7 +2086,6 @@
   var MASTER_CH = '玄清太云素无孤寒沧离明虚重白赤青洞霄寂衍真澄空'.split('');
   var MASTER_TAIL = ['真人', '上人', '道人', '散人', '老祖', '尊主'];
   var TIER_NAME = ['', '下品宗门', '中品宗门', '上品宗门'];
-  var VEIN_LEVEL = ['大', '中', '小'];
 
   function hash32(str) {
     var h = 2166136261 >>> 0;
@@ -1862,7 +2264,7 @@
     row.push(kv('距此', '<span class="sec-dist">' + pick.d + '</span> 格'));
     var nv = nearestVein(ent.q, ent.r);
     row.push(kv('灵脉', nv
-      ? esc(nv.v.name) + '灵脉·' + (VEIN_LEVEL[nv.v.level] || '小') + ' · ' + nv.d + ' 格'
+      ? esc(veinLabel(nv.v)) + ' · ' + nv.d + ' 格'
       : '未附灵脉'));
     var bl = ent.buildings || [], rs = ent.resources || [];
     if (bl.length) {
@@ -2138,16 +2540,20 @@
 
       /* D5: 静止降帧 —— 相机已收敛 + 无脏图层 + 无在途加载 + 无拖拽时, 每两帧才渲染一帧
          (动画继续, 约 30fps), 把「静止时仍每帧全跑 3-pass WebGL + 全屏后处理 + 覆盖层」
-         的功耗砍半。任何交互 (拖拽/滚轮/点击)、数据到达、脏标记都会立刻恢复满帧。 */
+         的功耗砍半。任何交互 (拖拽/滚轮/点击)、数据到达、脏标记都会立刻恢复满帧。
+         ⚠ S5: 必须把「分帧队列非空」也列进不降帧的条件 —— 否则挂起的块会在
+           chunkBusy.size===0 的静止状态下一帧都不被消费。 */
       var settled = Math.abs(cam.tx - cam.x) < 0.5 && Math.abs(cam.ty - cam.y) < 0.5 &&
                     Math.abs(cam.tzoom - cam.zoom) < 0.004;
       if (settled && !staticDirty && !drag && chunkBusy.size === 0 &&
-          (tickCount & 1)) {
+          chunkDefer.length === 0 && (tickCount & 1)) {
         requestAnimationFrame(loop);
         return;
       }
 
+      CALC.frameUsed = 0;               // S5: 分帧预算每帧归零 (在降帧判断之后, 不留残值)
       if (metaReady) { updateStreaming(); syncPropBlock(); }
+      pumpDeferred();                   // S5: 上一帧超预算而挂起的块, 本帧优先补齐
       renderer.render(cam, timeSec);
       drawOverlay();
       frameCount++;
@@ -2210,6 +2616,36 @@
       var urlParams = new URLSearchParams(location.search);
       var urlSeed = urlParams.get('seed');
       regenerate(urlSeed || String(Date.now() % 100000000));
+      /* S3: 引擎脚本到货后启用「地形块本地算」; 拿不到就静默走服务端下发 (老链路)。
+         S4: 同时记下引擎指纹, WS 重连时重取 meta 校验 —— 页面长开期间服务端升级引擎,
+             前端旧引擎算地形 + 后端新引擎发聚落/道路 = 坐标口径漂移 (建筑落海)。 */
+      function armCalc() {
+        var E1 = EL();
+        if (!E1) { CALC.settled = true; calcRefresh(); return; }
+        E1.noteEngineHash(MC.engineHash());   // 老服务端无此字段 = null ⇒ 不判定(见 verifyHash)
+        if (!CALC.armed) { CALC.settled = true; calcRefresh(); return; }
+        /* 闸门放行: 只放一次 (幂等), 由 load() 的成败两条路 + 看门狗共同触发。
+           放行后强制下一帧全量重建需求集 —— 前面被闸住的块从未进入 chunkBusy,
+           但也不在 chunkQueue 里 (updateStreaming 只在需要时追加), NaN 哨兵最省心。 */
+        var settle = function () {
+          if (CALC.settled) return;
+          CALC.settled = true;
+          calcRefresh();
+          lastStream.x = NaN;
+          pumpChunks();
+        };
+        E1.load().then(settle, settle);
+        setTimeout(settle, 3000);             // 看门狗: 引擎脚本/WS 卡死时别拖住首屏
+      }
+      armCalc();
+      MC.onReconnect(function () {
+        MC.fetchMeta(true).then(function (mm) {
+          var E2 = EL();
+          if (!E2) return;
+          E2.verifyHash(mm && mm.engineHash);      // 漂移 ⇒ 内部置 hashStale 并 warn 一次
+          E2.load().then(function () { calcRefresh(); });   // WS 刚恢复: 脚本可能这次才拿到
+        });
+      });
       if (urlParams.get('qt') != null) {
         var wp0 = MC.tileToWorld(+urlParams.get('qt'), +(urlParams.get('rt') || 0));
         cam.tx = cam.x = wp0.x;
@@ -2396,6 +2832,7 @@
             propBuilt: propBuilt.size, cutChunks: cutChunks, propsRemoved: removed,
             propsTotal: props, keptVein: keptVein, keptMtn: keptMtn, keptOther: keptOther,
             banners: statBanner, bridges: statBridge, waterQuads: statWaterQuads,
+            factionsOn: FAC_OK, settleVer: settleVer,
             /* 九版点选态: headless 用 Input.dispatchMouseEvent 点一下, 再读这两项
                即知「朱砂标记落在哪一格 / 宗门录选中的是哪一座」。无点击时为 null/''。 */
             sel: selMark ? [selMark.q, selMark.r] : null,
@@ -2403,6 +2840,153 @@
             zoom: +cam.zoom.toFixed(3), camTile: [Math.round(cam.x), Math.round(cam.y)]
           };
         };
+        /* R6b (B) 归属势力探针 —— headless 无法"看"图, 归属层的三条硬事实必须能读数:
+             ① 每个聚落算出的是哪个宗门 (fac) ② 轴向距多少 (d, 用来验辖区半径)
+             ③ 势力色与记号 (color/seal/crest, 用来验"同宗同色 + 记号一致")
+           另外按势力聚合计数 (byFaction), 直接读"这家管了几个村"。 */
+        window.__facProbe = function () {
+          var nSect = 0, rows = [], by = {};
+          settleCells.forEach(function (ents) {
+            for (var i = 0; i < ents.length; i++) if (ents[i].type === 'sect') nSect++;
+          });
+          settleCells.forEach(function (ents) {
+            for (var i = 0; i < ents.length; i++) {
+              var e = ents[i];
+              if (e.type === 'sect' || e.state === 1) continue;
+              var f = factionOf(e), sig = factionSig(f);
+              rows.push({
+                name: e.name, type: e.type, q: e.q | 0, r: e.r | 0,
+                d: f ? hexDist(e.q | 0, e.r | 0, f.q | 0, f.r | 0) : -1,
+                fac: f ? (f.name || '') : '',
+                color: townColor(e),
+                seal: sig ? sig.seal : -1, crest: sig ? sig.crest : 0
+              });
+              if (f) by[f.name] = (by[f.name] || 0) + 1;
+            }
+          });
+          return { sects: nSect, settles: rows.length, rows: rows.slice(0, 300), byFaction: by,
+                   domainR: SECT_DOMAIN_R, on: FAC_OK };
+        };
+        /* 匾额落点探针 (C-c 二修 2026-09-16) —— headless 无法"看"图, 于是把
+           「签子/竖线/圆点到底落在哪个地物上」变成可读数。每行 = 一个聚落 (按 id 去重):
+             anchor   落点格 (bldgAnchor: 真实建筑格; 兜底才是聚落中心格)
+             dCentR   落点离「建筑簇质心」的距离 (R 倍) —— 越大越像扎在边缘孤例上
+             near2R   落点 2R 内有几座建筑 (1~2 = 孤岛, 直观的"点扎在村外")
+             inPlan   本帧该落点格是否真的画了建筑 (false ⇒ 点压在空地上)
+             ranK     落点按"离质心近"排序的名次 (0 = 最中心的那座)
+             dotX/dotY 本帧匾额**实际**画出的引线底点 (屏幕 px, 与 vue 里那份同值)
+           外加 veins: 每座灵脉的 topU / jxU / hash (与 shader 对账用)。 */
+        window.__plaqProbe = function () {
+          var rows = [], seen = {};
+          settleCells.forEach(function (ents) {
+            for (var i = 0; i < ents.length; i++) {
+              var st = ents[i];
+              if (st.state === 1) continue;
+              var idk = String(st.id || (st.q + ',' + st.r));
+              if (seen[idk]) continue;
+              seen[idk] = 1;
+              var bl = st.buildings || [];
+              var pts = [], mx = 0, my = 0, j;
+              for (j = 0; j < bl.length; j++) {
+                var w = MC.tileToWorld(bl[j].q, bl[j].r);
+                pts.push(w); mx += w.x; my += w.y;
+              }
+              if (bl.length) { mx /= bl.length; my /= bl.length; }
+              /* 稳健参照系 = **截尾质心** (先取均值, 丢最远 25%, 再取均值) ——
+                 远处农田/码头在这一步被剔掉。
+                 ⚠ 别拿裸均值当参照: 它会被同一批离群地物拉走, 于是"离参照最近"的
+                   恰恰是被拉偏的那条规则 (一修 col 就吃过这个假好评: 东陵村在裸均值
+                   口径下看着只有 1.15R, 其实落点在建筑群东缘, 稳健口径下 2.6R)。 */
+              var rcx = mx, rcy = my;
+              if (bl.length > 3) {
+                var ds2 = [];
+                for (j = 0; j < bl.length; j++) {
+                  var qx = pts[j].x - mx, qy = pts[j].y - my;
+                  ds2.push({ i: j, d: qx * qx + qy * qy });
+                }
+                ds2.sort(function (a, c) { return a.d - c.d; });
+                var kp = Math.max(3, Math.round(bl.length * 0.75)), sx2 = 0, sy2 = 0;
+                for (j = 0; j < kp; j++) { sx2 += pts[ds2[j].i].x; sy2 += pts[ds2[j].i].y; }
+                rcx = sx2 / kp; rcy = sy2 / kp;
+              }
+              var dRef = function (a) {
+                if (!a) return null;
+                var ux = a.x - rcx, uy = a.y - rcy;
+                return +(Math.sqrt(ux * ux + uy * uy) / geo.hexR).toFixed(3);
+              };
+              var an = BI.anchorOf(bl, geo.hexW, geo.hexR, st.x, '');
+              var anCol = BI.anchorOf(bl, geo.hexW, geo.hexR, st.x, 'col');
+              var anMed = BI.anchorOf(bl, geo.hexW, geo.hexR, st.x, 'med');
+              var anSum = BI.anchorOf(bl, geo.hexW, geo.hexR, st.x, 'sum');
+              var nn = 0, rank = -1;
+              if (an && bl.length) {
+                var ad = [], k2;
+                for (k2 = 0; k2 < bl.length; k2++) {
+                  var ex = pts[k2].x - an.x, ey = pts[k2].y - an.y;
+                  ad.push(Math.sqrt(ex * ex + ey * ey));
+                  if (ad[k2] <= 2 * geo.hexR) nn++;
+                }
+                var aRr = Math.sqrt((an.x - rcx) * (an.x - rcx) + (an.y - rcy) * (an.y - rcy));
+                rank = ad.filter(function (v2) { return v2 < aRr - 1e-9; }).length;
+              }
+              var planned = false;
+              for (j = 0; j < bldgPlan.length; j++) {
+                if (bldgPlan[j].b.q === (an ? an.q : st.q) && bldgPlan[j].b.r === (an ? an.r : st.r)) { planned = true; break; }
+              }
+              var rec = plaqDrawn[idk];
+              /* 原始建筑格一并吐出来 —— 离线可拿它评估**任意**锚点规则
+                 (中位/medoid/截尾/包围盒…), 不必为每个候选改一次前端。 */
+              var blc = [];
+              for (j = 0; j < bl.length && j < 80; j++) blc.push([bl[j].q, bl[j].r]);
+              rows.push({
+                id: idk, name: st.name, type: st.type, q: st.q | 0, r: st.r | 0,
+                nb: bl.length, sx: +st.x.toFixed(2), bldgs: blc,
+                ax: an ? +an.q : null, ar: an ? +an.r : null, real: an ? !!an.real : false,
+                /* 四条候选规则到**同一个稳健参照系** (截尾质心) 的距离, R 倍数 ——
+                   同一行读数就能比规则; 数值越小 = 越坐在村子正中间。 */
+                dTrimR: dRef(an), near2R: nn, rank: rank,
+                dColR: dRef(anCol), dMedR: dRef(anMed), dSumR: dRef(anSum),
+                colQ: anCol ? anCol.q : null, colRr: anCol ? anCol.r : null,
+                medQ: anMed ? anMed.q : null, medRr: anMed ? anMed.r : null,
+                sumQ: anSum ? anSum.q : null, sumRr: anSum ? anSum.r : null,
+                inPlan: planned,
+                solid: rec ? rec.solid : null, gap: rec ? +rec.gap.toFixed(1) : null,
+                dotX: rec ? +rec.aX.toFixed(1) : null, dotY: rec ? +rec.anchorY.toFixed(1) : null,
+                onScreen: rec ? rec.on : null
+              });
+            }
+          });
+          var vrows = [];
+          if (showVeins) {
+            commCells.forEach(function (cm) {
+              if (!cm.exists) return;
+              for (var v2 = 0; v2 < cm.veins.length; v2++) {
+                var v = cm.veins[v2];
+                vrows.push({
+                  name: veinLabel(v), q: v.q | 0, r: v.r | 0, level: v.level,
+                  elev: +elevAtTile(v.q, v.r).toFixed(4),
+                  hash: propHashAt(v.q, v.r),
+                  topU: +veinTopU(v).toFixed(4), jxU: +veinJxU(v).toFixed(4),
+                  apexV: VS && VS.apexV ? +VS.apexV().toFixed(5) : null,
+                  boxU: VS && VS.tipU ? null : null
+                });
+              }
+            });
+          }
+          return { hexR: geo.hexR, hexW: geo.hexW, zoom: +cam.zoom.toFixed(3),
+                   dpr: dpr, apexV: VS && VS.apexV ? +VS.apexV().toFixed(5) : null,
+                   settles: rows, veins: vrows.slice(0, 200) };
+        };
+        /* ?plaqprobe=1: 走「页面自回传」通道把 __plaqProbe 的 JSON 落到
+           verify/capture.png (CDP Runtime.evaluate 对本页永久挂起, 见 memory) ——
+           随后直接按**文本**读该文件即可。仅显式传参生效, 不参与业务。 */
+        if (/[?&]plaqprobe=1/.test(location.search)) {
+          setTimeout(function () {
+            var t1 = '';
+            try { t1 = JSON.stringify(window.__plaqProbe()); } catch (e) { t1 = JSON.stringify({ err: String(e) }); }
+            fetch('/api/debug/snap', { method: 'POST', body: t1 }).catch(function () { /* noop */ });
+          }, 11000);
+        }
         /* 定点相机助手: 把「路压水」「建筑压水」的世界格坐标吐出来 —— 否则
            headless 无从知道该把镜头停在哪才能同时看到虚线航道与栈桥。 */
         window.__spots = function () {

@@ -117,7 +117,24 @@
                 sc: (s && s.sizeScale) || 1.0,
                 tb: (s && s.terrainBase != null) ? s.terrainBase : 1.0,
                 tbm: (s && s.terrainBaseMin != null) ? s.terrainBaseMin : 0,
-                tbw: (s && s.terrainBaseW != null) ? s.terrainBaseW : 0, lv: [] };
+                tbw: (s && s.terrainBaseW != null) ? s.terrainBaseW : 0, lv: [],
+                /* 大世界山的高度档位 —— 2026-09-15 从 vein-skin.js 收口 (原先本文件
+                   另写一份, 两边漂移过一次)。灵脉「山地底座」与大世界山共用同一组。 */
+                mtnLo: (s && s.mtnLo != null) ? s.mtnLo : 0.55,
+                mtnHi: (s && s.mtnHi != null) ? s.mtnHi : 1.30,
+                snowLo: (s && s.snowLo != null) ? s.snowLo : 0.95,
+                snowHi: (s && s.snowHi != null) ? s.snowHi : 1.55,
+                elevMtn: (s && s.elevMtn != null) ? s.elevMtn : 0.70,
+                elevSnow: (s && s.elevSnow != null) ? s.elevSnow : 0.84,
+                mtnSpan: (s && s.mtnSpan != null) ? s.mtnSpan : 0.14,
+                snowSpan: (s && s.snowSpan != null) ? s.snowSpan : 0.12,
+                propBottomU: (s && s.propBottomU != null) ? s.propBottomU : 0.95,
+                /* 采样留边 + 精灵水平抖动幅度 —— 真源同样在 vein-skin.js:
+                   它们决定「看得见的峰尖」在方框里的位置与横向偏移, 灵脉签的落点
+                   (vein-skin.apexV/apexJx) 必须与这两个 GLSL 字面量严格一致,
+                   所以**不许**在这里另写一份 (2026-09-16)。 */
+                boxInset: (s && s.propBoxInset != null) ? s.propBoxInset : 0.025,
+                jitterU: (s && s.propJitterU != null) ? s.propJitterU : 0.9 };
     /* 四档 (大/中/小/从属) 的高度倍率与收窄包络; 缺配置 → 一律退回 shape.hScale
        ⚠ 顺序即 mapgen.js 的 level (0大 / 1中 / 2小 / 3从属), 契约见 verify/check_vein_skin.mjs */
     var EPS = 1.0 / 1024.0;                       // 浮点字面量精度 (避免 GLSL 里出现 0.7200001)
@@ -154,10 +171,21 @@
      小灵脉中心海拔 LIFT_CORE[2]=0.70 恰好压在底座判档的严格边界 (`ve > 0.70`) 上,
      底座恒为 0 ⇒ 只画峰体没有山脚 (上屏总高仅大档的 28%)。这里给底座倍率兜一个下界。 */
   var VBMIN = VEIN_SHAPE.tbm.toFixed(3);
-  /* 大世界山/雪峰的高度倍率档位 —— 山地底座与地形分支**共用同一组常量**,
-     避免"灵脉底座用的山高"与"旁边真山"两套数字各自漂移。 */
-  var MTN_LO = (0.55).toFixed(3), MTN_HI = (1.30).toFixed(3);
-  var SNOW_LO = (0.95).toFixed(3), SNOW_HI = (1.55).toFixed(3);
+  /* 精灵采样留边 + 水平抖动 (renderer 侧的字面量来自 vein-skin.js, 见 VEIN_SHAPE):
+     ⚠ 改这两个数 = 改「峰尖出现在哪」⇒ vein-skin.apexV()/apexJx() 的结论跟着变,
+       灵脉签落点自动跟手。别在这里写死。 */
+  var BOX_INSET = VEIN_SHAPE.boxInset.toFixed(4);
+  var BOX_SPAN = (1 - 2 * VEIN_SHAPE.boxInset).toFixed(4);
+  var JIT_U = (VEIN_SHAPE.jitterU * 2).toFixed(3);
+  /* 大世界山/雪峰的高度倍率档位 + 判档阈值 —— 2026-09-15 起**真源在 vein-skin.js**
+     (shape.mtnLo/mtnHi/snowLo/snowHi/elevMtn/elevSnow/mtnSpan/snowSpan), 这里只做
+     缺配置兜底。灵脉「山地底座」与地形分支共用同一组 ⇒ 不会一边改了另一边没改。
+     ⚠ 阈值/分母也一并来自真源: 旧实现把 0.70/0.84/0.14/0.12 硬编码在 GLSL 里,
+       vein-skin.tipU 复算时只能另抄一份 —— 那就是「签位对不上峰尖」的温床。 */
+  var MTN_LO = VEIN_SHAPE.mtnLo.toFixed(3), MTN_HI = VEIN_SHAPE.mtnHi.toFixed(3);
+  var SNOW_LO = VEIN_SHAPE.snowLo.toFixed(3), SNOW_HI = VEIN_SHAPE.snowHi.toFixed(3);
+  var E_MTN = VEIN_SHAPE.elevMtn.toFixed(3), E_SNOW = VEIN_SHAPE.elevSnow.toFixed(3);
+  var S_MTN = VEIN_SHAPE.mtnSpan.toFixed(3), S_SNOW = VEIN_SHAPE.snowSpan.toFixed(3);
   var PROP_VS = [
     '#version 300 es',
     'layout(location=0) in vec2 aPos;',        // [-1..1] 方块
@@ -212,8 +240,8 @@
     '          :               mix(' + VLO(3) + ', ' + VHI(3) + ', hrand);',
     /* 「原来的山」: 与大世界山**同一档公式** (海拔 → 高度倍率), 平原/水面 → 0 */
     '    float bhs = 0.0;',
-    '    if (ve > 0.84)      bhs = mix(' + SNOW_LO + ', ' + SNOW_HI + ', clamp((ve-0.84)/0.12, 0.0, 1.0));',
-    '    else if (ve > 0.70) bhs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((ve-0.70)/0.14, 0.0, 1.0));',
+    '    if (ve > ' + E_SNOW + ')      bhs = mix(' + SNOW_LO + ', ' + SNOW_HI + ', clamp((ve-' + E_SNOW + ')/' + S_SNOW + ', 0.0, 1.0));',
+    '    else if (ve > ' + E_MTN + ') bhs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((ve-' + E_MTN + ')/' + S_MTN + ', 0.0, 1.0));',
     /* 十一版 R3-a: 底座**下限** —— 小灵脉 (LIFT_CORE[2]=0.70) 恰卡在严格边界上, 否则底座恒 0 */
     '    bhs = max(bhs, ' + VBMIN + ');',
     '    bhs *= ' + VBASE + ';',
@@ -221,9 +249,9 @@
     '    vbaseW = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*bhs) * ' + VBASEW + ';',
     '  }',
     '  else if (iSprite < 41.5 || (iSprite > 55.5 && iSprite < 57.5))',
-    '    hs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((iElev-0.70)/0.14, 0.0, 1.0));',
+    '    hs = mix(' + MTN_LO + ', ' + MTN_HI + ', clamp((iElev-' + E_MTN + ')/' + S_MTN + ', 0.0, 1.0));',
     '  else if ((iSprite > 41.5 && iSprite < 43.5) || (iSprite > 57.5 && iSprite < 59.5))',
-    '    hs = mix(' + SNOW_LO + ', ' + SNOW_HI + ', clamp((iElev-0.84)/0.12, 0.0, 1.0));',
+    '    hs = mix(' + SNOW_LO + ', ' + SNOW_HI + ', clamp((iElev-' + E_SNOW + ')/' + S_SNOW + ', 0.0, 1.0));',
     '  else if (iSprite < 49.5) hs = 0.62 + 0.34*fract(iHash*9.13);',
     '  else if (iSprite > 59.5 && iSprite < 61.5) hs = 0.52 + 0.24*fract(iHash*9.13);',  // 草地小山包: 更矮缓
     '  else if (iSprite > 61.5 && iSprite < 63.5) hs = 0.72 + 0.30*fract(iHash*9.13);',  // 草地孤树: 中等
@@ -236,7 +264,7 @@
        W 只剩灵脉峰自身, H 仍含底座 ⇒ 又高又瘦 (九版宽度也叠加 ⇒ 反被读成"变宽了")。 */
     '  float W = 3.4641016*uR*(1.55+0.65*h2) * (0.82 + 0.22*hs) * ss * ws + vbaseW;',
     '  float H = uR*(3.3+1.2*hrand) * hs * ss + vbaseH;',  // 底座山 (不缩, 只贡献高度) + 灵脉峰 (乘 sizeScale)
-    '  float jx = (fract(iHash*3.77)-0.5)*uR*1.8;',
+    '  float jx = (fract(iHash*3.77)-0.5)*uR*' + JIT_U + ';',   // ±jitterU uR (vein-skin.js)
     '  float flip = step(0.5, fract(iHash*7.31));',
     '  float u0 = aPos.x*0.5+0.5;',
     '  float u = mix(u0, 1.0-u0, flip);',
@@ -264,7 +292,9 @@
     'void main(){',
     '  float col = mod(vSprite, ' + ATLAS_ROWS + '.0);',
     '  float row = floor(vSprite/' + ATLAS_ROWS + '.0 + 0.001);',   // 精确取整: +0.5 会把 44~47 错算到第 6 行
-    '  vec2 uvL = vUv*(1.0-0.05)+0.025;',
+    /* 采样留边 (vein-skin.js shape.propBoxInset): 方框 vv 对应逻辑格 y
+       = tile*(inset + span*vv) —— vein-skin.apexV() 的解就是从这里来的, 同一份数。 */
+    '  vec2 uvL = vUv*' + BOX_SPAN + '+' + BOX_INSET + ';',
     '  vec2 uv = (vec2(col, row)+uvL)/vec2(' + ATLAS_ROWS + '.0, uRows);',
     '  vec4 tex = texture(uAtlas, uv);',
     '  if (tex.a < 0.10) discard;',

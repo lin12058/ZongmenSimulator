@@ -162,6 +162,9 @@ list.forEach((it) => {
     kind: b.kind, cx: it.x, cy: it.y, R, q: b.q, r: b.r,
     variant: v, tier: b.tier, face: it.fi.face, water: it.fi.water,
     detail: 3, plate: true, plateA: 0.20,
+    /* A (2026-09-15): 渔村 → 走 KINDS_FISH 渔家画法 (吊脚楼/渔获仓)。
+       生产代码同一判据 = main.js `isFish: it.st.type === 'fishing'`。 */
+    fishVillage: st.type === 'fishing',
     /* R5b: 建筑格是水 → 生产代码会垫干栏木台 (水上人家)。地类真值取自引擎。 */
     onWater: (() => { const f = MG.fields(b.q, b.r); return !!f && f.biome <= 1; })()
   });

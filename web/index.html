@@ -3,15 +3,29 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<!-- 本图是「纸本水墨」固定浅色设计, 不随系统深浅色变化。
+     手机浏览器 / Android WebView / 微信·QQ 的 X5 内核都会对「未声明 color-scheme 的页面」
+     做算法暗化 (整页反色), 于是纸白被反成墨黑。声明 only light 是标准的退出方式:
+     light 表示「只支持浅色」, 前缀 only 明确「不必替我自动暗化」。 -->
+<meta name="color-scheme" content="only light">
 <title>宗门模拟器 · 山河图</title>
 <style>
   :root {
+    /* 同上 (meta 是给浏览器看的, 这条是给渲染引擎看的): 明确只支持浅色, 拒绝自动暗化。
+       顺带定死表单控件/滚动条的配色, 免在深色系统下被换成深色。 */
+    color-scheme: only light;
     --paper: #ece3d0;
     --ink: #2e2a24;
     --ink-soft: rgba(58, 48, 38, 0.75);
     --ink-faint: rgba(58, 48, 38, 0.44);
     --seal: #a63a2c;
     --panel-border: rgba(150, 128, 96, 0.55);
+    /* 小地图面板几何 —— 面板高 = --mm-h (画布) + --mm-chrome (头行+提示+内边距+间隙, 实测 57px)。
+       #info (山川志) 的 bottom 由这几个变量推出: 早先写死成 230px/168px, 画布高度一变就会压到小地图上。 */
+    --mm-h: 141px;          /* 小地图画布高度 (窄屏另给) */
+    --mm-chrome: 57px;      /* 画布之外的面板垂直占位 */
+    --mm-bottom: 18px;      /* 面板距视口底 */
+    --mm-gap: 14px;         /* 山川志与小地图的间距 */
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; }
@@ -174,8 +188,10 @@
   /* ---- 信息面板 ---- */
   #info {
     position: absolute;
-    /* R11: 左下角让给「山河小图」(bottom:18 + 面板高 ≈196 + 间距) —— 山川志上移到它上方 */
-    left: 16px; bottom: 230px; width: 228px; padding: 12px 14px;
+    /* R11: 左下角让给「山河小图」—— 山川志上移到它上方。
+       偏移量由 --mm-* 推出 (不再写死 230px: 画布高度一变就得手工跟着调)。 */
+    left: 16px; width: 228px; padding: 12px 14px;
+    bottom: calc(var(--mm-bottom) + var(--mm-h) + var(--mm-chrome) + var(--mm-gap));
     transition: opacity 0.2s;
   }
   #info.hidden { opacity: 0; pointer-events: none; }
@@ -194,7 +210,7 @@
      隐藏 = 模块整体停摆 (停 rAF/停抽样/停绘制), 角落留一枚极小恢复钮。 */
   #minimapBox {
     position: absolute;
-    left: 16px; bottom: 18px; padding: 7px 8px 6px;
+    left: 16px; bottom: var(--mm-bottom); padding: 7px 8px 6px;
   }
   #minimapBox.mm-hidden, #mmRestore.mm-hidden { display: none; }
   #minimapBox .mm-head, #mmFull .mm-head {
@@ -207,8 +223,11 @@
     padding: 1px 6px; font-size: 11px; line-height: 17px; letter-spacing: 1px;
   }
   #minimap {
-    display: block; width: 216px; height: 141px; cursor: grab;
+    display: block; width: 216px; height: var(--mm-h); cursor: grab;
     border: 1px solid rgba(80,60,30,0.3);
+    /* touch-action: none ⇒ 手势由模块自己处理 (单指拖动/双指捏合),
+       否则浏览器会把这些手势吃掉去做滚动/页面缩放。 */
+    touch-action: none;
   }
   #minimap:active { cursor: grabbing; }
   #minimapBox .hint { margin-top: 5px; font-size: 11px; color: var(--ink-soft); text-align: center; letter-spacing: 2px; cursor: default; }
@@ -233,10 +252,11 @@
   #mmCanvasFull {
     display: block; width: 100%; height: 100%; cursor: grab;
     border: 1px solid rgba(200,180,140,0.35);
+    touch-action: none;             /* 同 #minimap: 全屏档的拖动/捏合也归模块 */
   }
   #mmCanvasFull:active { cursor: grabbing; }
   #mmRestore {
-    position: absolute; left: 16px; bottom: 18px; z-index: 40;
+    position: absolute; left: 16px; bottom: var(--mm-bottom); z-index: 40;
     padding: 2px 9px; font-size: 11px; letter-spacing: 1px; opacity: 0.62;
   }
   #mmRestore.show { display: block; }
@@ -255,8 +275,18 @@
     #sectBox { width: 196px; }
     .sec-name { font-size: 15px; letter-spacing: 2px; }
     #titleBox h1 { font-size: 17px; letter-spacing: 3px; }
-    #minimap { width: 150px; height: 98px; }
-    #info { bottom: 168px; }          /* 小图更矮 → 山川志跟着下移 */
+    /* 窄屏: 小地图铺满窗体宽度。
+       原为左下角固定小卡 (画布 150×98): 头行「山河小图 归心 全屏 隐藏」与提示行的固有宽
+       都是 188px, 绝对定位的收缩盒取最宽者 ⇒ 面板 204px, 画布只铺满 79.8%,
+       右侧留 38px 空白纸 (手机上肉眼可见)。
+       这里把面板 left/right 同时贴边 ⇒ 宽度确定, 画布 width:100% 才有意义。
+       ⚠ 桌面档不能给 width:100%: 收缩盒里百分比宽会回落到画布 width 属性,
+         而模块每帧都在改这个属性 (clientWidth×dpr) ⇒ 反馈环。 */
+    :root { --mm-h: min(132px, 22vh); --mm-bottom: 10px; }
+    #minimapBox { left: 10px; right: 10px; }
+    #minimap { width: 100%; }
+    #mmRestore { left: 10px; }
+    #info { left: 10px; }
   }
 </style>
 </head>
@@ -313,7 +343,7 @@
       <button class="mm-btn" data-mm="hide" title="隐藏小地图 (相关组件停摆)">隐藏</button>
     </div>
     <canvas id="minimap"></canvas>
-    <div class="hint" title="滚轮缩放 · 拖动平移 (拖过会自动转自由视角) · 单击展开全屏 · 归心恢复跟随">跟随视野 · 倍率 ×1</div>
+    <div class="hint" title="滚轮/捏合缩放 · 拖动平移 (拖过会自动转自由视角) · 单击展开全屏 · 归心恢复跟随">跟随视野 · 倍率 ×1</div>
   </div>
   <button id="mmRestore" class="mm-hidden" title="显示小地图">显图</button>
   <!-- 提示层: 必须放在面板外 (面板 clip-path 会裁掉溢出的提示) -->
@@ -322,7 +352,7 @@
   <!-- 全屏档浮层: 与 #minimapBox 同级 (面板的 clip-path 会裁子树) -->
   <div id="mmFull">
     <div class="mm-head">
-      <span class="mm-title">山河小图 · 全屏（拖动平移 · 滚轮缩放 · 单击跳转）</span>
+      <span class="mm-title">山河小图 · 全屏（拖动平移 · 滚轮/捏合缩放 · 单击跳转）</span>
       <button class="mm-btn" data-mm="reset">归位</button>
       <button class="mm-btn" data-mm="hide">隐藏</button>
       <button class="mm-btn" data-mm="close">关闭 ✕</button>
@@ -344,6 +374,9 @@
   <script src="js/textures.js"></script>
   <script src="js/renderer.js"></script>
   <script src="js/bldg_ink.js"></script>
+  <!-- 引擎单实例加载器: 必须在 minimap-vein.js 与 main.js **之前**
+       (两边都只读它; 全站唯一 eval / 唯一 init(seed) 点, 见文件头注释) -->
+  <script src="js/engine-local.js"></script>
   <script src="js/minimap-vein.js"></script>
   <script src="js/main.js"></script>
 </body>

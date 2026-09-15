@@ -7,6 +7,7 @@
  * 两种模式:
  *   node tools/bldg_sheet.mjs all               26 种 (默认坐北朝南)
  *   node tools/bldg_sheet.mjs dirs 码头 农田 民房  指定建筑 × 六朝向
+ *   node tools/bldg_sheet.mjs fish              渔村皮肤 水陆对照 (A, 见下)
  * 产出: verify/_bldg_sheet.html + verify/_bldg_sheet.png
  * 注意: 本机 Chrome 必须用旧版 --headless (--headless=new 忽略 --window-size)
  * ============================================================ */
@@ -60,9 +61,9 @@ function gridRefs() {
   }
   return out.join('');
 }
-function cell(kind, face, variant, label, sub) {
-  const spec = { kind, cx: 0, cy: 0, R, q: 3 + (variant % 5), r: -2 + (variant % 3),
-    variant, face: face || null, detail: 3, plate: false };
+function cell(kind, face, variant, label, sub, extra) {
+  const spec = Object.assign({ kind, cx: 0, cy: 0, R, q: 3 + (variant % 5), r: -2 + (variant % 3),
+    variant, face: face || null, detail: 3, plate: false }, extra || {});
   const body = BI.svgBody(spec);
   return `<figure class="c">
   <div class="art">
@@ -87,6 +88,30 @@ if (mode === 'dirs') {
       cards += cell(k, { x: BI.DIRS[d][0], y: BI.DIRS[d][1] }, d,
         k, ['东', '东南', '西南', '西', '西北', '东北'][d]);
     }
+  });
+} else if (mode === 'fish') {
+  /* 渔村皮肤 (A, 2026-09-15) 水陆对照。
+     ⚠ 主看板存在的意义: 「重画渔村贴图」是否真的分叉、远景档是否还认得出来,
+     都只能靠肉眼。左列 = 内陆原型, 右三列 = 渔家 (detail 3 / 2 / 1)。
+     onWater 只对渔家列打开 —— 生产代码里渔村落水格才会垫干栏木台 (R5b)。 */
+  title = '渔村皮肤 · 水陆对照 (KINDS_FISH)';
+  sub = '真源 web/js/bldg_ink.js · 左 = 内陆原型 (瓦顶) · 右三列 = 渔家 (茅顶 + 干栏桩脚 + 渔具; detail 3→1 逐档收细节) · 真源开关 spec.fishVillage';
+  const KINDS_FISHED = ['民房', '仓库'];
+  KINDS_FISHED.forEach((k, i) => {
+    const q0 = 3 + i;
+    cards += cell(k, null, i, k + ' · 内陆', '瓦顶 / 粮囤',
+      { q: q0, r: -2, fishVillage: false });
+    cards += cell(k, null, i, k + ' · 渔家', 'detail 3 全细节',
+      { q: q0, r: -2, fishVillage: true, onWater: true });
+    cards += cell(k, null, i, '　↳', 'detail 2 中景',
+      { q: q0, r: -2, fishVillage: true, onWater: true, detail: 2 });
+    cards += cell(k, null, i, '　↳', 'detail 1 远景',
+      { q: q0, r: -2, fishVillage: true, onWater: true, detail: 1 });
+  });
+  /* 水上原生三件: 加不加 fishVillage 都必须一模一样 (契约 C 的肉眼版) */
+  ['码头', '渔船坞', '渔亭'].forEach((k, i) => {
+    cards += cell(k, null, i + 5, k, '水上原生 (表外, 不受 flag 影响)',
+      { q: 3 + i, r: -2, fishVillage: true, onWater: false });
   });
 } else {
   title = '建筑实时绘制 · 26 种';
@@ -126,7 +151,8 @@ function shot(htmlPath, outPng, w, h) {
   const ok = fs.existsSync(outPng) && fs.statSync(outPng).size > 900;
   return { ok, code: r.status, size: ok ? fs.statSync(outPng).size : 0 };
 }
-const nCards = mode === 'dirs' ? (process.argv.slice(3).filter((a) => !/^--/.test(a)).length || 4) * 6 : 26;
+const nCards = mode === 'dirs' ? (process.argv.slice(3).filter((a) => !/^--/.test(a)).length || 4) * 6
+  : mode === 'fish' ? 11 : 26;
 const colsW = 1560 - 48 - 36;
 const cardW = colsW / 7;
 const artH = cardW * (VH + PAD * 2) / (VW + PAD * 2);

@@ -39,6 +39,12 @@ public sealed class MapWorldService : IDisposable
     private readonly SqliteVirtualContext? _sql;
     private string? _metaCache;
     private readonly object _metaLock = new();
+    /* S4: 引擎指纹 —— 对**下发给前端的那三个脚本**按拼接顺序取 SHA256 前 16 位。
+       用途: 客户端按 seed 自算地形块, 若页面长开期间服务端升级了引擎, 前端旧引擎算的
+       地形与后端新引擎下发的 settle/region 坐标口径会漂移 (极端表现「建筑落海」)。
+       前端把 meta 里这个值与「加载时记下的」比对即可静默回退服务端下发。
+       ⚠ 不含 mapgen-server.js (它是服务端适配层, 浏览器侧拿不到, 不该参与比对)。 */
+    private readonly string? _engineHash;
 
     /* tile/fieldGrid/region 热缓存 (不落 SQLite, 仅进程内) */
     private const int TileCacheCap = 1024;
@@ -86,6 +92,7 @@ public sealed class MapWorldService : IDisposable
     {
         _opt = opt;
         var jsDir = ZongmenPaths.ResolveEngineJsDir(opt, contentRoot);
+        _engineHash = ComputeEngineHash(jsDir);
         /* C1: 传淘汰回调 —— VM 被 LRU 淘汰时清掉「按 seed 前缀」的 roadVer 观测值,
            否则新 VM 的 roadVer 从 0 重新计数会与旧观测值冲突 (tile 缓存判新鲜失准)。 */
         _host = new JsEngineHost(jsDir, opt.MaxSeeds,
@@ -760,11 +767,46 @@ public sealed class MapWorldService : IDisposable
         }
         string json;
         using (var lease = World(seed)) json = lease.Vm.Call("metaJson");
+        json = InjectEngineHash(json);
         lock (_metaLock)
         {
             _metaCache ??= json;
         }
         return json;
+    }
+
+    /* S4: 把引擎指纹拼进 meta。metaJson 由 JS 的 JSON.stringify 产出, 必以 '}' 收尾 ——
+       直接把尾括号替换成 ,"engineHash":"…"} (注入失败就原样返回, 前端按「无字段」处理)。 */
+    private string InjectEngineHash(string json)
+    {
+        if (string.IsNullOrEmpty(_engineHash)) return json;
+        var t = json.TrimEnd();
+        if (t.Length < 2 || t[^1] != '}') return json;
+        return t[..^1] + ",\"engineHash\":\"" + _engineHash + "\"}";
+    }
+
+    /* S4: 引擎指纹 = SHA256(noise.js | mapgen-config.js | mapgen.js) 前 8 字节的十六进制。
+       进程内算一次 (引擎文件运行期不变)。任何缺失/IO 异常都返回 null ⇒ 自动退回「不握手」。 */
+    private static string? ComputeEngineHash(string jsDir)
+    {
+        try
+        {
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            using var ms = new MemoryStream();
+            foreach (var f in new[] { "noise.js", "mapgen-config.js", "mapgen.js" })
+            {
+                var p = Path.Combine(jsDir, f);
+                if (!File.Exists(p)) return null;
+                var b = File.ReadAllBytes(p);
+                ms.Write(b, 0, b.Length);
+            }
+            ms.Position = 0;
+            return Convert.ToHexString(sha.ComputeHash(ms).AsSpan(0, 8)).ToLowerInvariant();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public string StatsJson()

@@ -38,6 +38,9 @@
  *        (2026-09-15 十一版 R3-a, 用户: "小灵脉 高度偏低了") —— 底座判档是**严格** `e > 0.70`,
  *        而 LIFT_CORE[2] = 0.70 恰好压在边界 ⇒ 无下限时小灵脉底座恒 0 (只有峰体没有山脚,
  *        上屏总高仅大档的 28%)。本断言语义上要求"小档底座的可见高度 >= 1 uR"。
+ *    18. **镜像常量** levels[].coreElev 逐值 == 引擎 LIFT_CORE (2026-09-15 C 新增) ——
+ *        仅供 tipU 在"灵脉格海拔尚未到货"时当估计值 (旧行为落 terrainBaseMin ⇒ 偏矮 3.4 uR)。
+ *        它是镜像量, 漂移会让签位在那一段再次对不上, 故逐值钉死; 从属档取 LIFT_CORE[2]。
  *
  * 用法: node verify/check_vein_skin.mjs
  * ============================================================ */
@@ -227,6 +230,23 @@ if (Array.isArray(LC0) && LC0.length >= 3) {
 const LC = MG.CFG && MG.CFG.LIFT_CORE;
 check('引擎 LIFT_CORE 三档均 >= 0.70 (⇒ 灵脉格必在山地档以上, 底座不为 0)',
   Array.isArray(LC) && LC.length === 3 && LC.every((v) => v >= 0.70), JSON.stringify(LC));
+
+/* 17. **镜像常量** coreElev == 引擎 LIFT_CORE (2026-09-15 C 新增)
+   用途单一: tipU 在「本格海拔尚未到货」时用 coreElev 当估计值。它是**镜像**常量 ——
+   引擎改了前端不改, 签位会在"海拔未到货"那一小段再次对不上 (旧行为偏矮 3.4 uR)。
+   故逐值断言, 并在下方打印两列便于肉眼核对。 */
+if (Array.isArray(LC) && VS.levels) {
+  const ce = VS.levels.map((l) => l.coreElev);
+  check('vein-skin.js levels[].coreElev 逐值 == 引擎 LIFT_CORE[0..2] (镜像常量, 禁止漂移)',
+    ce.length >= 3 && LC.every((v, i) => Math.abs(ce[i] - v) < 1e-9),
+    `前端 [${ce.join(', ')}] / 引擎 [${LC.join(', ')}]`);
+  check('「从属」档 (level 3) coreElev == LIFT_CORE[2] (引擎无对应项 ⇒ 取保守下界)',
+    ce.length >= 4 && Math.abs(ce[3] - LC[2]) < 1e-9,
+    '从属=' + ce[3] + ' / LIFT_CORE[2]=' + LC[2]);
+  console.log('  coreElev 镜像表 (海拔未到货时的估计值): ' +
+    VS.levels.map((l) => l.key + ' ' + l.coreElev).join(' | ') +
+    '  ← 引擎 LIFT_CORE [' + LC.join(', ') + ']');
+}
 const mtnHs = (e) => (e > 0.84 ? 0.95 + 0.60 * Math.min(1, (e - 0.84) / 0.12)
                               : 0.55 + 0.75 * Math.min(1, (e - 0.70) / 0.14));
 if (Array.isArray(LC)) {

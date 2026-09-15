@@ -696,8 +696,13 @@
     var topW = S.topW == null ? 0.44 : S.topW;
     var N = Math.max(5, (S.seg | 0) || 9);
     var M = Math.max(3, (S.topSeg | 0) || 7);
+    /* ⚠ 肩高/顶台中拱的偏移量在 vein-skin.js 的 SHAPE (shoulderU/archU) —— 不是
+       这里的魔数: vein-skin 的 apexV() 要用它们反推「峰尖在方框里的位置」给灵脉签
+       定位 (2026-09-16)。写死在这里 ⇒ 改峰形时签位静默错开。 */
+    var shU = S.shoulderU == null ? 0.10 : S.shoulderU;
+    var arU = S.archU == null ? 0.11 : S.archU;
     var apY = baseY - h, xL = cx - w * 0.5, xR = cx + w * 0.5;
-    var shY = apY + h * 0.10;                        // 肩高 (顶台两端)
+    var shY = apY + h * shU;                         // 肩高 (顶台两端)
     var labX = cx - w * topW * 0.5, rabX = cx + w * topW * 0.5;
     var pts = [[xL, baseY]], i, t;
     for (i = 1; i <= N; i++) {                       // 左坡: 底 → 左肩
@@ -707,7 +712,7 @@
     }
     for (i = 1; i < M; i++) {                        // 顶台: 左肩 → 右肩
       t = i / M;
-      pts.push([labX + (rabX - labX) * t, shY - Math.sin(Math.PI * t) * h * 0.110]);
+      pts.push([labX + (rabX - labX) * t, shY - Math.sin(Math.PI * t) * h * arU]);
     }
     for (i = N; i >= 0; i--) {                       // 右坡: 右肩 → 底
       t = i / N;

@@ -37,6 +37,44 @@ function check(name, cond, detail = '') {
 }
 function near(a, b, tol) { return Math.abs(a - b) <= tol; }
 
+/* ---------- 源码级守卫公用设施 (checkCalcLocal / checkPlaqueAlign 共用) ----------
+   词法级去注释 (含**多行块注释**与字符串字面量感知)。
+   ⚠ 不能用「行首是 * 或 双斜杠 就丢」的土办法 —— minimap-vein.js 里那段引擎说明
+     块注释的续行**不以 * 开头**, 注释正文会被当成真实调用 (实测把其中
+     `MapGen.init()` 的解释文字误判成第二个 init 点)。
+   ⚠ 也不该直接砍行尾双斜杠注释: 'http://x' 这类字符串会受伤
+     (这里靠「双斜杠前必须是空白」+ 字符串状态机双重规避)。
+   ⚠ 块注释里**绝不能出现连续的 星号+斜杠** (那会提前闭合注释)。本次真实事故:
+     vein-skin.js 的注释里写出「mtn 星号 / snow 星号」这种简写, 导致 node --check 报
+     "Invalid regular expression flags" —— 报错行号在注释**之后**, 极难定位。 */
+function stripComments(src) {
+  let out = '', i = 0, st = null;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i], d = src[i + 1];
+    if (st) {
+      out += c;
+      if (c === '\\') { out += (d || ''); i += 2; continue; }
+      if (c === st) st = null;
+      i++; continue;
+    }
+    if (c === "'" || c === '"' || c === '`') { st = c; out += c; i++; continue; }
+    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') {
+      i += 2;
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
+      i += 2; continue;
+    }
+    out += c; i++;
+  }
+  return out;
+}
+/* web/js/*.js 去注释源码 (模块级只读一次) */
+const JSDIR = path.join(ROOT, 'web', 'js');
+const JSFILES = fs.readdirSync(JSDIR).filter((f) => f.endsWith('.js'));
+const JSSRC = {};
+for (const f of JSFILES) JSSRC[f] = stripComments(fs.readFileSync(path.join(JSDIR, f), 'utf8'));
+
 async function fetchMeta() {
   const m = await MC.fetchMeta();
   check('meta 几何常量', m.hexR === 8 && m.chunkS === 21 && near(m.hexW, Math.sqrt(3) * 8, 1e-9));
@@ -157,11 +195,15 @@ async function checkMinimap() {
     /comms:\s*commCells/.test(mainJs) && /settles:\s*settleCells/.test(mainJs) &&
     /roads:\s*regionCells/.test(mainJs));
 
-  /* 模块自足性: 三层 + 三态入口 + 探针都必须存在 (换模块时这些是接口契约) */
-  const need = ['MiniMapVein', 'setMaximized', 'setHidden', 'probe', 'requestScript']
+  /* 模块自足性: 三层 + 三态入口 + 探针都必须存在 (换模块时这些是接口契约)。
+     ⚠ S1 (地形块前端自算): 引擎加载已从本模块收敛到全站单实例 EngineLocal
+       ⇒ 这里断言的是「复用 EngineLocal」而非旧的「自己 requestScript」。 */
+  const need = ['MiniMapVein', 'setMaximized', 'setHidden', 'probe', 'EngineLocal']
     .filter((k) => mm.indexOf(k) < 0);
   check('minimap-vein.js 接口齐备 (init/setMaximized/setHidden/probe)',
     need.length === 0, '缺少 ' + need.join(','));
+  check('minimap-vein.js 不再自行 eval/init 引擎 (双实例会互清 14 张缓存)',
+    !/(0,\s*eval)/.test(mm) && !/engine\.init\(/.test(mm), '仍残留自建引擎的痕迹');
 
   const html = read('web/index.html');
   check('index.html 挂载点齐备 + 全屏浮层与面板同级 (不被 .panel clip-path 裁)',
@@ -438,8 +480,14 @@ function checkDecodedFieldAccess() {
     Object.entries(shapes).map(([k, v]) => `${k}=${v ? v.size : 'null'}`).join(' '));
 
   /* st._anc = 聚落匾额水平锚点的**客户端 memo** (main.js 在首次绘制时按地块算好并缓存,
-     见 `if (!st._anc) { ... st._anc = {x,y} }`), 与 cm.elementRGB 同类: 非服务端下发字段。 */
+     见 `if (!st._anc) { ... st._anc = {x,y} }`), 与 cm.elementRGB 同类: 非服务端下发字段。
+     st._fac / st._facV = R6b (B)「归属势力」的缓存与版本号 (main.js factionOf), 同类。 */
   const whitelist = { cm: new Set(['elementRGB']), resp: new Set(), st: new Set(['_anc']), lr: new Set() };
+  /* ⚠ `_` 前缀 = 本项目的「客户端本地 memo」约定: 线路字段 (protobuf) 一律不带下划线前缀,
+     故 `_xxx` 只可能是前端自己挂上去的缓存 ⇒ 按前缀整体放行, 不必每加一个缓存就改白名单
+     (这类误报已发生两次: _anc, 然后 _fac/_facV)。带下划线的**拼写错**不会被漏掉 ——
+     线路字段没有下划线, 所以 `st._type` 这种错法本来就不在审计范围内。 */
+  const isLocalMemo = (prop) => prop.charCodeAt(0) === 95;      // 95 = '_'
   const bad = [];
   let used = 0;
   for (const f of ['main.js', 'mapclient.js']) {
@@ -447,12 +495,180 @@ function checkDecodedFieldAccess() {
     for (const mm of src.matchAll(/\b(resp|cm|st|lr)\.([a-zA-Z_$][\w$]*)/g)) {
       const [, obj, prop] = mm;
       used++;
-      if (!shapes[obj] || shapes[obj].has(prop) || whitelist[obj].has(prop)) continue;
+      if (!shapes[obj] || shapes[obj].has(prop) || whitelist[obj].has(prop) || isLocalMemo(prop)) continue;
       bad.push(`${f}:${obj}.${prop}`);
     }
   }
   check(`前端对解码结构的 ${used} 处属性读取全部有对应字段`,
     bad.length === 0, [...new Set(bad)].sort().join(' '));
+}
+
+/* ============================================================
+ * S1~S3 源码守卫: 「地形块前端自算」的结构不变量
+ * ------------------------------------------------------------
+ * 这些是**结构**约束 (谁被允许 eval / 谁被允许 init / 掩码运算有几处),
+ * 靠跑用例是测不出来的 —— 只能扫源码。全部基于「去注释后的代码行」,
+ * 否则文档注释里的示例代码会被误当成真实调用 (engine-local.js 的注释里
+ * 就写着 `MapGen.init()` 作解释)。
+ * 行为级证据在 verify/check_calc_local.mjs (真浏览器 3 档); 两者互补。
+ * ============================================================ */
+function checkCalcLocal() {
+  const files = JSFILES;
+  const code = JSSRC;
+  const countIn = (re) => {
+    let n = 0; const hit = [];
+    for (const f of files) {
+      const m = code[f].match(new RegExp(re.source, 'g'));
+      if (m) { n += m.length; hit.push(f + '×' + m.length); }
+    }
+    return { n, where: hit.join(' ') };
+  };
+
+  /* ① 掩码运算全站唯一 (防有人另起炉灶写第二个「去 CHUNK 位」的地方) */
+  {
+    const r = countIn(/PB\.MASK\.ALL\s*&\s*~PB\.MASK\.CHUNK/);
+    check('「去掉 CHUNK 位」的掩码运算全站仅 1 处 (' + (r.where || '无') + ')',
+      r.n === 1 && /main\.js/.test(r.where), r.where);
+  }
+  /* ② 唯一 eval 点: 引擎脚本体只允许在 engine-local.js 里 eval。
+        ⚠ 别把 mapclient.js 算进来 —— 它是**传输层提供方** (requestScript 定义在此),
+          允许它取脚本; 不允许的是「谁 eval / 谁直接摸 window.MapGen」。 */
+  {
+    const r = countIn(/\(0,\s*eval\)/);
+    check('间接 eval 全站仅 1 处且在 engine-local.js (' + (r.where || '无') + ')',
+      r.n === 1 && /engine-local\.js/.test(r.where), r.where);
+    const bad = files.filter((f) => f !== 'engine-local.js' &&
+      (/\(0,\s*eval\)/.test(code[f]) ||
+       /\b(?:window|g|globalThis)\s*\.\s*MapGen\b/.test(code[f])));
+    check('其它前端文件不再自 eval / 不直接取 window.MapGen (只经 EngineLocal)',
+      bad.length === 0, bad.join(' '));
+  }
+  /* ③ 唯一 init(seed) 点: MapGen.init 会清空引擎全部缓存, 双 init ⇒ 4× 冷算 */
+  {
+    const INIT_RE = /(^|[^\w.$])(MG|MapGen|engine)\s*\.\s*init\s*\(/;
+    const r = countIn(INIT_RE);
+    check('MapGen 的 init(seed) 全站仅 1 处且在 engine-local.js (' + (r.where || '无') + ')',
+      r.n === 1 && /engine-local\.js/.test(r.where), r.where);
+    const mm = code['minimap-vein.js'];
+    check('minimap-vein.js 已不再自行 eval / 不再自行 init(seed)',
+      !/\(0,\s*eval\)/.test(mm) && !INIT_RE.test(mm) && /EngineLocal/.test(mm));
+  }
+  /* ④ 加载顺序: engine-local.js 必须先于两个消费者 (否则取不到 window.EngineLocal,
+        表现为小地图地形层永远「未探测」+ 主视图退回服务端下发) */
+  {
+    const html = fs.readFileSync(path.join(ROOT, 'web', 'index.html'), 'utf8');
+    const at = (s) => html.indexOf(s);
+    const iE = at('js/engine-local.js'), iM = at('js/minimap-vein.js'), iMain = at('js/main.js');
+    check('index.html: engine-local.js 先于 minimap-vein.js 与 main.js 引入',
+      iE > 0 && iE < iM && iE < iMain, `engine=${iE} mm=${iM} main=${iMain}`);
+  }
+  /* ⑤ 请求掩码形参: MC.block 必须能按块指定 mask (S3), 且缺省回落到全量 (老调用点不炸) */
+  {
+    const mc = code['mapclient.js'];
+    check('mapclient: block() 支持 mask 形参并缺省回落全量',
+      /function\s+block\s*\([^)]*mask/.test(mc) && /mask\s*==\s*null\s*\?\s*PB\.MASK\.ALL/.test(mc));
+    check('main.js: 请求块时按档位传掩码 (第 4 实参)',
+      /MC\.block\(\s*gen\s*,\s*job\.ca\s*,\s*job\.cb\s*,\s*mask\s*\)/.test(code['main.js']));
+  }
+  /* ⑥ 首请求闸门: 引擎定案前不发块请求 (否则首帧那 concChunk 个请求会带 mask=31 出去,
+        服务端白算白发整块地形 —— 实测 chunkPkts=4) */
+  {
+    const m = code['main.js'];
+    check('main.js: 首请求闸门存在 (CALC.settled 未定前 pumpChunks 直接返回)',
+      /if\s*\(!CALC\.settled\)\s*return;/.test(m) && /settled\s*:\s*QSC\.get\('calc'\)\s*===\s*'server'/.test(m));
+    check('main.js: 闸门有看门狗兜底 (setTimeout 放行, 不会永久挂起首屏)',
+      /setTimeout\(\s*settle\s*,/.test(m));
+  }
+  /* ⑦ S4 握手接线: meta 指纹必须被读入并参与漂移判定 */
+  {
+    const m = code['main.js'];
+    check('main.js: 读入 meta.engineHash 并做漂移判定 (S4)',
+      /noteEngineHash\(MC\.engineHash\(\)\)/.test(m) && /verifyHash\(/.test(m));
+    check('mapclient: 暴露 engineHash() 读取口', /engineHash:\s*engineHash/.test(code['mapclient.js']));
+  }
+}
+
+/* ============================================================
+ * 匾额/名牌落点对齐 · 源码守卫 (C-a / C-c / D, 2026-09-15)
+ * ------------------------------------------------------------
+ * 语义断言 (落点是否真落在建筑格 / 签位是否等于峰尖 / 文案格式) 在
+ * verify/check_plaque_align.mjs —— 那里裸 eval vein-skin.js + bldg_ink.js 后逐值对拍。
+ * 本函数只查**接线**: 三份前端文件是否还残留"第二份公式 / 旧拼接 / 旧档位数组"。
+ * 分工理由: 语义改了接线没改 = 静默走老路径 (用户看到的就是"又对不上了"),
+ *   而接线断了语义再多断言也跑不到。两边缺一不可。
+ * ============================================================ */
+function checkPlaqueAlign() {
+  const code = JSSRC;
+  const m = code['main.js'] || '', r = code['renderer.js'] || '', v = code['vein-skin.js'] || '';
+  const mv = code['minimap-vein.js'] || '';
+
+  /* ① 灵脉签位真源唯一: main.js veinTopU 必须转调 VS.tipU */
+  {
+    const body = (m.match(/function veinTopU\s*\([^)]*\)\s*\{[\s\S]*?\n  \}/) || [''])[0];
+    check('main.js veinTopU 转调 VS.tipU (不自写第二份 H 公式)',
+      /VS\.tipU/.test(body), body ? '未调 VS.tipU' : '函数体未匹配');
+    check('main.js veinTopU 体内无内联 H 公式残留 (3.3+1.2 / hScale / sizeScale)',
+      !!body && !/3\.3\s*\+\s*1\.2/.test(body) && !/hScale/.test(body) && !/sizeScale/.test(body));
+  }
+
+  /* ② 海报落点真源唯一: bldgAnchor 走 BI.anchorOf, 且无建筑不缓存 */
+  {
+    const body = (m.match(/function bldgAnchor\s*\([^)]*\)\s*\{[\s\S]*?\n    \}/) || [''])[0];
+    check('main.js bldgAnchor 走 BI.anchorOf (不再自拼"中心格 x + p25 y"合成点)',
+      /BI\.anchorOf/.test(body), body ? '未调 BI.anchorOf' : '函数体未匹配');
+    const ls = body.split('\n');
+    const gi = ls.findIndex((l) => /if\s*\(\s*!an\s*\)/.test(l));
+    const si = ls.findIndex((l) => /_anc\s*=\s*an/.test(l));
+    check('main.js bldgAnchor 无建筑时不落缓存 (守卫在赋值之前)',
+      gi >= 0 && si > gi && !/_anc/.test(gi >= 0 ? ls[gi] : ''));
+    const b = code['bldg_ink.js'] || '';
+    check('bldg_ink.js 暴露 anchorOf 且带 real 字段 (真格 / 旧包围盒两路)',
+      /anchorOf\s*:\s*anchorOf/.test(b) && /real\s*:\s*true/.test(b) && /real\s*:\s*false/.test(b),
+      'bldg_ink 缺 anchorOf 导出或 real 两路');
+  }
+
+  /* ③ 引线终点 == 落点 (点不动、只抬签) */
+  {
+    const body = (m.match(/function drawNameBanner\s*\([^)]*\)\s*\{[\s\S]*?\n  \}/) || [''])[0];
+    check('drawNameBanner: 引线 moveTo(x,bottomY)→lineTo(x,anchorY) 且圆点在 (x,anchorY)',
+      /moveTo\(\s*x\s*,\s*bottomY\s*\)/.test(body) && /lineTo\(\s*x\s*,\s*anchorY\s*\)/.test(body) &&
+      /arc\(\s*x\s*,\s*anchorY\s*,/.test(body));
+    check('drawNameBanner: bottomY = anchorY - lead - gap (抬签不抬点)',
+      /bottomY\s*=\s*anchorY\s*-\s*lead\s*-\s*\(\s*opt\.gap\s*\|\|\s*0\s*\)/.test(body));
+  }
+
+  /* ④ 文案真源唯一: 三处消费点都走 VS.label, 无 '灵脉·' 旧拼接, 无手写档位数组 */
+  {
+    const n = [m, r, v, mv].filter((s) => /['"]灵脉\u00B7['"]|['"]灵脉·['"]/.test(s)).length;
+    check('四份前端文件均无 `\'灵脉·\'` 旧拼接 (文案真源在 VS.label)', n === 0,
+      n + ' 处');
+    const arr = [m, r, v, mv].filter((s) => /VEIN_LEVEL\s*=\s*\[/.test(s)).length;
+    check('四份前端文件均无手写档位名数组 `VEIN_LEVEL = [`', arr === 0, arr + ' 处');
+    check('vein-skin.js 暴露 label / tipU (文案 + 签位两个真源出口)',
+      /label:\s*veinLabel/.test(v) && /tipU:\s*tipU/.test(v));
+    check('main.js 灵脉名牌走 veinLabel() 而非内联拼接',
+      /veinLabels\.push\([\s\S]{0,220}veinLabel\(/.test(m));
+  }
+
+  /* ⑤ 镜常量 coreElev == 引擎 LIFT_CORE 的**接线**检查在此不做 (引擎不在本脚本内);
+        这里只钉"tipU 用它兜海拔"与"LEVELS 里逐档都有" */
+  {
+    check('vein-skin.js 每档都有 coreElev 且 tipU 在海拔未到货时使用它',
+      (v.match(/coreElev\s*:/g) || []).length >= 4 && /lv\.coreElev/.test(v));
+    check('vein-skin.js levelInfo 越界返 null (不再静默归一化成「大」)',
+      /return \(n >= 0 && n < LEVELS\.length\) \? LEVELS\[n\] : null/.test(v));
+  }
+
+  /* ⑥ renderer.js 的 GLSL 不许硬编码判档阈值 */
+  {
+    check('renderer.js GLSL 无硬编码判档阈值 (走 E_MTN/S_MTN/E_SNOW/S_SNOW)',
+      !/iElev\s*-\s*0\.70/.test(r) && !/iElev\s*-\s*0\.84/.test(r) &&
+      !/ve\s*-\s*0\.70/.test(r) && !/ve\s*-\s*0\.84/.test(r) &&
+      /E_SNOW/.test(r) && /S_MTN/.test(r));
+    check('renderer.js 大世界山/雪峰/底座共用 VEIN_SHAPE 同一组常量',
+      /MTN_LO\s*=\s*VEIN_SHAPE\.mtnLo/.test(r) && /SNOW_HI\s*=\s*VEIN_SHAPE\.snowHi/.test(r) &&
+      /E_MTN\s*=\s*VEIN_SHAPE\.elevMtn/.test(r));
+  }
 }
 
 console.log('== 元信息 ==');
@@ -485,6 +701,12 @@ await checkMinimap();
 
 console.log('\n== 色板契约 ==');
 await checkPalettes();
+
+console.log('\n== 地形前端自算源码守卫 (S1~S4) ==');
+checkCalcLocal();
+
+console.log('\n== 匾额/名牌落点对齐源码守卫 (C-a / C-c / D) ==');
+checkPlaqueAlign();
 
 console.log('\n== 解码字段契约 ==');
 checkDecodedFieldAccess();
