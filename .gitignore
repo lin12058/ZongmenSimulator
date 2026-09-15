@@ -9,12 +9,26 @@ db/*.sqlite
 db/*.sqlite-shm
 db/*.sqlite-wal
 
-# verify 测试截图/临时 HTML/日志（保留 *.mjs 脚本）
+# verify 测试截图/临时 HTML/日志
 verify/*.png
 verify/*.html
 verify/*.log
 verify/live_*.png
 verify/.r13_*.bin
+
+# verify 里 `_` 前缀 = 一次性产物（临时脚本 / 证据图 / 独立实例构建目录 _vmsrv）
+#   ⚠ 被跟踪的 verify/_scratch_diag.mjs 不受影响（已入库的文件永远不被忽略）；
+#     verify/_vv_pick.mjs / _vv_crop.mjs 虽未入库，却被待办 md 引用为**常驻工具** ⇒ 别按前缀删。
+#   ⚠ 以后写**正式**校验脚本请别用 `_` 前缀（会被本规则忽略，容易漏提交）。
+verify/_*.mjs
+verify/_*.md
+verify/_*.json
+verify/_*.txt
+verify/_*/
+# 前端根下的一次性探针页（九版残留 web/_sel9*.{html,js}）
+web/_*
+# 手工备份的数据库副本（2026-09-14 留下的），不参与版本管理
+db/*.bak-*
 
 # 常用编辑器 / 系统临时文件
 *.swp

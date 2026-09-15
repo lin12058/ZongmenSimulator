@@ -13,6 +13,10 @@
  *                   全部作废 (实测复用率 36%~11%)。
  *                 ⚠ 只读 biome/e, 绝不读 onRoad —— 道路语义依赖引擎
  *                   roadCache 冷热 (mapgen.js:222), 走 L2。
+ *                 ⚠ 块色走**金字塔多数表决** (U4): 显示块的群系不取该块角点的单个样本
+ *                   (混合地貌区会出椒盐噪点), 而是 4 个 (m/2) 子格取众数 ⇒ 块色 = 块内
+ *                   多数地貌。实测与「块内 mD×mD 原生格真值多数」一致率 70~93% → 81~96%
+ *                   (混合地貌区提升最大, +11pp); 代价 = 原始样本 ×3.5。
  *   L2 世界层 —— 全部来自 WS: 灵脉 (comm.veins) / 聚落 (settle) /
  *               道路 (region) / 区域名。世界是动态的, 前端不自行生成。
  *   L3 视野层 —— 默认档跟随主相机; 全屏档独立相机 (可拖动/缩放)。
@@ -53,6 +57,7 @@
   var REDRAW_MS = 110;           // 非拖动时的重绘节流
   var SAMPLE_CELLS_MAX = 24000;  // 单视图抽样格上限 (决定抽样层级 m; 越小越省, 见 levelFor)
   var LEVEL_MAX = 5;             // 抽样层级 m = 2^0..2^LEVEL_MAX (1..32 世界格/样本)
+  var AGG_DIV = 2;               // U4: 一个显示块聚合 AGG_DIV×AGG_DIV 个原始子格样本 (4 票多数表决)
   var PADDING = 0.20;            // 采样范围外扩比例 (平移前先备好边缘, 拖动才不露底)
   var PENDING_CAP = 400000;      // 待采样列表上限 (世界对齐 ⇒ 跨视图复用, 正常远达不到)
   var TERRAIN_CAP = 400000;      // 地形缓存上限 (超出按插入序淘汰最旧 1/4, 不清空整表)
@@ -87,7 +92,9 @@
   var pendingIdx = 0;               // 已消费游标 (替代 shift(): 免 O(n) 搬移 + 免静默丢弃)
   var pendingSet = new Set();       // 待采样去重
   var pendingEpoch = null;          // 生成 pending 时的视图签名 (判是否需要重建)
-  var sampleM = 1;                  // 当前抽样层级 = 2^k 世界格/样本
+  var sampleM = 1;                  // 显示块层级 mD = 2^k 世界格/块 (决定抽样层级与块大小)
+  var rawM = 1;                     // 原始样本层级 = mD/AGG_DIV (每块 AGG_DIV² 个样本; mD<AGG_DIV 时 = 1)
+  var aggCache = new Map();         // 聚合块缓存 "mD:q,r" -> {b,n} | null (子块缺样本时也缓存, 由 aggInvalidate 失效)
   var snap = null;                  // 最近一次快照
   var lastRev = -1, lastSeed = null;
   var viewFull = { cx: 0, cy: 0, wpp: FULL_WPP_INIT };
@@ -103,9 +110,11 @@
   var lastDraw = 0, dragState = null, cardDirty = true;
   var hover = null;                 // {x,y,info}
   var terrainBmp = null, terrainBc = null;   // 离屏地形位图
+  var bmpBiome = null;                       // 上一次位图的逐块群系 (椒盐诊断计数用, 不参与绘制)
   var biomeRGB = [], veinRGB = null;
   /* 诊断计数 (只读; 由 probe() 暴露, 供实机取数定位收敛问题) */
-  var mmStat = { bmpW: 0, bmpH: 0, step: 0, blocks: 0, miss: 0, draws: 0, enqDrop: 0, m: 1, pending: 0, pendingLeft: 0 };
+  var mmStat = { bmpW: 0, bmpH: 0, step: 0, blocks: 0, miss: 0, draws: 0, enqDrop: 0, m: 1, rawM: 1,
+                 pending: 0, pendingLeft: 0, agg: 0, iso: 0, isoBase: 0 };
 
   /* ---------- 小工具 ---------- */
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
@@ -179,8 +188,10 @@
   /* 地形层全量重置 (换 seed / 世界重铸) */
   function resetTerrain() {
     terrainCache.clear();
+    aggCache.clear();
     pending.length = 0; pendingIdx = 0;
-    pendingSet.clear(); pendingEpoch = null; sampleM = 1;
+    pendingSet.clear(); pendingEpoch = null;
+    sampleM = 1; rawM = 1;
   }
 
   function syncEngineSeed(seed) {
@@ -229,7 +240,7 @@
         var k = q + ',' + r;
         if (terrainCache.has(k) || pendingSet.has(k)) continue;    // 跨视图/跨层级直接复用
         var dx = hw * (q + r / 2) - v.cx, dy = hr * r - v.cy;
-        out.push([q, r, dx * dx + dy * dy]);
+        out.push([q, r, dx * dx + dy * dy, m]);      // 第 4 位 = 该样本所属层级 (供聚合失效用)
       }
     }
     out.sort(function (a, b) { return a[2] - b[2]; });   // 近处先算 ⇒ 视野中心先清晰
@@ -237,38 +248,105 @@
     return out;
   }
 
+  /* 显示块的原始样本层级: 每块 AGG_DIV² 个子格各要一个样本 (mD<AGG_DIV ⇒ 与块同层, 无表决) */
+  function rawLevelOf(mD) { return mD >= AGG_DIV ? Math.max(1, Math.floor(mD / AGG_DIV)) : 1; }
+
+  /* ---------- U4: 金字塔多数表决 (块色 = 块内多数地貌) ----------
+     病征: 旧口径的块色 = 该块**角点**的单点样本 ⇒ m>=4 时一个 m×m 区块只有 1 个格点
+     参与决策, 混合地貌区的相邻块各取各的角点 ⇒ 椒盐噪点。
+     口径: cell(mD) = 4 个 cell(mD/2) 子块的**众数** (票 = 子块代表的样本数 = 面积)。
+       子块就是原始样本 (rawM = mD/AGG_DIV), 即每块 4 个原始样本 ⇒ 采样量 ×3.5 (实测)。
+     实测 (seed 42, 与「块内 mD×mD 原生格真值多数」的一致率):
+       角点单点 70.1%~93.4% → 多数表决 81.1%~95.8% (混合地貌的中心区 +11pp)。
+     ⚠ 只做**一层**聚合 (子块即原始样本): 递归到 mD/4 会把采样量抬到 ×16。
+     ⚠ 缺样本的子块**不投票** (绝不当作群系 0), 全缺 ⇒ 返回 null 由 biomeAt 回退到角点/粗层。
+     ⚠ 平票 (2:2) 取先出现的子块 (序 [左上, 右上, 左下, 右下]) ⇒ 结果确定, 无随机。 */
+  var _vb = new Int32Array(8), _vn = new Int32Array(8), _vi = new Int32Array(8);
+
+  function aggOf(aq, ar, k) {
+    if (AGG_DIV < 2 || k < AGG_DIV) return null;
+    var key = k + ':' + aq + ',' + ar;
+    var hit = aggCache.get(key);
+    if (hit !== undefined) return hit;
+    var ck = Math.floor(k / AGG_DIV), out = null;
+    if (ck === rawM) {                     // 子块层级 == 当前原始层 ⇒ 才有样本可表决
+      var cnt = 0, i, j, b, s, ord;
+      for (j = 0; j < AGG_DIV; j++) {
+        for (i = 0; i < AGG_DIV; i++) {
+          b = terrainCache.get((aq + i * ck) + ',' + (ar + j * ck));
+          if (b == null || b < 0) continue;
+          ord = j * AGG_DIV + i;
+          for (s = 0; s < cnt && _vb[s] !== b; s++) { /* 线性找票 */ }
+          if (s === cnt) {
+            if (cnt >= _vb.length) continue;   // 票位上限 (AGG_DIV<=2 时恒不触发)
+            _vb[cnt] = b; _vn[cnt] = 1; _vi[cnt] = ord; cnt++;
+          } else _vn[s]++;
+        }
+      }
+      var bi = -1;
+      for (s = 0; s < cnt; s++) {
+        if (bi < 0 || _vn[s] > _vn[bi] || (_vn[s] === _vn[bi] && _vi[s] < _vi[bi])) bi = s;
+      }
+      if (bi >= 0) out = { b: _vb[bi], n: _vn[bi] };
+    }
+    aggCache.set(key, out);                // null 也缓存; 新样本一到就由 aggInvalidate 删掉
+    return out;
+  }
+
+  /* 原始样本落盘 ⇒ 含它的显示块聚合失效 (只需重算那一个块) */
+  function aggInvalidate(q, r) {
+    if (sampleM < AGG_DIV) return;
+    var aq = Math.floor(q / sampleM) * sampleM, ar = Math.floor(r / sampleM) * sampleM;
+    aggCache.delete(sampleM + ':' + aq + ',' + ar);
+  }
+
   /* 重建待采样列表: 先铺「粗层」把整个视野盖住 (几十格, 一帧算完) ⇒ 首帧就有粗略
-     地脉; 再逐层细化到 m。biomeAt 的层级回退链正好用得上粗层 ⇒ 永远不成片露底。 */
+     地脉; 再逐层细化到「原始样本层」rawM。biomeAt 的层级回退链正好用得上粗层
+     ⇒ 永远不成片露底。U4 起细层是 rawM = mD/AGG_DIV (每块 4 个子格样本)。 */
   function rebuildPending(v, W, H) {
-    var m = levelFor(v, W, H);
+    var m = levelFor(v, W, H);               // 显示块层级 mD (决定块大小与聚合层级)
     sampleM = m;
+    rawM = rawLevelOf(m);
+    aggCache.clear();                        // 换层 ⇒ 旧聚合键/口径全失效
     pendingSet.clear();
     var lv = [], x = Math.min(1 << LEVEL_MAX, m * 8);
-    for (; x > m; x >>= 1) lv.push(x);
-    lv.push(m);
+    for (; x > rawM; x >>= 1) lv.push(x);
+    lv.push(rawM);
     var out = [];
     for (var i = 0; i < lv.length; i++) out = out.concat(enumLevel(v, W, H, lv[i]));
     pending = out; pendingIdx = 0;
-    mmStat.m = m; mmStat.pending = out.length;
+    mmStat.m = m; mmStat.rawM = rawM; mmStat.pending = out.length;
   }
 
-  /* 显示侧补料: 画到没有数据的块 ⇒ 把「当前层级的对齐格」追加进待采样 (拖动新露出的边缘) */
+  /* 显示侧补料: 画到没有数据的块 ⇒ 把「原始层的对齐格」追加进待采样 (拖动新露出的边缘) */
   function pendingAdd(q, r) {
-    var m = sampleM;
+    var m = rawM;
     var aq = m > 1 ? Math.floor(q / m) * m : q;
     var ar = m > 1 ? Math.floor(r / m) * m : r;
     var k = aq + ',' + ar;
     if (terrainCache.has(k) || pendingSet.has(k)) return;
     if (pending.length >= PENDING_CAP) { mmStat.enqDrop++; return; }
     pendingSet.add(k);
-    pending.push([aq, ar, 0]);
+    pending.push([aq, ar, 0, m]);
     mmStat.pending = pending.length;
   }
 
-  /* 取某格的群系: 先精确格, 再沿层级回退链找「已算过的对齐格」(粗层引导先铺满 ⇒ 首帧即有) */
+  /* 取某格的群系: ① 块级多数表决 (U4) → ② 块角点原始样本 → ③ 沿层级回退链找已算过的
+     对齐格 (粗层引导先铺满 ⇒ 首帧即有)。
+     ⚠ 块 = 网格的一个 mD×mD 区域, 同一块内的所有像素必须同色 ⇒ mD>=AGG_DIV 时不再走
+       「精确格」快路径 (那会在块内混入角点色, 破坏块一致性)。 */
   function biomeAt(q, r) {
-    var b = terrainCache.get(q + ',' + r);
-    if (b != null) return b;
+    var b;
+    if (sampleM < AGG_DIV) {
+      b = terrainCache.get(q + ',' + r);
+      if (b != null) return b;
+    } else {
+      var aq = Math.floor(q / sampleM) * sampleM, ar = Math.floor(r / sampleM) * sampleM;
+      var a = aggOf(aq, ar, sampleM);
+      if (a != null) return a.b;
+      b = terrainCache.get(aq + ',' + ar);
+      if (b != null) return b;
+    }
     var top = Math.min(512, sampleM * 8);
     for (var m = sampleM; m <= top; m *= 2) {
       if (m < 2) continue;
@@ -294,6 +372,7 @@
       t = null;
       try { t = engine.fields(q, r); } catch (e) { t = null; }
       terrainCache.set(k, t && typeof t.biome === 'number' ? t.biome : -1);
+      aggInvalidate(q, r);              // U4: 新样本 ⇒ 所属显示块的聚合失效 (只删一个键)
       n++;
       if ((n & 63) === 0 && performance.now() - t0 >= budget) break;
     }
@@ -346,14 +425,16 @@
       terrainBmp.width = bw; terrainBmp.height = bh;
     }
     var img = terrainBc.createImageData(bw, bh), d = img.data;
-    var i, px, py, wx, wy, t, b, rgb, o, miss = 0;
+    var i, px, py, wx, wy, t, b, rgb, o, miss = 0, bb;
+    if (!bmpBiome || bmpBiome.length < bw * bh) bmpBiome = new Int16Array(bw * bh);
     for (py = 0; py < bh; py++) {
       wy = v.cy + ((py * step + step / 2) - H / 2) * v.wpp;
       for (px = 0; px < bw; px++) {
         wx = v.cx + ((px * step + step / 2) - W / 2) * v.wpp;
         t = pxToTile(wx, wy);
-        b = biomeAt(t.q, t.r);           // 精确格 → 当前/更粗层级的对齐格
+        b = biomeAt(t.q, t.r);           // 块级多数表决 (U4) → 块角点原始样本 → 更粗层级的对齐格
         o = (py * bw + px) * 4;
+        bmpBiome[py * bw + px] = bb = (b == null) ? -9 : b;   // -9 = 尚无数据 (不计入椒盐诊断)
         if (b == null) {                 // 尚无数据 (刚暴露的边缘) → 补料 + 未探测斜纹
           miss++;
           pendingAdd(t.q, t.r);
@@ -369,8 +450,23 @@
       }
     }
     terrainBc.putImageData(img, 0, 0);
+    /* 椒盐诊断 (U4 验收口径, 只读计数): 四邻群系已知、且自身与四邻全不同的块 = 孤立噪点块。
+       画面就是这张位图放大 step 倍 ⇒ 位图上的孤立块 = 屏幕上的孤立色块。 */
+    var iso = 0, base = 0, ax, ay, k0;
+    for (ay = 1; ay < bh - 1; ay++) {
+      for (ax = 1; ax < bw - 1; ax++) {
+        k0 = ay * bw + ax; b = bmpBiome[k0];
+        if (b < 0) continue;
+        if (bmpBiome[k0 - 1] < 0 || bmpBiome[k0 + 1] < 0 ||
+            bmpBiome[k0 - bw] < 0 || bmpBiome[k0 + bw] < 0) continue;
+        base++;
+        if (bmpBiome[k0 - 1] !== b && bmpBiome[k0 + 1] !== b &&
+            bmpBiome[k0 - bw] !== b && bmpBiome[k0 + bw] !== b) iso++;
+      }
+    }
     mmStat.bmpW = bw; mmStat.bmpH = bh; mmStat.step = step;
     mmStat.blocks = bw * bh; mmStat.miss = miss;
+    mmStat.iso = iso; mmStat.isoBase = base; mmStat.agg = aggCache.size;
     return { bmp: terrainBmp, step: step };
   }
 
@@ -623,7 +719,8 @@
     }
     if (best) {
       var LV = ['大', '中', '小', '从属'];
-      out.push((best.name || '灵脉') + '（' + (LV[best.level] || '小') + '灵脉·' + bestD + '格）');
+      /* 2026-09-15: 去括号, 等级用全角间隔号 (与大地图匾额同款) */
+      out.push((best.name || '灵脉') + '灵脉·' + (LV[best.level] || '小') + ' · ' + bestD + '格');
     }
     var st = null;
     if (snap.settles) {
@@ -946,7 +1043,7 @@
         hidden: hidden, maximized: maximized, running: running,
         engineReady: engineReady, engineSeed: engineSeed,
         terrainCached: terrainCache.size, queueLen: pending.length - pendingIdx,
-        pendingLen: pending.length, sampleM: sampleM,
+        pendingLen: pending.length, sampleM: sampleM, rawM: rawM, agg: aggCache.size,
         rev: lastRev, wpp: maximized ? viewFull.wpp : panelWppNow(),
         /* 面板档倍率 (R13): baseWpp 是持久化的「与大地图的大小比例」载体;
            scaleRatio = 小图/大图 的世界长度比 = 1/(baseWpp × DEFAULT_ZOOM), 恒不随 zoom 变。 */
@@ -958,6 +1055,9 @@
         savedRaw: saved,
         bmpW: mmStat.bmpW, bmpH: mmStat.bmpH, step: mmStat.step,
         blocks: mmStat.blocks, miss: mmStat.miss, draws: mmStat.draws,
+        /* U4: 椒盐量 —— 四邻已知且与四邻群系全不同的块数 / 分母 (位图块级, 画面 = 位图 ×step) */
+        iso: mmStat.iso, isoBase: mmStat.isoBase,
+        isoPct: mmStat.isoBase ? +(mmStat.iso / mmStat.isoBase * 100).toFixed(2) : 0,
         enqDrop: mmStat.enqDrop, cap: TERRAIN_CAP
       };
     }

@@ -191,6 +191,8 @@ async function checkMinimap() {
   const cellsMax = Number((mm.match(/SAMPLE_CELLS_MAX\s*=\s*(\d+)/) || [])[1]) || 24000;
   const lvMax = Number((mm.match(/LEVEL_MAX\s*=\s*(\d+)/) || [])[1]) || 5;
   const pad = Number((mm.match(/PADDING\s*=\s*([\d.]+)/) || [])[1]) || 0;
+  /* U4: 一个显示块由 AGG_DIV² 个原始子格样本表决 ⇒ 原始样本层 = 块层 / AGG_DIV */
+  const aggDiv = Number((mm.match(/AGG_DIV\s*=\s*(\d+)/) || [])[1]) || 2;
   for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js']) {
     (0, eval)(fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js', f), 'utf8'));
   }
@@ -198,15 +200,37 @@ async function checkMinimap() {
   MG.init('42');
   const G = MC.geo();
   const HRW = 1.5 * G.hexR;
-  /* 抽样层级 m: 与模块 levelFor 同式 —— 一个抽样格 ≈ 一个显示块 (step 像素 × wpp) */
+  /* 显示块层级 mD: 与模块 levelFor 同式 —— 一个显示块 ≈ step 像素 × wpp 的世界长度 */
   const levelFor = (vw, vh, w) => {
     const step = Math.max(2, Math.ceil(Math.sqrt((vw * vh) / cellsMax)));
     const k = Math.ceil(Math.log2(Math.max(1e-6, (step * w) / G.hexW)));
     return 1 << Math.min(lvMax, k > 0 ? k : 0);
   };
-  /* 复刻 rebuildPending 的枚举 (只要格集合) */
+  /* 原始样本层级: 直接**取模块自己的函数源码**求值 (而不是在测试里另抄一份公式),
+     这样模块改口径而测试没跟着改时, 下面的断言会直接失败。 */
+  let rawLevelOfMod = null;
+  {
+    const at = mm.indexOf('function rawLevelOf');
+    if (at >= 0) {
+      const o = mm.indexOf('{', at);
+      let d = 0, end = -1;
+      for (let i = o; i < mm.length; i++) {
+        if (mm[i] === '{') d++;
+        else if (mm[i] === '}') { d--; if (d === 0) { end = i + 1; break; } }
+      }
+      if (end > 0) {
+        /* 模块里的 AGG_DIV 是闭包常量 ⇒ 用工厂把它喂进去, 保证「取源码求值」真的可行 */
+        try {
+          rawLevelOfMod = (0, eval)('(function (AGG_DIV) { return ' + mm.slice(at, end) + '; })')(aggDiv);
+        } catch (e) { rawLevelOfMod = null; }
+      }
+    }
+  }
+  const rawMOf = (mD) => (rawLevelOfMod ? rawLevelOfMod(mD) : Math.max(1, Math.floor(mD / aggDiv)));
+  /* 复刻 rebuildPending 的枚举 (只要原始样本层的格集合) */
   const cellsOf = (vw, vh, cx, cy, w) => {
-    const m = levelFor(vw, vh, w);
+    const mD = levelFor(vw, vh, w);
+    const m = rawMOf(mD);
     const px = (vw * pad / 2) * w, py = (vh * pad / 2) * w;
     const x0 = cx - (vw / 2) * w - px, x1 = cx + (vw / 2) * w + px;
     const y0 = cy - (vh / 2) * w - py, y1 = cy + (vh / 2) * w + py;
@@ -215,7 +239,7 @@ async function checkMinimap() {
     const aq = Math.ceil(q0 / m) * m, ar = Math.ceil(r0 / m) * m;
     const S = new Set();
     for (let r = ar; r <= r1; r += m) for (let q = aq; q <= q1; q += m) S.add(q + ',' + r);
-    return { S, m };
+    return { S, m, mD };
   };
   const MW = 216, MH = 141;                            // 与 #minimap 的 CSS 尺寸同尺寸
   const cam = { x: G.hexW * (-51 + 133 / 2), y: 1.5 * G.hexR * 133 };
@@ -231,22 +255,30 @@ async function checkMinimap() {
     const col = (G.biomeMeta[b] || {}).color || '?';
     hist.set(col, (hist.get(col) || 0) + 1);
   }
-  check(`抽样格全部落在 m=${cell.m} 的整数倍上 (世界对齐, 错位 ${misaligned})`,
+  check(`原始样本格全部落在 rawM=${cell.m} 的整数倍上 (世界对齐 · 块层 mD=${cell.mD} · 错位 ${misaligned})`,
     misaligned === 0, String(misaligned));
   check(`自算地形样本全部落在群系 0..7 (越界 ${bad})`, bad === 0, String(bad));
   check(`前端自算地形画出多种地形色 (实测 ${hist.size} 种)`, hist.size >= 3,
     `仅 ${hist.size} 种 → 抽样/上色公式可疑`);
-  /* 全覆盖: 视图内任取一格, 其所属抽样格必须已被枚举 ⇒ 渲染不会留成片「未探测」 */
+  /* 全覆盖: 视图内任取一格, 其**显示块**的子格样本必须全被枚举 ⇒ 不会成片「未探测」。
+     U4 起块色由 AGG_DIV² 个子格样本表决 ⇒ 缺子格就只能退回角点单点样本 (椒盐的来源)。 */
+  const subKeys = (q, r) => {
+    const aq = Math.floor(q / cell.mD) * cell.mD, ar = Math.floor(r / cell.mD) * cell.mD, out = [];
+    if (cell.mD < aggDiv) { out.push(aq + ',' + ar); return out; }
+    const ck = Math.floor(cell.mD / aggDiv);
+    for (let j = 0; j < aggDiv; j++) for (let i = 0; i < aggDiv; i++) out.push((aq + i * ck) + ',' + (ar + j * ck));
+    return out;
+  };
   let hole = 0, probe = 0;
   for (let y = 0; y < MH; y += 3) {
     for (let x = 0; x < MW; x += 3) {
       const t = MC.pxToTile(cam.x + (x - MW / 2) * wpp, cam.y + (y - MH / 2) * wpp);
-      const k = (Math.floor(t.q / cell.m) * cell.m) + ',' + (Math.floor(t.r / cell.m) * cell.m);
       probe++;
-      if (!cell.S.has(k)) hole++;
+      for (const k of subKeys(t.q, t.r)) if (!cell.S.has(k)) { hole++; break; }
     }
   }
-  check(`视图内每格都有抽样格代表 (探针 ${probe} 点, 空洞 ${hole})`, hole === 0, `${hole} 空洞`);
+  check(`视图内每格所属显示块都有全部 ${aggDiv * aggDiv} 个子格样本 (探针 ${probe} 点, 空洞 ${hole})`,
+    hole === 0, `${hole} 空洞`);
   /* 复用率: 视图微动后抽样格集合必须高度重合 —— 这是「平移/缩放不再打回未探测」的核心契约 */
   const reuse = (c2) => { let n = 0; for (const k of cell.S) if (c2.S.has(k)) n++; return n / cell.S.size; };
   const panR = reuse(cellsOf(MW, MH, cam.x + 6, cam.y, wpp));
@@ -255,6 +287,51 @@ async function checkMinimap() {
     panR >= 0.90, `${(panR * 100).toFixed(1)}%`);
   check(`视图缩放 5% 后抽样格复用率 ${(zoomR * 100).toFixed(1)}% (要求 >=90%)`,
     zoomR >= 0.90, `${(zoomR * 100).toFixed(1)}%`);
+
+  /* ---------- U4: 金字塔多数表决 (块色 = 块内多数地貌) ----------
+     病征: 块色取「块角点单点样本」⇒ m>=4 时一个 m×m 区块只有 1 个格点参与决策,
+     混合地貌区的相邻块各取各的角点 ⇒ 椒盐噪点 (用户/wpp=12 远缩档肉眼可见)。
+     口径: cell(mD) = AGG_DIV² 个 cell(mD/AGG_DIV) 子格的众数 ⇒ 块色 = 块内多数地貌。
+     本段钉死: ① 模块确实带多数表决 (AGG_DIV/rawLevelOf/aggOf/失效钩子);
+              ② 原始样本层公式 (直接取模块源码求值, 不信测试里另抄的副本);
+              ③ 数值: 与「块内 mD×mD 原生格真值多数」的一致率必须显著高于角点单点。 */
+  check('U4 模块含多数表决三件套 (AGG_DIV/rawLevelOf/aggOf/aggInvalidate + 装配到位)',
+    aggDiv === 2 && !!rawLevelOfMod && mm.includes('function aggOf') &&
+    mm.includes('function aggInvalidate') && /aggInvalidate\(q, r\)/.test(mm) &&
+    /rawM = rawLevelOf\(m\)/.test(mm), '缺多数表决');
+  if (rawLevelOfMod) {
+    const exp = { 1: 1, 2: 1, 4: 2, 8: 4, 16: 8, 32: 16 };
+    const badLv = Object.keys(exp).filter((k) => rawLevelOfMod(Number(k)) !== exp[k]);
+    check(`U4 原始样本层 = 块层/${aggDiv} (1→1 2→1 4→2 8→4 16→8 32→16; 错 ${badLv.length})`,
+      badLv.length === 0, badLv.map((k) => k + '→' + rawLevelOfMod(Number(k))).join(' '));
+  }
+  {
+    const modeOf = (a) => {
+      const c = new Map();
+      for (const b of a) c.set(b, (c.get(b) || 0) + 1);
+      let best = a[0], bn = -1;
+      c.forEach((n, b) => { if (n > bn) { bn = n; best = b; } });
+      return best;
+    };
+    const fb = (q, r) => { const f = MG.fields(q, r); return f && typeof f.biome === 'number' ? f.biome : -1; };
+    let agreeA = 0, agreeB = 0, tot = 0;
+    for (const mD of [4, 8]) {
+      const half = mD >> 1, N = 20;
+      for (let j = 0; j < N; j++) {
+        for (let i = 0; i < N; i++) {
+          const aq = (-60 + i) * mD, ar = (-60 + j) * mD, all = [];
+          for (let y = 0; y < mD; y++) for (let x = 0; x < mD; x++) all.push(fb(aq + x, ar + y));
+          const truth = modeOf(all);
+          tot++;
+          if (fb(aq, ar) === truth) agreeA++;
+          if (modeOf([fb(aq, ar), fb(aq + half, ar), fb(aq, ar + half), fb(aq + half, ar + half)]) === truth) agreeB++;
+        }
+      }
+    }
+    const ppA = agreeA / tot * 100, ppB = agreeB / tot * 100;
+    check(`U4 多数表决的块色更接近真值 (${tot} 块: 角点单点 ${ppA.toFixed(1)}% → 多数表决 ${ppB.toFixed(1)}%`
+      + `, 提升 ${(ppB - ppA).toFixed(1)}pp, 要求 >=3pp)`, ppB - ppA >= 3, `提升仅 ${(ppB - ppA).toFixed(1)}pp`);
+  }
 
   /* ---------- R13: 面板档倍率 (与大地图恒定比例 / 持久化 / 可拖可缩) ----------
      用户口径: 「左下角地图应该可以设置倍率, 放大后可以拉动, 保存和地图一直的大小比例」。

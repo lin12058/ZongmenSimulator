@@ -294,6 +294,12 @@ tasklist | grep -i zongmen || echo "无进程"
   **不判失败** —— 引擎的 7/3/1 占地契约本身没有被破坏，别去「修」它。
 - 离线套件现为 **14 个脚本**全绿（§13 表格 5 个 + `check_vein_skin` / `check_preview_draw` / `check_preview_settle_road` / `check_preview_terrain` / `check_preview_vein_marker` / `check_edge_falloff` / `w3_bfs_road` / `w5_sprite_range` / `w6_bldg_face`）；
   ⚠ `check_cloud_zoom.mjs` **需要实机截图参数**（`<zoom>:<on.png>:<off.png>`），裸跑只打印用法并 `rc=2` —— 别当成回归失败。
+
+- **总 runner（2026-09-15 新增）**：`verify/run_regression.mjs` —— 一条命令跑完上表全部离线判据（默认 16 条，含对 8140 的 `frontend_smoke`），汇总「红 N / 共 M / warn W」。
+  `--offline-only` 跳过需活服务端的项；`--with-server` 追加 `verify_map/w1/w2/w4`（⚠ 先起隔离 8141，见 §11）；`--base=host:port` 换基址；`--only=/--skip=` 按文件名片段过滤；`--list` 只列计划不回显。
+  ⚠ 它统一清掉 `HTTP_PROXY`/`HTTPS_PROXY` 并置 `NO_PROXY=*`（本机 `HTTP_PROXY=127.0.0.1:9105` 会劫持内网请求 ⇒ 502），
+  并把 `w3_bfs_road` 的 ⑦ 两条**墙钟**失败自动降级为 `warn`（机器绝对速度门槛，非回归；`--w3-ms=` 可改阈值）。
+  `check_cloud_zoom.mjs` 需实机截图参数 ⇒ **不在**默认清单内，要跑请单独调。
   服务端侧仍走 §3 的 `verify_map/w1/w2/w4` + `frontend_smoke`（对**隔离实例**跑，见 §11）。
 
 ## 14. 「场地」表现与聚落形态的改法（2026-09-15 R10 / R5b）
@@ -449,3 +455,243 @@ tasklist | grep -i zongmen || echo "无进程"
   抽样/缓存键必须落在**世界坐标**上。
 - **静默丢弃最坑**：容量上限提前 return 会把「还没算」变成「永远算不到」，而且日志里什么都看不到。
 - 判「大面积未探测」不要靠看：量它的**像素占比**和**随行号的覆盖率梯度**，一秒定性。
+
+## 18. 小地图「面板档倍率」与主相机联动（2026-09-15 R13）
+
+### 18.1 现象与改法
+
+- 现象：面板档（左下角那个）写死 `FOLLOW_WPP = 6` ⇒ 主相机放大/缩小，面板档图幅**纹丝不动**，与全屏档/主图的缩放感脱节。
+- 改法（只改 `web/js/minimap-vein.js`）：
+  `panelWppNow() = baseWpp * DEFAULT_ZOOM / camZoom` —— **反比**，乘积 `panelWpp × camZoom` 恒等于 `baseWpp × DEFAULT_ZOOM`（= **13.2**），即面板档与主相机保持**恒定比例**。
+- 面板档滚轮**只改 `baseWpp`**，别直接改上屏 wpp（否则下一帧被 `panelWppNow()` 覆盖 ⇒ 滚不动）。
+- 面板档拖动过阈值 ⇒ 自动转**自由视角**（`follow=false`）；「归心」回 `follow=true`。
+- 持久化：`localStorage['zongmen.mmView']` 存 `{ baseWpp, fullWpp, follow }`，刷新还原（面板档/全屏档共用一份档案）。
+
+### 18.2 验收（四组 live_cap + 探针自回传）
+
+| 组 | 验证点 | 实测 |
+| --- | --- | --- |
+| A 面板驱动 | 滚轮 6→9.44→4.78、saved=YES；拖动 → follow=false；归心 → follow=true | 全过，`miss` 全程 0 |
+| B/C 缩放联动 | `camZoom=0.7 → panelWpp=18.857`；`camZoom=6 → panelWpp=2.2`；乘积恒 **13.2** | 覆盖主相机 0.7~6 全档、不越界 |
+| D 跨刷新 | 刷新后 `wpp=9.4411` 由 localStorage 还原 | 全过 |
+
+- 取数通道：**`?mmdrive=panel`**（在面板画布派发真 `WheelEvent`/鼠标事件）、**`?mmreload=1`**（验跨刷新还原）。
+- 契约：`frontend_smoke.mjs::checkMinimap` 的 R13 段 8 项 —— 「wpp 不再写死」「恒为常数比 13.20:1」「覆盖 zoom 0.7~6 且不越界 `[0.30, 48]`」「全屏档同持久化」。
+
+## 19. 小地图粗层「椒盐感」：金字塔多数表决（2026-09-15 交接单 U4 · 拍板「做」）
+
+### 19.1 病征与根因
+
+- 病征：`m>=4` 的粗层在**地貌过渡带**（湖/林/雪交界）呈细碎噪点，一块一个色、跳来跳去。
+- 根因：一个显示块只取**一个**格点样本（网格点/左上角），单点采样在过渡带必然抖 ⇒ 相邻块随机落到不同地貌。
+
+### 19.2 口径（只改 `web/js/minimap-vein.js`）
+
+- 块色 = 块内 `AGG_DIV×AGG_DIV`（现 `=2`，即 4 个）**原始子格样本取众数**。
+- 原始样本层 `rawM = rawLevelOf(mD) = mD >= AGG_DIV ? max(1, floor(mD/AGG_DIV)) : 1`；
+  `mD < AGG_DIV` ⇒ `rawM = 1` ⇒ **与旧「单点取色」逐字节相同**（低缩放档零行为变化，可安全 A/B）。
+- `aggCache` 键 `"mD:q,r"`（`null` 也缓存）；`aggInvalidate(q,r)` 在**新样本落地**时删掉该块 ⇒ 块色随子格实时刷新。
+- `rebuildPending` 铺到 `rawM`（不是 `m`），且**仍先铺粗层** `m*8/m*4/m*2` 再铺 `m` ⇒ 样本量 ×4 也不首帧露底。
+- ⚠ `biomeAt` 在 `sampleM >= AGG_DIV` 时**一律走块级表决**，删掉「格已在缓存就直接用」的快路径 ——
+  否则同一块内会出现「已缓存的格用精确色、没缓存的用表决色」⇒ **块内串色、块边界露缝**。
+
+### 19.3 实测（seed 42；两组独立口径互证）
+
+| 口径 | 改前（单点） | 改后（多数表决） | 提升 |
+| --- | --- | --- | --- |
+| 离线一致率（800 块，与「块内原生格真值多数」比） | 86.3% | **91.6%** | +5.4pp（混合区 70.1% → 81.1%） |
+| 实机椒盐量 `probe().isoPct`（位图块级「与四邻全不同」的孤立块占比） | 6.29% | **4.61%** | −1.68pp |
+
+- ⚠ 代价 = **原始样本 ×4**：mD=8 实测 3.0 万 → 12.1 万格（浏览器约 10s 排空）。
+- A/B 做法 = **只翻 `AGG_DIV` 2↔1** 再跑同一 URL；验完**必须 grep 复核复位**（契约已钉死该常量）。
+- 诊断通道：`probe()` 新增 `rawM / agg / iso / isoBase / isoPct`。
+- 契约：`frontend_smoke.mjs::checkMinimap` 加 3 项（多数表决三件套装配 / `rawLevelOf` 公式 1→1 2→1 4→2 8→4 16→8 32→16 / 一致率 ≥ 角点 +3pp）。
+
+### 19.4 教训
+
+- 「单点采样」在离散块的粗层就是**欠采样** ⇒ 过渡带必然椒盐；正确解是**金字塔聚合（子格取众数）**，而不是去调色板或加模糊。
+- 聚合必须与**缓存失效**配套：只聚不失效 ⇒ 块色冻在旧样本上；只失效不聚 ⇒ 每帧重算（×4 成本雪上加霜）。
+- `AGG_DIV` 这种「一行开关」很适合 A/B，但**必须让契约钉住它的值**，否则验完忘了复位就成了幽灵回归。
+
+## 20. 本机环境前提（两条会误事的 · 2026-09-14 七轮实测）
+
+1. **本机有 .NET SDK**：`C:\Program Files\dotnet\dotnet.exe` = **8.0.100**。
+   「无 SDK ⇒ 服务端回归跑不了」是**错的**（曾因此把 `verify_map`/`w1`/`w2`/`w4`/`frontend_smoke` 搁置一天）。
+2. **本机 bash 的 PATH 是坏的**：`ls`/`cp`/`tail`/`head`/`dirname`/`grep` 一律 `command not found`；且**终端工具不回显 stdout**（PowerShell/终端执行成功但零输出，本会话实测）。
+   可靠姿势 = **全程 Node 绝对路径**：
+
+   ```bash
+   N="C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2-3/node.exe"
+   "$N" -e "const {execFileSync}=require('child_process');const G='C:/Program Files/Git/cmd/git.exe';console.log(execFileSync(G,['status','--porcelain'],{cwd:'D:/codes/宗门模拟器demo',encoding:'utf8'}));"
+   ```
+
+   - git 绝对路径：`C:/Program Files/Git/cmd/git.exe`（备选 PortableGit `.../binaries/PortableGit/versions/1.2.0/cmd/git.exe`）。
+   - 长输出**写盘再 Read**；`| tail` / `| head` 用不了（管道目标不存在）⇒ 用 `node -e` 截取。
+   - 需要显式 PATH 时：`export PATH="/c/Program Files/Git/cmd:/c/Program Files/Git/bin:$PATH"`，**再** `cd`（否则连 `cd` 都失败）。
+   - ⚠ `git -c core.quotepath=false status` 的 `-c` 必须写在子命令**之前**（`git -c ... status`，写后面报 `unknown switch c`）。
+- ⚠ **别用 `node -e "…"` 内联含反引号的脚本**：bash 双引号里的反引号会触发**命令替换** —— 内容被静默吞掉（无报错，只是没了）。本项目已踩 **2 次**（一次把台账整段拼坏需回滚，本轮又把 daily log 两行的 `` ` `` 内容整段抹掉）。⇒ 凡**多行**或含**反引号/反斜杠/`$`** 的 JS，一律**先写成临时脚本文件再 `node <file>`**；写完必须**回读断言**关键串还在。
+
+## 21. 离线回归清单 + 批量驱动
+
+逐条跑（不需要服务端，先跑这批）：
+
+```bash
+cd D:/codes/宗门模拟器demo
+N="C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2-3/node.exe"
+"$N" verify/sync_preview_inline.mjs --check
+"$N" verify/check_preview_vein_marker.mjs
+"$N" verify/check_preview_terrain.mjs
+"$N" verify/check_edge_falloff.mjs
+"$N" verify/check_preview_draw.mjs              # 期望 32 通过 / 0 失败
+"$N" verify/check_preview_settle_road.mjs       # 期望 305 条（多圈收敛 7 圈）
+"$N" verify/check_vein_skin.mjs                 # 前端灵脉配色/形状/等级契约（现 40 项）
+"$N" verify/w5_sprite_range.mjs
+"$N" verify/w6_bldg_face.mjs                    # 期望 23 / 0
+"$N" verify/w3_bfs_road.mjs                     # 17 项；约 60~100s，前台跑并放宽 timeout
+```
+
+- **批量驱动已固化**：直接用 `verify/run_regression.mjs`（见 §13 的「总 runner」条目），别再手拼命令行。
+- ⚠ 实机 A/B 抓图（验证渲染改动）务必带 URL 参数 **`capmin=N`**（截屏前预热 N 秒）：页面自截的就绪门槛常写得松（`chunkData>=3`），不加则同一 URL 两帧可差 ~20%，A/B 会被噪声吞掉。详见 skill `webgl-headless-verify`。
+
+## 22. 服务端回归 —— 起**隔离实例**（绝不动用户的 8140）
+
+```bash
+# 构建到仓内临时目录（.gitignore 已忽略 verify/_*）
+dotnet build Server/Zongmen/ZongMen.csproj -o verify/_vmsrv -p:UseAppHost=false
+
+# 起实例：env 用「双下划线」映射配置节
+Zongmen__Port=8150 \
+Zongmen__DbPath="C:/Users/Administrator/AppData/Local/Temp/wb/reg.sqlite" \
+dotnet verify/_vmsrv/ZongMen.dll
+
+curl -s --noproxy "*" http://127.0.0.1:8150/api/map/stats
+```
+
+- `Options.FindRoot` 自 ContentRoot（= exe 目录）**向上找含 `web/index.html` 的目录** ⇒ 从 `verify/_vmsrv` 起步会命中仓库根，**自动用仓库 `web/` 与 `Engine/js`**，不用拷资产。
+- 跑完 **kill 该实例 + 删 `verify/_vmsrv`**（46 个文件 / 约 292MB），最后 `git status` 与 `git status --ignored verify/` 双净。
+- 探端口用 `net.connect` 确认起来/关闭；**别用 `taskkill /IM`**（会连带杀用户实例）。
+- 然后都传该端口：
+
+  ```bash
+  "$N" verify/frontend_smoke.mjs    http://127.0.0.1:8150
+  "$N" verify/w1_client_revs.mjs    http://127.0.0.1:8150
+  "$N" verify/w2_concurrency.mjs    http://127.0.0.1:8150
+  "$N" verify/w4_revs_at_scale.mjs  http://127.0.0.1:8150
+  "$N" verify/scan_poison.mjs http://127.0.0.1:8150 42 "[-20,20,-20,20]"   # 1681 块 bad=0
+  ```
+
+  ⚠ `scan_poison` 的 BASE 默认写死 8140，**换端口必须显式传 baseUrl**，否则每块 timeout 报假 BAD；
+  其默认范围 `[-80,80]²`（2.6 万块，太慢），基线口径是 **`[-20,20]²` = 1681 块**。
+
+## 23. 判定「失败是不是回归」——引擎 / 前端**副本 A/B**（不碰仓库）
+
+- 复制 `Engine/js` 到临时目录，只改待测那一行；让被测脚本的引擎目录可由环境变量覆盖：
+  `const ROOT = process.env.ROOT_OVERRIDE || path.resolve(__dirname,'..')` + `process.env.ENJDIR || ...`。
+- 服务端侧同理：**`Zongmen__EngineJsDir=<临时副本>`**；前端副本走 **`Zongmen__WebDir=<副本>`**（`Options.ResolveWebDir` 认这个键）⇒ 两台实例**仅差那几个常量**，同 seed 同机位抓帧差分即可归因。
+- ⚠ 复制脚本到仓库外后 `__dirname` 变了 ⇒ **必须同时加 `ROOT_OVERRIDE`**（`web/js/pb.js`、`mapgen-config` 等都从 ROOT 解析），否则报 `ENOENT ...\Temp\web\js\pb.js`。
+- ⚠ 副本要用**递归 `copyFileSync`**（沙箱里 `fs.cpSync` 会**静默杀进程**：exit 127 且无输出）；回退用**断言式替换**（每条断言唯一命中数，全绿才落盘）+ 替换后自检。
+- 自己写个只读 `MapGen` 结果的小 harness（把 `noise.js` + `mapgen-config.js` + `mapgen.js` 加载进 `vm`）比改现有脚本省事 —— 现有脚本多数把 `JSDIR` 写死。
+- ⚠ `bench_road_drain.mjs` 自 2026-09-14「路廊复用」起**已退役**，别拿它当 A/B 载体。
+
+## 24. 引擎改动的正确性验证：**顺序无关性 harness**（比逐项 assert 更有力）
+
+道路/聚落这类「按需增量生成」的引擎，最容易出的不是崩溃，而是**「输出取决于访问顺序 / 缓存冷热」**。
+2026-09-14 用它定位并根治了 `verify_map` 22 项 + 预览页/服务端分叉：
+
+```js
+// 同一引擎副本, 用 4 种扫描顺序各把窗口建成「收敛态」, 比指纹
+// 顺序: fwd(ij 升) / rev(ij 降) / col(ji 转置) / center(按到原点距离)
+for (const [i,j] of cells) MG.roadsNear(i, j, 9999);   // 第一遍
+for (const [i,j] of cells) MG.roadsNear(i, j, 9999);   // 第二遍 → 新增应为 0 (幂等)
+// 指纹: 逐产出物 (key | 折线量化 | 瓦片集) 排序后 FNV —— 与遍历顺序无关
+// 再补一组: 带中心点参数 vs 不带 (预览页传 cq/cr、服务端不传)
+```
+
+判据：**4 种顺序 1 个指纹 + 二遍零新增 + 带参不带参一致**。改前 HEAD 是 **4 种顺序 4 个指纹**。
+配套的「逐次耗时注入」（在 `search()` 返回处 `__lg(seg,len)` 记录 ms）能区分「整体变慢」与「个别格堆了多次昂贵调用」。
+
+⚠ 计时类判据在本机**噪声极大**：同一份代码单区域 max 实测 **221/290/297/307/605ms**（整轮总耗时同步 14s→19s）。
+
+- 别用**单个极值**做阈值；用**第 3 慢**这类尾部统计（同代码 B 版 178~181ms / HEAD 230~241ms，高度可重复）。
+- 判回归时**必须同机同 harness 跑 HEAD 对照** —— 250ms 那个旧阈值 HEAD 自己 281.8ms 就 FAIL，属陈旧标定。
+
+## 25. 改核心源码的手法：**断言式补丁脚本**（别用多次 Edit 试错）
+
+批量改 `Engine/js/mapgen.js`（尤其是「删一片、改一片」的大改动）时：
+
+```js
+const PATCHES = [];  const rep = (label, oldS, newS, hits=1) => PATCHES.push({label, oldS, newS, hits});
+/* … 逐条 rep() … */
+// 先对【原始文本】逐条校验命中数, 全部符合才落盘
+for (const p of PATCHES) { const n = s.split(p.oldS).length - 1;
+  if (n !== p.hits) bad.push(`${p.label}: 期望 ${p.hits} 实得 ${n}\n${p.oldS}`); }
+if (bad.length) { console.log(bad.join('\n')); process.exit(1); }   // 一次看到全部失配点
+for (const p of PATCHES) s = s.replace(p.oldS, p.newS);
+```
+
+两条必踩的坑：
+
+1. **CRLF**：源码在盘上是 CRLF（`core.autocrlf=true`）。读时 `replace(/\r\n/g,'\n')` 匹配，写回时 `s.replace(/\n/g,'\r\n')` —— 否则整个文件判为「全部改写」。
+2. **转义引号**：注释里可能有 `(Set \"q,r\")` 这种带反斜杠的引号，匹配串要按**实际字节**写（在 JS 模板串里就是 `\\"`）。第一次写错会命中 0 处。
+
+改完 `Engine/js/*.js` 别忘了：① `node verify/sync_preview_inline.mjs`（重跑内联，再 `--check`）；② 重启服务端；③ 若 chunk/comm/settle/road 载荷变了 ⇒ 清 `db/zongmen.sqlite*`。
+
+## 26. 工作区事故与仓库卫生
+
+### 26.1 `verify/` 被误删（已发生 3 次）
+
+症状：`git status` 里一批 ` D verify/*.mjs`（被跟踪文件从工作区消失）。
+危险的是清理脚本常以 `git status --ignored` 为名单 —— **连被跟踪文件一起删时，该命令恰好报「剩余 0」，判据自证**。
+
+```bash
+git restore --source=HEAD --worktree -- verify/
+git add -- verify/     # 清 stat-cache 假脏（CRLF/时间戳导致的假 ` M`）
+git diff --numstat     # 应为空 = 内容确实等于 HEAD
+```
+
+清理铁律：**先按 `git ls-files` 过滤掉被跟踪名单**，再用 Node `fs.unlinkSync` 绝对路径删；禁 shell 通配符与 `git rm`。
+删除脚本建议加两道闸：① 干跑（`--dry`）先打印「候选 / 保留 / 删除清单 + 总字节」；② **跨目录代码依赖扫描** —— 若 `web/`·`Server/`·`Engine/`·`tools/` 下的 `.js/.mjs/.json/.html/.cs` 文本里出现了某个待删文件名 ⇒ 判为依赖、**中止**（⚠ 扫描时必须**规范化路径**排除 `verify/` 自身，否则 `_foo.mjs` 会“自己引用自己”恒命中；`path.join` 而非字符串拼 `/`，双斜杠会让前缀判等失败）。
+
+### 26.2 漏跟踪资产审计（防「配置真源被覆盖即丢失」）
+
+按目录比对「`git ls-files <dir>` 的扩展名惯例」vs「工作区实际文件」。已命中实例：`web/js/vein-skin.js`（渲染配置真源）· `verify/{check_vein_skin,probe_spots,cdp_feat}.mjs` · `tools/prop_sheet.mjs` · 台账 `待办事项/前端表现升级-匾额山体云气.md`。
+
+⚠ `core.quotepath` 会给中文/特殊路径加引号 ⇒ 按扩展名过滤必须 `git -c core.quotepath=false ls-files`，否则统计假 0。
+惯例参考：`docs/` 下 27 张 png **是入库的** ⇒ 证据图入库可接受；`待办事项/img/`（fx* 系列，14.6MB）从未入库，是否入库待定。
+
+### 26.3 安全暂存删除（文件已在工作区消失、只剩索引里的 ` D`）
+
+```bash
+git rm --cached -- <paths>   # 只动索引；工作区本就无文件，非破坏性
+```
+
+先看 HEAD 里它们是什么（`git show HEAD:<path>`）：若属「一次性 review / todo / 设计稿」且结论已进台账 ⇒ 可删。
+⚠ 绝不对**已被跟踪**的文件用 shell 通配删除（§26.1 已发生 3 次事故）。
+
+## 27. 前端「配置真源」的契约验证（灵脉配色范式，2026-09-14）
+
+前端一旦引入**专用配置文件**（如 `web/js/vein-skin.js` = 灵脉颜色/形状唯一真源），就必须有一条脚本把「前端配置」与「引擎常量」钉在一起 —— 否则只会在视觉上**静默错位**（颜色偏一点，无报错、无异常）。
+已实现为 `verify/check_vein_skin.mjs`（现 **40 项断言**：A 段配色 10 + B 段等级分档 30；直接 node 跑、不需要服务端）：
+
+```js
+// 在 vm 里按「引擎加载序」加载；前端配置文件靠 global 共享同一份 global
+load('Engine/js/noise.js'); load('Engine/js/mapgen-config.js'); load('Engine/js/mapgen.js');
+load('web/js/vein-skin.js');            // ← 它写 global.VeinSkin
+// ① 数组/键【顺序】一致：顺序错 ⇒ sprite 索引错位，比颜色错更隐蔽
+assertEq(VS.elements.map(e=>e.key), MG.ELEMENTS)             // ['金','木','水','火','土']
+assertEq(Object.keys(VS.variants),   MG.VEIN_VARIANT_ORDER)  // ['雷','风','冰','暗']
+// ② 每元素/异灵根的 glow 必须逐一等于引擎 RGB
+for (const e of VS.elements) assertEq(e.glow, MG.ELEMENT_RGB[e.key]);
+for (const v of VS.variants)  assertEq(v.glow, MG.VARIANT_RGB[v.key]);
+// ③ hScale 有下限（灵脉须高过大世界山；大档实测 1.90、中档 1.58，阈值 >1.55）
+// ④ 算 W/H 断言落在 [0.6,1.6]（近正方 ⇒ 山形不被横向拉宽）
+// ⑤ variantSprite(name) = 32+index（图集 row4），越界回 -1
+```
+
+- 该脚本属 **§21 离线回归清单**，**改前端配色后必跑**；加新元素/异灵根时也要补断言。
+- 契约的另一半是**挂载序**：`vein-skin.js` 必须在 `textures.js` **之前**（textures 绘制时读它）—— 只验值不验顺序会漏，用 `index.html` grep 复核。
+- 改形状系数（hScale/wScale）必须**同步 `tools/prop_sheet.mjs`**：看板按同一公式摆「实机尺寸条」，不同步会把比例判错。
+- 图集若新增/启用行位（九版启用此前**永不触发**的 row4 → id 32..35：tile 索引 = `biome*4+variant ≤ 31` 使 `HEX_FS` 的 `biome-8→row4` 分支成死代码），必须同步 `verify/w5_sprite_range.mjs` 的 DRAWN / BY_BIOME 集合，否则漏报或误报「未使用精灵位」。
+- 精灵位/载荷变了 ⇒ **停服清 `db/zongmen.sqlite*`** 再起（否则实机看旧内容）。
+
+> 本节内容原在**用户级** skill `zongmen-regression`（2026-09-15 夜归并到本仓库版；用户级那份已删除，避免「同名异实、改了这处忘了那处」）。

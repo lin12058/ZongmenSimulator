@@ -1193,7 +1193,8 @@
           ctx.stroke();
           ctx.restore();
           IT.drawVeinFlower(ctx, v.x, v.y, null, rgb, { level: v.level });
-          veinLabels.push({ x: v.x, y: v.y, name: v.name + '灵脉（' + (VEIN_LV_NAME[v.level] || '小') + '）',
+          /* 名牌文案: 「XX灵脉·大」—— 等级用全角间隔号 (2026-09-15 用户: 去掉括号看着好一点) */
+          veinLabels.push({ x: v.x, y: v.y, name: v.name + '灵脉·' + (VEIN_LV_NAME[v.level] || '小'),
                             rgb: rgb, level: v.level, topU: veinTopU(v) });
         }
       });
@@ -1861,7 +1862,7 @@
     row.push(kv('距此', '<span class="sec-dist">' + pick.d + '</span> 格'));
     var nv = nearestVein(ent.q, ent.r);
     row.push(kv('灵脉', nv
-      ? esc(nv.v.name) + '灵脉（' + (VEIN_LEVEL[nv.v.level] || '小') + '）· ' + nv.d + ' 格'
+      ? esc(nv.v.name) + '灵脉·' + (VEIN_LEVEL[nv.v.level] || '小') + ' · ' + nv.d + ' 格'
       : '未附灵脉'));
     var bl = ent.buildings || [], rs = ent.resources || [];
     if (bl.length) {
