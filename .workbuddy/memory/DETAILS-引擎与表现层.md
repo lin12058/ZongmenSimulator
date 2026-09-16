@@ -3,7 +3,11 @@
 
 ## 灵脉契约 (真源 web/js/vein-skin.js → global.VeinSkin，挂 textures.js 前)
 - 结构 shape / elements 五行 / variants 四异灵根 / dual / **levels 四档(0大 1中 2小 3从属)** / levelInfo()。⚠ `elements[].glow==mapgen ELEMENT_RGB`、`variants[].glow==VARIANT_RGB`、键序==VEIN_VARIANT_ORDER；`levels[i].level==veins[].level`、hScale 严格递减且可视高度互不重叠。`check_vein_skin.mjs`(35 项，含「又高又瘦」) 钉死，改后必跑。
-- **占地 7/3/1**：`veinFootKeep(level,dq,dr)` 大=hexDist≤1(7格) / 中=本格+(-1,1)+(0,1)(3格) / 小=仅本格；d≥2 不留。从属格 level=`CFG.VEIN_SAT_LEVEL(=3)`(专用第4档，**不是**"中心档+1")且**绝不进 comm.veins[]**(否则多名牌/统计虚高/污染群落与 veinNear)。`fields()` 守卫 `vn.d<=1 && e>=SEA_LEVEL && veinFootKeep(...)`；buildChunk 用 `e: f.vein?f.vein.level:f.e`(复用海拔通道)。判据 `check_vein_cluster.mjs`(7 项)。⚠ 已知非缺陷：相邻两群落次级灵脉可落同一整数格 ⇒ veinNear 全局最近裁其一 =「幻影灵脉」(名牌叠字)，不破 7/3/1。
+- **占地 7/3/1**：`veinFootKeep(level,dq,dr)` 大=hexDist≤1(7格) / 中=本格+(-1,1)+(0,1)(3格) / 小=仅本格；d≥2 不留。从属格 level=`CFG.VEIN_SAT_LEVEL(=3)`(专用第4档，**不是**"中心档+1")且**绝不进 comm.veins[]**(否则多名牌/统计虚高/污染群落与 veinNear)。`fields()` 守卫 `vn.d<=1 && e>=SEA_LEVEL && veinFootKeep(...)`；buildChunk 用 `e: f.vein?f.vein.level:f.e`(复用海拔通道)。判据 `check_vein_cluster.mjs`(26 项，含 §D)。⚠ 已知非缺陷：相邻两群落次级灵脉可落同一整数格 ⇒ veinNear 全局最近裁其一 =「幻影灵脉」(名牌叠字)，不破 7/3/1。
+- **地盘彩环 = 同口径（十四版 2026-09-16）**：旧做法只 `hexPath(v.x, v.y)` 垫中心 1 格（用户报障：「大灵脉 1 格外面 6 格，中的是 1 格下面 2 格 … 地盘彩环没有对应的另外 6 格和 2 格」）。
+  真源 = `web/js/vein-skin.js` `footOffsets(level, MG)`：偏移池 `FOOT_OFF` = 本格 + 六邻（序同 `NEIGH_SLOTS`）；**引擎就绪时直接问引擎** `MG.veinFootKeep`，镜像表 `FOOT_MIRROR`（大 `[0..6]` / 中 `[0,2,3]` / 小 `[0]`）只在 `EngineLocal.load` 失败时兜底。
+  `main.js`：先铺满全部格再统一描边；本格恒用封包 `(v.x, v.y)`；`veinOwnerOf` 做**归属裁决**（镜像引擎 `veinNear` 的 9 宫格最近规则；`veinAll` 先按 (q,r) 排序 ⇒ 与 comm 包到达序无关）；海里（`elevAtTile < geo.seaLevel`）不铺、海拔未到货 (-1) 照画。
+  §D **14 条**（跨源逐值 ×4 档 + 偏移池序 + 源码守卫「已接线 / 旧写法不复活 / 探针齐备」）；实机取数 `?veinprobe=1` → `__feat().veinRings`（逐根 `{name,lv,n}`）。实测 seed42 机位 `qt=-248&rt=-178&zm=2.4`：大 9 根全 7 / 中 10 根全 3 / 小 20 根全 1。
 - **上屏尺寸**：PROP_VS 按还原等级取 hs 大1.90/中1.58/小1.22 + 收窄 hrand ⇒ 相对分档 H 大[63,68]>中[55,57]>小[41,43]px(uR=8)。`shape.sizeScale:0.40` = **唯一「上屏尺寸」旋钮**，PROP_VS 只对**峰体**再乘一次(W/H 同乘 ⇒ 比值不变)，**底座不乘**。字面量 EPS=1/1024 + toFixed(3) 防 FP 尾数入 GLSL。⚠ 改系数须同步 tools/prop_sheet.mjs。
 - **山形/渐隐** `veinPeakPts()` 独立成形(topW0.30/seg11/topSeg7/fade0.50/miDian12；wScale0.95 ⇒ W/H≈1.031)。⚠ **渐隐只能靠 alpha 渐变、不能靠叠雾**(旧 mist 叠加会把渐隐糊实 ⇒ 已删/降档)。判渐变看**前景中位 alpha**：灵脉 半腰187→山脚9(20.8) vs 大世界山 137→44(3.1)。⚠ 别用 RGB 阈值。
 - **山地底座** `SHAPE.terrainBase:1.0`(0 = 关回七版) ⇒ 把**该格原山**垫在峰下(与大世界山**同档公式** MTN 0.55/1.30、SNOW 0.95/1.55；海拔<0.70 自动为 0)。`shape.terrainBaseMin=0.30` 兜小档底座(LIFT_CORE[2]=0.70 压严格边界 ⇒ 无下限恒 0)。名牌锚点见 `veinTopU()`。⚠ **u16 海拔通道装不下两个量** ⇒ refreshChunkProps 写 `iElev=(等级+海拔)/4`(四档)，shader `vz=clamp(iElev,0,1)*4`、`等级=floor(vz)` / `海拔=frac(vz)`、`min(floor(vz),3.0)`；max=(3+1)/4=1.0 恰好不溢出。
@@ -107,10 +111,31 @@
 - 压测协议：合成簇 `CLUSTER`（8 座，基准恒为 `(1,0)`）+ 8 方向远点 `(9,9) (-14,7) (0,-21) (31,-3) (-6,40) (22,22) (-30,-30) (5,-18)`，逐个加 + 八个齐加，结果都不得变（契约 A6/A6b）。
 - 其它：`anchorOf` 返回 `{x,y,q,r,y0,real}`，`y0` = 建筑格 y 的 p25（旧路径/让位逻辑仍用）；无建筑 ⇒ `null`，**调用方必须不落缓存**（`main.js bldgAnchor` 守卫 D7）。`?plaqprobe=1` 数值探针自回传（含原始建筑格 `bldgs`）。教训见 skill §32/§33/§34。
 
+## 渔村 A2 / 归属势力 B / 匾额 C / 世界种子 W（2026-09-16 从 MEMORY.md 迁入，口径未改）
+
+### A2（用户定案）水面建筑一律渔家 + 地盘环水陆都画
+**不再以「中心格是否在水里」判渔村**。引擎把「渔家」地皮从 `type==='fishing'` **放开到任何聚落的水面格**（`mapgen.js` 地皮段 `lu==='水岸'→'渔家'`）；前端 `main.js` 栈桥降为**白名单兜底** —— `WATER_KIND`(民房/仓库/码头/渔船坞/渔亭)、`bridge = onWater && !isFish && (WATER_OLD || !WATER_KIND[b.kind])`、`fishVillage: WATER_OLD ? isFish : (isFish || onWater)`、地盘环改 `if (!bridge || !WATER_OLD)` **无差别绘制**（旧 `if(!bridge)` 跳过水面格 = 用户报的「下面没有正六边形框」）。同机位 A/B 档位 **`?water=old`**；`tools/bldg_town.mjs` 镜像判据已同步。测试环境**无需清库**。
+- 同源条目（A 版）：`KINDS_FISH`（民房/仓库）画法表，`paint()` 在 `spec.fishVillage` 时优先查表；远视图标拆出独立 `drawFishing`。⚠ 加任何「影响画法」的 flag ⇒ **`spriteOf` 缓存 key 必须同步加位**，否则水陆**串图**（本次加 `|'F`）。看板 `tools/bldg_sheet.mjs all|dirs|fish`。
+
+### B 归属势力（前端派生）
+`factionOf` 扫 `settleCells` 取**最近宗门**；⚠ 半径是**镜像常量** `SECT_DOMAIN_R = CFG.COMM_R(25) × 1.4 = 35`（同 `mapgen.js:1174`，跨源断言 `check_faction` A2）；⚠ 缓存 `st._fac` **必须靠 `settleVer` 失效**（首个 settle 包到货时附近可能还没宗门，只算一次会**永久锁成无归属**）。`townColor` 归属优先 ⇒ **同宗同色**；记号 `factionSig` 同源派生 crest(3~6)/crestRot(k·π/3)/seal(0~7) → `plateAt` 的 `water/crest/seal` **全部条件画**（荒野保持纯环）。协议 `Owner`(`MapMessages.cs:82`) 仍恒空 ⇒ 日后引擎补 owner 只改 `factionOf` 返回（B-B），绘制层不动。总开关 `?fac=0`；探针 `__facProbe`。
+
+### C 匾额引线
+`bldgAnchor` 扎**真建筑格**（`BI.anchorOf`）；`main.js veinTopU` **委托** `VS.tipU`、`veinJxU` 委托 `VS.apexJx`（单一真源）；`renderer.js` GLSL 判档阈值走 `VEIN_SHAPE` 的 `E_MTN/S_MTN/E_SNOW/S_SNOW`；⚠ `vein-skin.js levelInfo` 越界返 `null`（原来静默归一化成「大」）。⚠ 教训：用户说「要某个东西的中心点」时，先查那个中心点在数据里**是不是已存在**（skill §35）。
+- 灵脉名 **`XX灵脉·大`**（`main.js:1197`/`1865`、`minimap-vein.js`）。⚠ `v.name` 常自带「脉/峰/谷」⇒ 叠字，是否再砍「灵脉」后缀**待用户拍板**。
+
+### W 世界种子 / 设置组件 / 灵脉签色
+- **种子 = 服务端资产**：`Server/Zongmen/Storage/WorldLedger.cs` **独立表** `World(Round,Seed,BornAt)`（⚠ 绝不能塞 `Data(Key,Value)` —— `PruneExcept` 按前缀 DELETE 会**静默删掉**台账）＋ `GET /api/world/current`（幂等，空库就地开第一世）/ `POST /api/world/next`（另启一世）/ `GET /api/world/list`。前端 boot `await worldFetch('/api/world/current')`；**拿不到种子直接 `showFatal`，绝不回落前端造**。⚠ `?seed=` 保留为调试覆盖（不入账、`src:'url'`）——削掉即废掉整条验证管线。
+- **设置唯一真源 `web/js/store.js`（`window.ZMStore`）**：键 `zongmen.settings.v1`；schema 白名单 `{veins,nameSettle,nameVein,nameRegion,clouds}`；读路径只读内存副本（不逐帧 `getItem`）／写 200ms 节流 + `pagehide` 强写／坏 JSON 与无 localStorage 静默降级。右上角只剩 ⚙ `#btnGear` → `#settingsWrap` 弹窗；复选框 `data-zm` **只往 store 写**，渲染变量由 `S.settings.on(applySettings)` 单向下发。⚠ 变量名 `showVeins/showLabels` **不能改**（`frontend_smoke` 逐名扫原文）。
+- **灵脉签五行色（C-b）**：`drawNameBanner` 走**两道** —— 同路径上再敷一层「向纸色提亮 `VEIN_WASH_MIX=0.40`」的渐变（`VEIN_WASH_A0/A1=0.30/0.46`），描边 = `mixRGB(tint,[72,58,40],0.52)`，印章用本色 `0.86`；灵脉名单独开关 `nameVein`（`?nobanner=1` 仍一键全关）。
+- ⚠ **`check_calc_local` / `check_mm_ui` 不认 `--base=`**，只认**位置参数 URL**（`run_regression` 正是位置传的）。手跑隔离实例必须 `node verify/xxx.mjs http://127.0.0.1:8150`，否则静默打 8140。
+
+---
+
 ## 构建 / 验证：会踩的坑（跑法见 skill §1~§35，本节只留坑）
 - ⚠ 截图：`--headless=new` 忽略 `--window-size`（精确尺寸须旧版）；实机自截 `verify/live_cap.mjs <url> <out> 90 1400x900`（`capture=1`，落**共享** `verify/capture.png` ⇒ **串行**）；**截前必须预热 `capmin=N`**（就绪阈值 `chunkData>=3` 在低缩放太松，不加则同 URL 两帧可差 20%）；裁剪用通用版 `verify/_vv_crop.mjs <in> <out> x0 y0 x1 y1 [scale]`（自包含 PNG 编解码，本机无 PIL），别用硬编码的 `crop_png.mjs`。
 - ⚠ CDP `Runtime.evaluate`/`Page.captureScreenshot` 对本页**永久挂起**（>100s）⇒ 改用**数值探针**（`?plaqprobe=1` / `?mmprobe=1`）+ 离线复算，或 live_cap 差分。⚠ 目测坐标必错（>60px）：量标签引线用 `?plaqdbg=1`（走产品同一个 `bldgAnchor`/`veinTopU`）并换算成 R 倍数（R=hexR×zoom）；别把「期望屏幕坐标」硬编码进探针；量高度别用 RGB 阈值。⚠ **Read PNG 会等比缩小**（1400×900 实显约 1080×694）⇒ 目测坐标先 ÷ 显示比再裁。⚠ Read PNG "content filtered" ⇒ 探针页 `getImageData` + `--dump-dom` 取 stdout（见 skill `webgl-headless-verify`）。
-- 基线（离线）**18 条**：frontend_smoke **79**、check_plaque_align **68**（2026-09-16 由 39 扩）、check_fish_skin **44**、check_faction **72**、check_vein_skin 42、check_mm_layout、vein_cluster 12 / no_build_on_vein 5 / settle_spacing 6 / sea_village 11 / vein_settle_gap 10 / preview_* ×4 / edge_falloff / w5 / w6 / w3_bfs_road；在线 4 条 = frontend_smoke + check_mm_layout 8 + check_mm_ui 14 + check_calc_local 11。服务端 verify_map/w1/w2/w4 全绿。
+- 基线（离线）**19 条**：frontend_smoke **79**、check_plaque_align **79**（2026-09-16 由 39 扩）、check_fish_skin **47**、check_faction **72**、check_settings_store 39、check_vein_skin 42、check_mm_layout、vein_cluster **26** / no_build_on_vein 5 / settle_spacing 6 / sea_village 15 / vein_settle_gap 10 / preview_* ×4 / edge_falloff / sync_preview_inline / w5 / w6 / w3_bfs_road；在线 4 条 = frontend_smoke + check_mm_layout 8 + check_mm_ui 14 + check_calc_local 11。服务端 verify_map/w1/w2/w4 全绿。
 - ⚠ 服务端验证别 kill 用户 8140 ⇒ 起**临时独立实例**：`dotnet build Server/Zongmen/ZongMen.csproj -o verify/_vmsrv -p:UseAppHost=false` 后 `Zongmen__Port=8157 Zongmen__MaxSeeds=64 Zongmen__DbPath=<%TEMP%/…>.sqlite dotnet verify/_vmsrv/ZongMen.dll`（`Options.FindRoot` 会向上找到仓库根 ⇒ 自动用仓库 `web/` 与 `Engine/js`）。⚠ **`MaxSeeds` 必须显式放大** —— appsettings 默认 3，而 `check_mm_ui` 每次用**新随机 seed**，连跑几次就把名额用满 ⇒ 页面拿不到世界、判据报「快照未就绪」，**长得像产品回归**。查法 `curl /api/map/stats` 看 `liveSeeds == maxSeeds`。⚠ 跑完 kill **只按命令行含 `_vmsrv` 的 dotnet PID**（`wmic process where "name='dotnet.exe'" get processid,commandline`）+ 删 `verify/_vmsrv`。
 - ⚠ **Chrome profile 泄漏**：`live_cap.mjs`/`check_mm_layout.mjs` 曾把 `rmSync(profile)` 放 `setTimeout` 而紧接着 `process.exit()` ⇒ 定时器永不触发；本机 `%TEMP%` 曾积 **255 个 `wb-*` 目录 / 3.54 GB**（已改**同步删+重试**，`Atomics.wait` 当同步小睡）。⚠ **别在回归跑动中清 `%TEMP%/wb-*`** —— 会删掉在跑的判据 profile 并当场假红（自伤）。⚠ 清 `wb-*` 时**别碰无短横的 `wb/`**（隔离实例的库在里面）。
 - ⚠ 判据「绝对值阈值」在 headless 下极易假红 ⇒ 必须改 **A/B 归因**（例：`check_calc_local` 的 S5 原判「hybrid 首屏最长任务 ≤50ms」恒红 ~250ms，归因后发现 **server 档（零本地算）也 245~254ms** ⇒ 那是 WebGL/着色器/图集启动开销；改成「hybrid ≤ server + 40ms」）。⚠ `frontend_smoke` 的「解码字段读取审计」按**项目约定**放行 **`_` 前缀**属性（线路 protobuf 字段不带下划线 ⇒ `_xxx` 只可能是前端自挂 memo：`_anc`/`_fac`/`_facV`）。⚠ **判据的参照系不能是被测规则自己的目标函数**（自证陷阱）—— skill §32；⚠ 判据复算必须与实现**同容差语义**（2e-13 的 tie 就能翻案）—— skill §32.1。

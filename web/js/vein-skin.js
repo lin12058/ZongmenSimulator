@@ -210,6 +210,42 @@
     { key: '从属', level: 3, hScale: 1.05, hRand: [0.70, 0.86], coreElev: 0.70 }
   ];
 
+  /* ---------- 地盘环的「占地格」(2026-09-16 十四版, 用户报障) ----------
+     用户原话: 「大灵脉 1 格外面 6 格, 中的是 1 格下面 2 格 —— 但是在显示地上的
+     地盘彩环的时候没有对应的另外 6 格和 2 格格子显示」。
+     即: **峰体**十一版起已按档占地 (7/3/1), 但 main.js 画的**地盘色环**只垫了中心 1 格。
+
+     本表 = 「档位 → 保留哪些偏移」在**前端唯一的一份** (地盘环、将来的小地图/预览页共用),
+     偏移语义与引擎逐字同源:
+
+       偏移序 = 本格 + 六邻, 槽位序同 mapgen.NEIGH_SLOTS (0东 1东南 2西南 3西 4西北 5东北)
+       ⇒ 中档的两个从属格正是「西南(-1,+1) + 东南(0,+1)」= 用户说的"下面那 2 格"。
+
+     ⚠ 优先走引擎真源: MG.veinFootKeep 是纯函数, 引擎就绪时**不走下面的字面量**;
+       引擎缺席 (EngineLocal.load 失败 ⇒ 主视图降级为服务端下发) 才用镜像表。
+       镜像表由 verify/check_vein_cluster.mjs §D **跨源逐值断言** (与 check_faction 里的
+       SECT_DOMAIN_R 同一手法) —— 引擎改档而这里没跟, 判据会红。 */
+  var FOOT_OFF = [[0, 0], [1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+  var FOOT_MIRROR = {
+    0: [0, 1, 2, 3, 4, 5, 6],       // 大: 本格 + 六邻 (七星) = 7 格
+    1: [0, 2, 3],                   // 中: 本格 + 东南(0,1) + 西南(-1,1) = 3 格
+    2: [0],                         // 小: 仅本格 = 1 格
+    3: [0]                          // 从属档不会作为「中心」出现, 兜底同小档
+  };
+  /* MG 可选: 传了 (MapGen 实例) 就按引擎判; 未传/不是引擎 ⇒ 镜像表 */
+  function footOffsets(level, MG) {
+    var lv = level | 0, out = [], i;
+    if (MG && typeof MG.veinFootKeep === 'function') {
+      for (i = 0; i < FOOT_OFF.length; i++) {
+        if (MG.veinFootKeep(lv, FOOT_OFF[i][0], FOOT_OFF[i][1])) out.push(FOOT_OFF[i]);
+      }
+      return out;
+    }
+    var m = FOOT_MIRROR[lv] || FOOT_MIRROR[2];
+    for (i = 0; i < m.length; i++) out.push(FOOT_OFF[m[i]]);
+    return out;
+  }
+
   /* ---------- 五行 (顺序 == 引擎 ELEMENTS: 0金 1木 2水 3火 4土) ----------
      ⚠ glow 必须**逐值等于**引擎的 ELEMENT_RGB (mapgen.js) —— 它是下发给前端的
        灵根色, 灵脉晕圈/名牌/峰上敷色共用一套; 不一致会出现"山是青色、圈是绿色"。
@@ -430,6 +466,9 @@
     variantPal: variantPal,
     variantSprite: variantSprite,
     levelInfo: levelInfo,
+    /* 地盘环的占地偏移 (十四版): footOffsets(level, MG?) → [[dq,dr],...]; footOff = 偏移池 */
+    footOffsets: footOffsets,
+    footOff: FOOT_OFF,
     label: veinLabel,
     tipU: tipU,
     apexV: apexV,

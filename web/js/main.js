@@ -1130,6 +1130,13 @@
   var statBanner = 0;              // 本帧竖排匾额画了几块
   var statVeinBanner = 0;          // 本帧灵脉签画了几块 (灵脉名可单独关后, 与聚落签分开验数)
   var statWaterQuads = 0;          // 上次重建道路时水上虚线段的四边形数
+  /* 灵脉「地盘彩环」实际铺了几格 (十四版 2026-09-16, 用户: 环只垫了中心 1 格)。
+     按档计数 ⇒ headless 直接读「大档是不是 7 格 / 中档是不是 3 格」, 不必数像素。 */
+  var statVeinRing = 0;            // 本帧合计
+  var statVeinRingLv = [0, 0, 0, 0];
+  /* 逐根明细 (仅 DEBUG 收集): [{name,lv,n}] ⇒ headless 可直接断言「某根大灵脉铺了 7 格」,
+     比"按档总数是 7 的倍数"更硬 (海里/被抢的格子会让总数不是整倍数, 那是合规的)。 */
+  var statVeinRingRows = [];
   /* 格 → 地类 (biome)。数据来自已加载区块; 未加载返回 -1 (探针自动放弃)。
      ⚠ 区块归属**不能**用 round(q/chunkS): 引擎 chunkOfTile 是「区块格心四候选
        取六边距最近 + 固定平局序」, 与四舍五入不等价 (chunkS=21 时 (32,32) 归
@@ -1587,6 +1594,9 @@
     var cw = els.overlay.width, ch = els.overlay.height;
     statBanner = 0;                            // 验数: 本帧匾额计数归零
     statVeinBanner = 0;                        // 验数: 灵脉签计数归零
+    statVeinRing = 0;                          // 验数: 地盘环格数归零 (按档也要归零)
+    statVeinRingLv[0] = statVeinRingLv[1] = statVeinRingLv[2] = statVeinRingLv[3] = 0;
+    if (DEBUG) statVeinRingRows.length = 0;
     bannerBoxes.length = 0;                     // 签位占用表同步清空 (避让用)
     if (DEBUG) plaqDrawn = {};                  // 匾额落点记录同步归零 (只有 DEBUG 会读)
     if (!staticLayer) staticLayer = document.createElement('canvas');
@@ -1723,6 +1733,37 @@
     /* 灵脉: 七星花 + 群落灵气晕圈 (后端群落数据) */
     var veinLabels = [];
     if (showVeins) {
+      /* ---- 地盘环的**归属裁决**表 (十四版 2026-09-16) ----
+         地盘环要按档铺 7/3/1 格, 相邻群落贴近时两圈会抢同一格。引擎侧由
+         `veinNear(q,r)` 裁决 (它扫**9 宫格群落**取 hexDist 最近的灵脉, 所以从属格
+         归"最近的峰"), 前端读不到服务端的群落窗口 ⇒ 就**已加载**群落集合用同一条
+         规则: hexDist 最近者胜。视野外的群落本来也不画, 故等价。
+         ⚠ 先按 (q,r) 排序再裁决 ⇒ 结果与 comm 包的到达顺序无关 (确定性);
+           「幻影灵脉」(跨群落两根峰撞同一格) 因此恒取 (q,r) 小者。 */
+      var veinAll = [];
+      var veinMG = null;
+      (function () { var E = EL(); veinMG = (E && E.mapgen) ? E.mapgen() : null; })();
+      commCells.forEach(function (cm) {
+        if (!cm.exists) return;
+        var cRGB = cm.elementRGB || (cm.elementRGB = geoElementColor(cm.element));
+        for (var vi = 0; vi < cm.veins.length; vi++) {
+          var v0 = cm.veins[vi];
+          veinAll.push({ v: v0, rgb: v0.variant ? geoVariantColor(v0.variant) : cRGB });
+        }
+      });
+      veinAll.sort(function (p, q) {
+        var d = (p.v.q | 0) - (q.v.q | 0);
+        return d !== 0 ? d : ((p.v.r | 0) - (q.v.r | 0));
+      });
+      function veinOwnerOf(cq, cr) {
+        var best = null, bd = 1e9;
+        for (var i = 0, n = veinAll.length; i < n; i++) {
+          var v1 = veinAll[i].v, dq0 = cq - (v1.q | 0), dr0 = cr - (v1.r | 0);
+          var d = (Math.abs(dq0) + Math.abs(dr0) + Math.abs(dq0 + dr0)) / 2;  // = hexDist, 内联省调用
+          if (d < bd) { bd = d; best = veinAll[i]; }
+        }
+        return best;
+      }
       commCells.forEach(function (cm) {
         if (!cm.exists) return;
         var cRGB = cm.elementRGB || (cm.elementRGB = geoElementColor(cm.element));
@@ -1738,18 +1779,55 @@
           var v = cm.veins[vv];
           var rgb = v.variant ? geoVariantColor(v.variant) : cRGB;
           /* R8 (2026-09-15 十一版): 灵脉「地盘」色环 —— 峰下铺一圈元素色六边地台,
-             与 R6 的城镇地盘同一「六边地台」语汇, 让灵脉本体一眼分得清金木水火土。 */
-          ctx.save();
-          ctx.beginPath();
-          hexPath(ctx, v.x, v.y, geo.hexR * 0.94);
-          ctx.globalAlpha = 0.16;
-          ctx.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
-          ctx.fill();
-          ctx.globalAlpha = 0.55;
-          ctx.strokeStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
-          ctx.lineWidth = Math.max(0.8, geo.hexR * 0.09);
-          ctx.stroke();
-          ctx.restore();
+             与 R6 的城镇地盘同一「六边地台」语汇, 让灵脉本体一眼分得清金木水火土。
+             十四版 (2026-09-16, 用户报障): 地台从**只垫本格 1 格**改成**铺满该档占地**
+             (大 7 / 中 3 / 小 1) —— 用户: 「大灵脉 1 格外面 6 格, 中的是 1 格下面 2 格
+             … 但地盘彩环没有对应的另外 6 格和 2 格」。
+             峰体十一版起就已按档占地, 漏的只有地台。偏移表 = vein-skin.js VS.footOffsets
+             (引擎就绪时**直接问引擎** MG.veinFootKeep, 引擎缺席才用镜像表)。 */
+          var foot = (VS && VS.footOffsets) ? VS.footOffsets(v.level, veinMG) : [[0, 0]];
+          var rS = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+          var ringPts = [];
+          for (var fi = 0; fi < foot.length; fi++) {
+            var oq = (v.q | 0) + foot[fi][0], orr = (v.r | 0) + foot[fi][1];
+            var own = veinOwnerOf(oq, orr);
+            if (!own || own.v !== v) continue;       // 该格归更近的峰 ⇒ 让给它画 (免得两色叠脏)
+            if (foot[fi][0] === 0 && foot[fi][1] === 0) {
+              ringPts.push(v.x, v.y);                // 本格恒用封包的 (v.x,v.y): 与灵脉花/名牌同点
+              continue;
+            }
+            /* 从属格: 引擎在**海里不长峰** (fields: e < SEA_LEVEL 不出 vinfo) ⇒ 地台也不铺。
+               ⚠ 海拔未到货 (elevAtTile 返 -1, 该区块没加载) 时**照画**: 宁可多铺一格,
+                 也不能因为视口边缘没数据就把环吃掉。 */
+            var et = elevAtTile(oq, orr);
+            if (et >= 0 && geo.seaLevel != null && et < geo.seaLevel) continue;
+            var wt = MC.tileToWorld(oq, orr);
+            ringPts.push(wt.x, wt.y);
+          }
+          if (ringPts.length) {
+            ctx.save();
+            /* 先铺满全部格再统一描边 —— 免得后一格的半透明填充盖住前一格的边 */
+            ctx.globalAlpha = 0.16;
+            ctx.fillStyle = rS;
+            for (var pf = 0; pf < ringPts.length; pf += 2) {
+              hexPath(ctx, ringPts[pf], ringPts[pf + 1], geo.hexR * 0.94);
+              ctx.fill();
+            }
+            ctx.globalAlpha = 0.55;
+            ctx.strokeStyle = rS;
+            ctx.lineWidth = Math.max(0.8, geo.hexR * 0.09);
+            for (var ps = 0; ps < ringPts.length; ps += 2) {
+              hexPath(ctx, ringPts[ps], ringPts[ps + 1], geo.hexR * 0.94);
+              ctx.stroke();
+            }
+            ctx.restore();
+            statVeinRing += ringPts.length / 2;
+            statVeinRingLv[v.level | 0] += ringPts.length / 2;
+            if (DEBUG) {
+              statVeinRingRows.push({ name: veinLabel(v), lv: v.level | 0,
+                                      n: ringPts.length / 2, q: v.q | 0, r: v.r | 0 });
+            }
+          }
           IT.drawVeinFlower(ctx, v.x, v.y, null, rgb, { level: v.level });
           /* 名牌文案: 「<地貌名>·<档>」—— 由 veinLabel() 统一 (2026-09-15 用户: 去括号,
              并用全角间隔号; 同时收掉「灵脉」叠字, 见 veinLabel 注释)。
@@ -3076,6 +3154,9 @@
             propBuilt: propBuilt.size, cutChunks: cutChunks, propsRemoved: removed,
             propsTotal: props, keptVein: keptVein, keptMtn: keptMtn, keptOther: keptOther,
             banners: statBanner, veinBanners: statVeinBanner,
+            /* 十四版: 地盘环的硬事实 —— 合计格数 / 按档格数 / 逐根明细 (大档必须能看到 7) */
+            veinRing: statVeinRing, veinRingLv: statVeinRingLv.slice(),
+            veinRings: statVeinRingRows.slice(0, 80),
             bridges: statBridge, waterQuads: statWaterQuads,
             factionsOn: FAC_OK, settleVer: settleVer,
             /* 九版点选态: headless 用 Input.dispatchMouseEvent 点一下, 再读这两项
@@ -3240,6 +3321,18 @@
             var t1 = '';
             try { t1 = JSON.stringify(window.__plaqProbe()); } catch (e) { t1 = JSON.stringify({ err: String(e) }); }
             fetch('/api/debug/snap', { method: 'POST', body: t1 }).catch(function () { /* noop */ });
+          }, 11000);
+        }
+        /* ?veinprobe=1 (十四版 2026-09-16): 灵脉「地盘彩环」的**事实出口** —— 走同一条
+           「页面自回传」通道 (CDP Runtime.evaluate 对本页会挂, 见 skill §34):
+           POST __feat() 的 JSON ⇒ headless 直接读 `veinRings` 里某根大灵脉是不是 7 格,
+           不必数像素。⚠ 与 `capture=1` 落的是**同一个**快照文件, 别同时开。 */
+        if (/[?&]veinprobe=1/.test(location.search)) {
+          setTimeout(function () {
+            var t2 = '';
+            try { t2 = JSON.stringify(window.__feat ? window.__feat() : { err: 'no feat' }); }
+            catch (e) { t2 = JSON.stringify({ err: String(e) }); }
+            fetch('/api/debug/snap', { method: 'POST', body: t2 }).catch(function () { /* noop */ });
           }, 11000);
         }
         /* 定点相机助手: 把「路压水」「建筑压水」的世界格坐标吐出来 —— 否则

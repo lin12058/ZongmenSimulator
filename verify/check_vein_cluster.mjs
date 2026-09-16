@@ -17,6 +17,12 @@
  *     6. 小灵脉: 六邻**没有**自己的从属格 (1/1)
  *   C. 从属格不得污染「独立灵脉」层
  *     7. 每个群落恒有 1 根 level-0 大灵脉; veins[] 内不得出现 level=3 从属格; 群落内中心不重复
+ *   D. 前端「地盘彩环」的档位表 (2026-09-16 十四版 — 用户:「大灵脉 1 格外面 6 格, 中的是
+ *      1 格下面 2 格 … 但地盘彩环没有对应的另外 6 格和 2 格」⇒ 峰体早已按档, 只有地台漏了)
+ *     8. web/js/vein-skin.js VS.footOffsets 的**镜像表**逐档 == 引擎 veinFootKeep (跨源)
+ *     9. 偏移池序 == 引擎 NEIGH_SLOTS; 中档恰为 本格 + 东南(0,1) + 西南(-1,1)
+ *    10. 源码守卫: main.js 走 VS.footOffsets, 旧「只画本格」写法不得复活;
+ *        取数通道齐备 (?veinprobe=1 ⇒ __feat().veinRings 逐根格数)
  *
  * 已知非缺陷量 (不判失败, 仅打印):
  *   X. 跨群落中心撞格: 两个相邻群落各自把次级灵脉落在同一整数格 (各自的生成互不知情)。
@@ -130,6 +136,45 @@ check('中灵脉占地 3/3 (本格 + 西南 + 东南)', midShort === 0, `缺格 
 check('小灵脉无从属 (六邻不出现自己的从属格)', smallExtra === 0, `异常 ${smallExtra} 根`);
 check('每群落恒有 1 根大灵脉 (level 0 中心)', noBig === 0, `缺中心 ${noBig} 个群落`);
 check('群落内中心不重复', intraDup === 0, `重复 ${intraDup}`);
+
+/* ------------------------------------------------------------------
+   D. 前端「地盘彩环」的档位表 (2026-09-16 十四版)
+   病灶 (用户原话): 「大灵脉 1 格外面 6 格, 中的是 1 格下面 2 格 —— 但是在显示地上的
+   地盘彩环的时候没有对应的另外 6 格和 2 格格子显示」。
+   ⇒ 峰体的 7/3/1 十一版就有了 (B 段), 但 main.js 画的**地盘色环只垫了中心 1 格**。
+   修法: 偏移表下沉到 web/js/vein-skin.js (VS.footOffsets) —— 引擎就绪时**问引擎**
+   (MG.veinFootKeep), 引擎缺席才用镜像表。本段把「镜像表 == 引擎」跨源逐值钉死
+   (与 check_faction 里的 SECT_DOMAIN_R 同一手法: 引擎改档而前端没跟 ⇒ 这里必红)。
+   ------------------------------------------------------------------ */
+console.log('\n== D. 前端地盘环档位 (web/js/vein-skin.js VS.footOffsets) ==');
+global.window = globalThis;
+(0, eval)(fs.readFileSync(path.join(ROOT, 'web', 'js', 'vein-skin.js'), 'utf8'));
+const VS = global.VeinSkin;
+const mainSrc = fs.readFileSync(path.join(ROOT, 'web', 'js', 'main.js'), 'utf8');
+const fk = (a) => JSON.stringify(a);
+check('D0 VeinSkin.footOffsets 已导出', !!(VS && typeof VS.footOffsets === 'function'), '');
+check('D1 偏移池序 == 引擎 NEIGH_SLOTS (0东 1东南 2西南 3西 4西北 5东北)',
+  fk(VS.footOff) === fk([[0, 0]].concat(MG.NEIGH_SLOTS)), fk(VS.footOff));
+for (const lv of [0, 1, 2, 3]) {
+  const mirror = VS.footOffsets(lv);
+  const viaMG = VS.footOffsets(lv, MG);
+  const eng = RING.filter(([q, r]) => MG.veinFootKeep(lv, q, r));
+  check(`D2 [level ${lv}] 镜像表 == 引擎 veinFootKeep`, fk(mirror) === fk(eng),
+    `镜像 ${fk(mirror)} vs 引擎 ${fk(eng)}`);
+  check(`D3 [level ${lv}] 传引擎时逐值相同`, fk(viaMG) === fk(eng), fk(viaMG));
+}
+check('D4 中档 = 本格 + 东南(0,1) + 西南(-1,1) (用户说的"下面 2 格")',
+  fk(VS.footOffsets(1)) === fk([[0, 0], [0, 1], [-1, 1]]), fk(VS.footOffsets(1)));
+check('D5 大档 7 格 / 小档 1 格', VS.footOffsets(0).length === 7 && VS.footOffsets(2).length === 1,
+  `${VS.footOffsets(0).length}/${VS.footOffsets(2).length}`);
+/* 源码守卫 (防回退): 地盘环必须走档位表; 旧的「只画 v.x,v.y 一格」写法不得复活 */
+check('D6 main.js 已接线 VS.footOffsets', /VS\.footOffsets\(\s*v\.level/.test(mainSrc), '');
+check('D7 旧「地盘环只画本格」写法已消失',
+  mainSrc.indexOf('hexPath(ctx, v.x, v.y, geo.hexR * 0.94)') < 0, '');
+check('D8 取数通道齐备 (__feat 暴露 veinRing/veinRings + ?veinprobe=1 出口)',
+  /veinRing: statVeinRing, veinRingLv: statVeinRingLv\.slice\(\)/.test(mainSrc) &&
+  /veinRings: statVeinRingRows\.slice\(/.test(mainSrc) &&
+  /veinprobe=1/.test(mainSrc), '');
 
 /* 采样几根大灵脉, 打印七星方位自检 */
 MG.init(SEEDS[0]);
