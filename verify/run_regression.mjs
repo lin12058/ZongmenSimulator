@@ -77,6 +77,11 @@ const JOBS = [
   ['check_vein_cluster.mjs', [], 'off'],
   ['check_no_build_on_vein.mjs', [], 'off'],
   ['check_settle_spacing.mjs', [], 'off'],
+  /* 玩家落点校验的「邻域覆盖范围」契约 (2026-09-21, 玩家放置宗门方案 §2.7):
+     REGION_M=18 + 锚点抖动 6.3 + 选址再选 PROSPECT_R=4 ⇒ 单侧最大偏移 10.3 格
+     ⇒ 第 1 环最近可能只有 7.7 格 (< DOMAIN_R_MAX=8) ⇒ **必须扫 2 环 (25 格)**。
+     本判据把该推导钉死, 并做真实世界抽样 + 空真防护 (hitsInDomain=0 判 FAIL)。 */
+  ['check_place_neighborhood.mjs', [], 'off'],
   ['check_sea_village.mjs', [], 'off'],
   ['check_vein_settle_gap.mjs', [], 'off'],
   ['check_preview_vein_marker.mjs', [], 'off'],
