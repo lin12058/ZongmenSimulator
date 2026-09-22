@@ -86,7 +86,7 @@
     pointer-events: none;
   }
   #topbar > * { pointer-events: auto; }
-  /* 左上纵列: 题名 + 宗门录 (原「山河五色/种子」所在位) */
+  /* 左上纵列: 题名 + 本宗面板 (原「山河五色/种子」所在位) */
   #hudLeft { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
   #titleBox { padding: 9px 15px 7px; }
   #titleBox h1 {
@@ -155,22 +155,17 @@
   button.off { opacity: 0.45; text-decoration: line-through; }
   #stats { font-size: 12px; color: var(--ink-soft); letter-spacing: 1px; }
 
-  /* ---- 宗门录 (代替原「山河五色」图例) ----
-     菜单必须浮出面板之外, 而 .panel 的 clip-path 会裁剪整个子树 →
-     下拉层放在 #sectWrap 里 (与 #sectBox 平级), 由 #sectWrap 作定位上下文。 */
+  /* ---- 本宗面板 (代替原「山河五色」图例) ----
+     2026-09-23 十二版: 旧「宗门录 + 择宗」整条闭环下线 —— 本面板只显示玩家
+     **自己的**宗门 (数据源 = 服务端 PlayerSect 表, 见 docs/玩家信息表设计.md)。
+     ⚠ 「看其他宗门/聚落的详情」不在本面板, 已移入独立模块 js/infocard.js。
+     #sectWrap 仍作定位上下文保留 (将来若在本面板上挂浮层: .panel 的 clip-path
+     会裁剪整个子树 ⇒ 浮层必须与 #sectBox 平级放在 #sectWrap 里)。 */
   #sectWrap { position: relative; }
   #sectBox { width: 246px; padding: 9px 12px 11px; }
   #sectHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   #sectHead .cap { font-size: 13px; letter-spacing: 5px; color: var(--ink); }
   #sectHead .cap b { font-weight: 400; color: var(--seal); }
-  #sectMenuBtn {
-    padding: 2px 9px; cursor: pointer; font-family: inherit;
-    font-size: 12px; letter-spacing: 2px; color: var(--ink-soft);
-    border: 1px solid var(--panel-border); border-radius: 2px;
-    background: linear-gradient(180deg, rgba(255,252,244,0.92), rgba(237,228,207,0.9));
-    transition: color 0.15s, border-color 0.15s;
-  }
-  #sectMenuBtn:hover, #sectMenuBtn.on { color: var(--seal); border-color: var(--seal); }
   .sec-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
   .sec-name { font-size: 17px; line-height: 1.3; letter-spacing: 3px; color: var(--ink); }
   /* 朱砂印章: 宗门前二字竖排 */
@@ -196,32 +191,6 @@
   }
   .tag b { font-weight: 400; color: var(--seal); }
   .sec-empty { padding: 12px 2px 8px; font-size: 12.5px; letter-spacing: 2px; color: var(--ink-faint); text-align: center; }
-
-  /* ---- 择宗菜单 (水墨卷轴) ---- */
-  #sectMenu {
-    display: none; position: absolute; left: 0; right: 0; top: calc(100% + 5px); z-index: 6;
-    max-height: 268px; overflow-y: auto; padding: 5px 0;
-    background: radial-gradient(130% 100% at 20% 0%, rgba(255,253,247,0.985), rgba(240,232,216,0.97));
-    filter: drop-shadow(0 6px 14px rgba(74,55,28,0.3));
-    clip-path: polygon(0.8% 0.6%, 99% 0.2%, 99.6% 99%, 0.4% 99.6%);
-  }
-  #sectMenu::before {
-    content: ''; position: absolute; inset: 0; pointer-events: none;
-    border: 1px solid rgba(120,98,66,0.42);
-    clip-path: polygon(0.8% 0.6%, 99% 0.2%, 99.6% 99%, 0.4% 99.6%);
-  }
-  #sectMenu.open { display: block; }
-  #sectMenu .mm-item {
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    padding: 5px 12px; font-size: 12.5px; letter-spacing: 1px;
-    cursor: pointer; color: var(--ink-soft);
-  }
-  #sectMenu .mm-item:hover { background: rgba(166,58,44,0.09); color: var(--seal); }
-  #sectMenu .mm-item.cur { color: var(--seal); }
-  #sectMenu .mm-item.cur .mm-nm::before { content: '「'; }
-  #sectMenu .mm-item.cur .mm-nm::after { content: '」'; }
-  #sectMenu .mm-d { font-size: 11.5px; color: var(--ink-faint); }
-  #sectMenu .mm-empty { padding: 9px 12px; font-size: 12px; letter-spacing: 2px; color: var(--ink-faint); }
 
   /* ---- 信息面板 ---- */
   #info {
@@ -343,13 +312,11 @@
       <div id="sectWrap">
         <div id="sectBox" class="panel">
           <div id="sectHead">
-            <span class="cap">宗门<b>录</b></span>
-            <button id="sectMenuBtn">择宗 ▾</button>
+            <span class="cap">本<b>宗</b></span>
           </div>
           <div class="ink-rule"></div>
-          <div id="sectBody"><div class="sec-empty">山河初定，尚无所属</div></div>
+          <div id="sectBody"><div class="sec-empty">尚未择地立宗</div></div>
         </div>
-        <div id="sectMenu"></div>
       </div>
     </div>
     <div id="controls" class="panel">
@@ -444,6 +411,7 @@
        (两边都只读它; 全站唯一 eval / 唯一 init(seed) 点, 见文件头注释) -->
   <script src="js/engine-local.js"></script>
   <script src="js/minimap-vein.js"></script>
+  <script src="js/infocard.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>

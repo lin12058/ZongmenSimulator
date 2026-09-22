@@ -45,6 +45,20 @@
 - **世界种子 = 服务端资产**：`WorldLedger.cs` **独立表**（⚠ 绝不能塞 `Data(Key,Value)`，`PruneExcept` 会静默删台账）＋ `/api/world/current|next|list`；前端拿不到种子直接 `showFatal`，**绝不回落前端造**；`?seed=` 仅调试覆盖（削掉即废验证管线）。
 - **设置唯一真源 `web/js/store.js`**（键 `zongmen.settings.v1`）；⚠ `showVeins/showLabels` 变量名**不能改**（`frontend_smoke` 逐名扫原文）。
 
+## 玩家放置宗门（方案 `docs/玩家宗门放置与城市迭代方案.md`；**细则全在该文档 §2~§4**）
+- **两笔账必须分账**：道路重算 **405~443 ms**（热地形，25 区域格）vs 城市重算 **31 ms**（纯城市 ≈ **23 ms**）⇒ 道路 ≈ 19 倍。⚠ `growTownFootprint` **不读道路**（只读 fields/landuseOf/veinNear，mapgen.js:950~975）⇒ 玩家实体不进 `settlementsFor` 则**既有城市无需重算**；用户口中的「附近城市重算」实为「附近**道路**重算」。
+- ⚠ **`roadVer` 只能 +1 增量，绝不归零**：`resetRoads()` 设 roadVer=0（mapgen.js:1851）撞 `ObserveRoadVer` 单调取大（MapWorldService.cs:114~121）⇒ known 保持旧值 ⇒ tile 判「新鲜」⇒ **路重建了却永远送不出去**（无异常无日志）。只按边清 roadCache/roadFail + 显式 roadVer++。
+- ⚠ **邻域校验必须扫 2 环（25 格）**：REGION_M=18 + 锚点抖动 6.3 + PROSPECT_R=4 ⇒ 单侧最大偏移 10.3；第 1 环最近可能仅 7.7 格 < 8 禁区。判据 `check_place_neighborhood.mjs`。
+- 判据：`check_place_road_recompute.mjs`（4 PASS / 25 s；段 2 跑 A*，样本数已参数化）。注入手法仍是**内存副本注入** —— 引擎尚无 `setExternalSettlements`，真接口落地后脚本会**主动报错**而不是静默跑旧路径。
+- ⚠ 测「重算代价」前必须 **warm 上一层缓存**（否则测出的是两层之和），且 warm 是否充分要做成**断言**；首测含 JIT（85ms vs 中位 31ms）⇒ **必须交替多轮取中位**。
+
+## 前端 UI 模块边界（2026-09-23 十二版）
+- ⚠ **`#sectWrap` = 「本宗」面板**，数据源 = 服务端 `PlayerSect` 表（**不读 `settleCells`** —— 本宗是持久资产，不在视野内也要显示）。旧「宗门录 + 择宗」闭环**已全删**（`pinId`/择宗菜单/点图认领/`layerFingerprint`）。地图渲染仍走 `EntityGroup→PlaceEntity→settleCells`（与 NPC 同通路），两条路独立。
+- 「看**他人**宗门/聚落详情」→ 独立模块 `web/js/infocard.js`（`window.InkInfoCard`）。**只注入不渲染**：`main.js initInfoCard()` 接数据源，将来调 `describe(q,r,refQ,refR)` → `{found,kind,name,html}`。⚠ 引入顺序必须在 `main.js` **之前**；`TIER_NAME` 留 main.js（全局口径）经 `init({tierName})` 注入。
+- ⚠ 删前端 DOM 必与删 JS 引用**同批**：`frontend_smoke`（**live 组**）有反向守卫「JS 引用的每处 DOM id 必须已定义」，只删一边必假红。
+- `__feat()` 删 `sectPin`，新增 `mySect`（本宗面板态）/`infoCard`（模块就位）。
+- `verify/_w_head_main.js`（167 KB 旧 main.js 快照）**已删**（2026-09-23）。⚠ `.gitignore:24` 的 `verify/_*.js` 覆盖它 ⇒ **git 不跟踪 ⇒ 删后不可 git 恢复**（同族 `_*.png`/`_*.txt` 亦然，见 :13/:27）⇒ 删这类文件**必先落副本**，别套用「删错了就 `git restore`」。
+
 ## ⚠ 文件删除高危
 - 已 3 次误删。清理一律 Node `fs.unlinkSync` 绝对路径 + basename/数量断言，**先按 `git -c core.quotepath=false ls-files` 过滤被跟踪名单**；禁 shell 通配与 `git rm`。恢复 `git restore --source=HEAD --worktree -- verify/`。⚠ `verify/_scratch_diag.mjs` 是**被跟踪**的，别按 `_` 前缀当临时件。⚠ core.quotepath 给非 ASCII 路径加引号 ⇒ 统计必带 `-c core.quotepath=false`。
 

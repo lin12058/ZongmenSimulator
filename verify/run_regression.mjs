@@ -82,6 +82,15 @@ const JOBS = [
      ⇒ 第 1 环最近可能只有 7.7 格 (< DOMAIN_R_MAX=8) ⇒ **必须扫 2 环 (25 格)**。
      本判据把该推导钉死, 并做真实世界抽样 + 空真防护 (hitsInDomain=0 判 FAIL)。 */
   ['check_place_neighborhood.mjs', [], 'off'],
+  /* 玩家落定的「同步重算代价 + 机制正确性」契约 (2026-09-23, 玩家放置宗门方案 §3.5/§3.6):
+     · 机制 (推翻 v2 的错误结论): 新宗门会**挤掉既有需求边** (rngDominated 三方判定) +
+       翻转骨架集 (Kruskal) ⇒ 「旧边一条都不用重算」是错的, 用户要求是对的;
+     · 代价分账: 道路 405~443ms (贵) vs 城市 31ms (纯城市 ~23ms) ⇒ **两笔账别记成一笔**;
+     · 红线: roadVer 只能 +1 增量, 归零会撞 ObserveRoadVer 单调取大 ⇒ 路永远送不出去;
+     · 反空真: 「不清 demandCache/skeletonCache 就注入」必须**得到与基线相同的几何**
+       (即证明"注入真的会静默失效"), 命中数 0 说明样本无鉴别力。
+     ⚠ 段 2/3 会跑 A* (~20s), 故样本数参数化 (默认 1 落点 / 3 轮), 深查可放大。 */
+  ['check_place_road_recompute.mjs', ['seed-check', '5', '1', '3'], 'off'],
   ['check_sea_village.mjs', [], 'off'],
   ['check_vein_settle_gap.mjs', [], 'off'],
   ['check_preview_vein_marker.mjs', [], 'off'],

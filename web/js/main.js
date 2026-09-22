@@ -215,15 +215,17 @@
     return new URLSearchParams(location.search).get('veinpt') === 'apex' ? 'apex' : 'center';
   })();
 
-  /* ---------- 宗门录 (左上角水墨面板) ----------
-     数据源: 地图实体层 settleCells 中 type==='sect' 的实体 (id/name/pop/tier/
-     styleName/buildings/resources), 不新增任何后端契约。
-     「掌门」一栏: 后端 mapgen 尚无归属系统 (owner 恒为空串, 见 mapgen.js 注释),
-     故由 seed+sect.id 确定性派生一个道号作演示 —— 事件系统接入后改为直接读 owner。
-     ⚠ 九版: **删除「随行·就近择宗」自动选择** —— 开局不再自动认领最近的一座宗门
-     (以前朱砂标记会随相机漂到最近的宗门上)。选中宗门只由玩家**主动**决定:
-     点击图上某一格 (若该格属某座宗门) 或从「择宗」菜单里点选。pinId 空 = 未择。 */
-  var sect = { pinId: '', pinEnt: null, curId: '', cur: null, items: [] };
+  /* ---------- 本宗面板 (左上角水墨面板, 2026-09-23 十二版) ----------
+     ⚠ 旧版「宗门录 + 择宗」整条闭环已下线 (用户: 「现在有的宗门的选择的什么的
+     都是之前版本的都要迭代掉, 之前的都不用了」):
+       · 删 择宗菜单 / 点地图认领宗门 / pinId 追随 —— 「从别人的宗门里挑一个当我的」
+         不再存在; 宗门由玩家**自己择地建** (见 docs/玩家宗门放置与城市迭代方案.md)。
+       · 删 「随行·就近择宗」(九版已删) 的残留。
+     本面板现在只管**玩家自己的宗门**, 数据源 = 服务端 PlayerSect 表 (待放置流程接入)。
+     立宗前显示引导态; 立宗后由 renderMySect() 按 mySect 渲染。
+     ⚠ 「查看**其他**宗门/聚落的详情」不是本面板的职责, 已抽为独立模块
+     web/js/infocard.js (另一套 UI 体系), 本面板不引用它。 */
+  var mySect = null;                // 玩家自己的宗门 (null = 未立宗); 由放置流程回填
 
   var chunkData = new Map();        // 'ca,cb' -> {arrays, bbox}
   var regionCells = new Map();      // 'i,j'  -> {region, roads}   (图层1: 区域名+道路)
@@ -700,7 +702,9 @@
       settleVer++;              // R6b (B): 新聚落到货 → 归属缓存 (st._fac) 全部失效重算
       markStaticDirty();
       rebuildPropBlock();       // 建筑占地格变 → 覆盖格重算 (聚落内的树/山让位)
-      updateSectPanel(false);   // 实体层更新即刷新宗门录 (id 未变时内部直接返回)
+      /* ⚠ 2026-09-23: 这里原有一句 updateSectPanel(false)。
+         本宗面板的数据源是服务端 PlayerSect 表, **不读视野内的实体层**,
+         所以实体层到货不再需要刷新它。 */
     }
     if (resp.poi) {
       for (var pg = 0; pg < resp.poi.groups.length; pg++) {
@@ -1022,6 +1026,31 @@
          ⚠ 模块必须容忍这两个键缺失 (main.js 可单独回退) ⇒ 那边写 `if (g.factionOf)`。 */
       factionOf: factionOf,
       factionColor: factionColor
+    });
+  }
+  /* 「他人聚落详情卡」数据源注入 (web/js/infocard.js)。
+     ⚠ 本模块**只注入, 不渲染** —— 它的 UI 属于另一套体系 (2026-09-23 用户:
+     「看其他人的宗门和信息属于另一个 UI 体系」)。等那套 UI 定形后直接:
+       var d = window.InkInfoCard.describe(q, r, refQ, refR);  // → {found,kind,name,html}
+       container.innerHTML = d.html;
+     数据源一律传**取值函数** (照 factionOf 的姿势) ⇒ 即使 main.js 之后 clear()
+     或换 seed, 模块读到的仍是最新集合。 */
+  function initInfoCard() {
+    var IC = window.InkInfoCard;
+    if (!IC || !IC.init) {
+      console.warn('他人详情卡模块未加载 (web/js/infocard.js) — 已跳过');
+      return;
+    }
+    IC.init({
+      esc: esc,
+      tierName: TIER_NAME,
+      veinLabel: veinLabel,
+      pxToTile: function (wx, wy) { return MC.pxToTile(wx, wy); },
+      worldSeed: function () { return worldSeed; },
+      settleCells: function () { return settleCells; },
+      regionCells: function () { return regionCells; },
+      commCells: function () { return commCells; },
+      regionM: function () { return geo ? geo.regionM : 0; }
     });
   }
   /* ---------- 标注层: 全部基于后端数据绘制 ---------- */
@@ -2251,7 +2280,7 @@
       if (rid !== infoSeq) return;                 // 已被更晚的点击取代 → 静默丢弃
       if (gen !== worldSeed) return;
       var rows = [];
-      /* D13: 服务端字符串一律过 esc() (与宗门录面板一致) —— 原实现直接拼进
+      /* D13: 服务端字符串一律过 esc() (与本宗面板一致) —— 原实现直接拼进
          innerHTML, 名称里含 < & 等字符就会破坏结构/注入。 */
       if (m.placeType) {
         rows.push('<div class="row"><span class="k">所在</span><span class="v">' +
@@ -2342,12 +2371,10 @@
     /* ⚠ 这里不再回填任何"种子输入框" —— 手输种子的 UI 已删 (2026-09-16 用户:
        「seed 由服务器统一产生, 不能通过前端产生」)。世界事实由 setWorldInfo 落 UI。 */
     seedEra(worldSeed);
-    /* 世界重铸: 旧世界的宗门 id 全部失效 → 清掉选中宗门与点选标记 (九版无"随行"可回退,
-       重铸后回到"未择"状态, 由玩家重新点选) */
-    sect.pinId = ''; sect.pinEnt = null; sect.curId = ''; sect.curFp = ''; sect.cur = null;
+    /* 世界重铸: 旧世界的宗门 id 全部失效 ⇒ 本宗面板回到未立宗态, 点选标记清空 */
+    mySect = null;
+    renderMySect();
     selMark = null;
-    openSectMenu(false);
-    updateSectPanel(true);
     hideInfo();
     forceStaticDirty();               // R1: 重铸需立即全量重绘 (清节流定时器) + 小地图 rev bump
   }
@@ -2361,11 +2388,7 @@
     els.stats.textContent = '已探明 宗门村镇 ' + st + ' · 墨路 ' + rd + ' · 灵脉 ' + veins;
   }
 
-  /* ---------- 宗门录: 数据整理 + 面板渲染 ---------- */
-  var MASTER_CH = '玄清太云素无孤寒沧离明虚重白赤青洞霄寂衍真澄空'.split('');
-  var MASTER_TAIL = ['真人', '上人', '道人', '散人', '老祖', '尊主'];
-  var TIER_NAME = ['', '下品宗门', '中品宗门', '上品宗门'];
-
+  /* ---------- 通用小工具 (多处共用) ---------- */
   function hash32(str) {
     var h = 2166136261 >>> 0;
     for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -2381,208 +2404,49 @@
     var dq = q1 - q0, dr = r1 - r0;
     return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
   }
-  function tileDistFrom(wx, wy, q, r) {
-    var t = MC.pxToTile(wx, wy);
-    return Math.round(hexDist(q, r, t.q, t.r));
+  /* 原「宗门录」的**他人详情**部分 (tileDistFrom / masterOf / regionNameAt / nearestVein
+     + MASTER_CH / MASTER_TAIL / VEIN_NEAR) 已迁至 web/js/infocard.js —— 它们只服务
+     「看别人的宗门」, 不是全局工具。品阶名 TIER_NAME 留下 (全局命名口径: 本宗面板
+     与将来的立宗 UI 都要用)。 */
+  var TIER_NAME = ['', '下品宗门', '中品宗门', '上品宗门'];
+
+  /* ---------- 本宗面板 (只看玩家自己的宗门) ----------
+     ⚠ 数据源 = 服务端 PlayerSect 表 (docs/玩家信息表设计.md), **不是**视野内的实体层:
+     本宗是**持久资产**, 不在视野内时同样要能显示 ⇒ 字段随放置流程一起回填, 不靠扫视野。
+     旧「宗门录」的字段口径 (掌门/门人/地界/灵脉/岁入) 属于**他人的**宗门,
+     已随详情卡迁至 web/js/infocard.js, 本面板不再引用。 */
+  function kv(k, v) {
+    return '<div class="kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
   }
-  function masterOf(ent) {
-    if (ent.owner) return ent.owner;
-    var h = hash32(worldSeed + '#' + ent.id);
-    return MASTER_CH[h % MASTER_CH.length] +
-           MASTER_CH[(h >>> 6) % MASTER_CH.length] +
-           MASTER_TAIL[(h >>> 11) % MASTER_TAIL.length];
+  function mySectHTML() {
+    var s = mySect, row = [];
+    row.push('<div class="sec-top"><div class="sec-name">' + esc(s.name) + '</div>' +
+             '<div class="sec-seal">' + esc(String(s.name).slice(0, 2)) + '</div></div>');
+    row.push('<div class="sec-sub">' + (TIER_NAME[s.tier] || '宗门') + '</div>');
+    row.push('<div class="ink-rule"></div>');
+    row.push(kv('门人', (s.pop || 0).toLocaleString() + ' 口'));
+    row.push(kv('领地', (s.domainR || 0) + ' 格'));
+    row.push(kv('位次', (s.q < 0 ? '西 ' + (-s.q) : '东 ' + s.q) + ' · ' +
+                         (s.r < 0 ? '北 ' + (-s.r) : '南 ' + s.r)));
+    return row.join('');
   }
-  function regionNameAt(q, r) {
-    if (!geo) return '';
-    var pack = regionCells.get(cellKey(Math.floor(q / geo.regionM), Math.floor(r / geo.regionM)));
-    return pack && pack.region ? pack.region.name : '';
+  /* 未立宗 → 引导态。立宗后由放置流程回填 mySect, 再调本函数即可。 */
+  function renderMySect() {
+    if (!els.sectBody) return;
+    els.sectBody.innerHTML = mySect
+      ? mySectHTML()
+      : '<div class="sec-empty">尚未择地立宗</div>';
   }
-  /* 最近灵脉: 遍历已加载的群落包 (随视野窗口有界, 无额外请求)。
-     VEIN_NEAR 格以外视为「未附」—— 免得写出一条几百格外的灵脉充数。 */
-  var VEIN_NEAR = 60;
-  function nearestVein(q, r) {
-    var best = null;
-    commCells.forEach(function (cm) {
-      if (!cm.exists || !cm.veins) return;
-      for (var i = 0; i < cm.veins.length; i++) {
-        var v = cm.veins[i];
-        var d = tileDistFrom(v.x, v.y, q, r);
-        if (!best || d < best.d) best = { v: v, d: d };
-      }
-    });
-    return best && best.d <= VEIN_NEAR ? best : null;
-  }
-  /* 视野内宗门, 按距相机中心的格距升序 */
-  function collectSects() {
-    var out = [], seen = {}, ct = MC.pxToTile(cam.x, cam.y);
-    settleCells.forEach(function (list) {
-      for (var i = 0; i < list.length; i++) {
-        var ent = list[i];
-        if (ent.type !== 'sect' || ent.state === 1) continue;   // 非宗门 / 已毁
-        if (seen[ent.id]) continue;                            // 邻块重复携带 → 去重
-        seen[ent.id] = true;
-        out.push({ ent: ent, d: Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)) });
-      }
-    });
-    out.sort(function (a, b) { return a.d - b.d; });
-    return out;
-  }
-  /* D14: 单遍 O(n) 扫描 (不排序、不建数组) —— 层指纹未变时用它回答
-     「选中的宗门还在不在、距离变没变」。
-     九版: 选中宗门**只由 pinId 决定** (点地图 / 择宗菜单), 「随行·就近择宗」已删 ⇒
-     这里不再有"最近宗门换了人"这回事, 只需找回 pinId 对应的实体。 */
-  function scanSects() {
-    var ct = MC.pxToTile(cam.x, cam.y);
-    var pin = null;
-    if (sect.pinId) {
-      settleCells.forEach(function (list) {
-        if (pin) return;
-        for (var i = 0; i < list.length; i++) {
-          var ent = list[i];
-          if (ent.type === 'sect' && ent.state !== 1 && ent.id === sect.pinId) {
-            pin = { id: ent.id, d: Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)), ent: ent };
-            return;
-          }
-        }
-      });
-    }
-    return { pin: pin };
-  }
-  /* 该格是否属于某座宗门的营建 (宗址格或它的山门建筑格) */
-  function tileInBuildings(ent, q, r) {
-    var bl = ent.buildings || [];
-    for (var i = 0; i < bl.length; i++) if (bl[i].q === q && bl[i].r === r) return true;
-    return false;
-  }
-  function sectAtTile(q, r) {
-    var hit = null;
-    settleCells.forEach(function (list) {
-      if (hit) return;
-      for (var i = 0; i < list.length; i++) {
-        var ent = list[i];
-        if (ent.type !== 'sect' || ent.state === 1) continue;
-        if ((ent.q === q && ent.r === r) || tileInBuildings(ent, q, r)) { hit = ent; return; }
-      }
-    });
-    return hit;
-  }
-  /* 点选一格 (2026-09-14 九版): 落朱砂标记; 若这一格属于某座宗门, 顺带把它设成
-     「宗门录」的选中宗门 —— 这是九版**唯一**的选宗途径之一 (另一条是择宗菜单)。 */
+
+  /* ---------- 点选 ---------- */
+  /* 点一格 → 落一枚朱砂标记 (画在覆盖层 ⇒ 点一下立刻可见, 不必等静态层置脏)。
+     ⚠ 旧版的「若该格属某座宗门则顺带把它设为选中宗门」已删 (2026-09-23 十二版):
+     择宗闭环整体下线。本函数现在只回答「玩家点了哪一格」,
+     供「选点立宗」与「查他人聚落」两套流程各自复用。 */
   function selectTile(t) {
     if (!t) return;
     var w = MC.tileToWorld(t.q, t.r);
     selMark = { q: t.q, r: t.r, x: w.x, y: w.y };
-    var ent = sectAtTile(t.q, t.r);
-    if (ent) {
-      sect.pinId = ent.id; sect.pinEnt = ent;
-      updateSectPanel(true);
-    }
-  }
-  function pickSectById(id) {
-    for (var i = 0; i < sect.items.length; i++)
-      if (sect.items[i].ent.id === id) return sect.items[i];
-    return null;
-  }
-  function updateSectPanel(force) {
-    if (!metaReady || !geo) return;
-    var fp = layerFingerprint();
-    var sc = scanSects();
-    /* 选中宗门已出视野/被卸载/被毁 → 退回最后一次实体 (sect.pinEnt): 面板不闪空,
-       距离继续按它算; 玩家再点到它时引用自会刷新。 */
-    var ent = sc.pin ? sc.pin.ent : sect.pinEnt;
-    if (sc.pin) sect.pinEnt = sc.pin.ent;
-    var id = ent ? ent.id : '';
-    var d = 0;
-    if (ent) {
-      if (sc.pin) d = sc.pin.d;
-      else { var ct = MC.pxToTile(cam.x, cam.y); d = Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)); }
-    }
-    if (id !== sect.curId || fp !== sect.curFp || force) {
-      sect.curFp = fp;
-      sect.curId = id; sect.cur = ent;
-      els.sectBody.innerHTML = ent
-        ? sectBodyHTML({ ent: ent, d: d })
-        : '<div class="sec-empty">未择宗门 · 点击图上宗门</div>';
-      if (els.sectMenu.classList.contains('open')) openSectMenu(true);
-    } else if (ent) {
-      var dEl = els.sectBody.querySelector('.sec-dist');
-      if (dEl) dEl.textContent = d;      // 「距此」随相机移动, 由 1.5s 节拍刷新
-    }
-  }
-  function tagList(list) {
-    var h = '<div class="chips">';
-    for (var i = 0; i < list.length && i < 8; i++)
-      h += '<span class="tag">' + esc(list[i].name) + '<b>' + list[i].n + '</b></span>';
-    return h + '</div>';
-  }
-  function kindsOf(buildings) {
-    var c = {}, order = [];
-    for (var i = 0; i < buildings.length; i++) {
-      var k = buildings[i].kind || '屋舍';
-      if (c[k] == null) { c[k] = 0; order.push(k); }
-      c[k]++;
-    }
-    return order.map(function (k) { return { name: k, n: c[k] }; })
-                .sort(function (a, b) { return b.n - a.n; });
-  }
-  function sectBodyHTML(pick) {
-    var ent = pick.ent, row = [];
-    function kv(k, v) {
-      return '<div class="kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
-    }
-    row.push('<div class="sec-top"><div class="sec-name">' + esc(ent.name) + '</div>' +
-             '<div class="sec-seal">' + esc(String(ent.name).slice(0, 2)) + '</div></div>');
-    row.push('<div class="sec-sub">' + (TIER_NAME[ent.tier] || '宗门') +
-             (ent.styleName ? ' · ' + esc(ent.styleName) : '') + '</div>');
-    row.push('<div class="ink-rule"></div>');
-    row.push(kv('掌门', esc(masterOf(ent))));
-    row.push(kv('门人', (ent.pop || 0).toLocaleString() + ' 口'));
-    row.push(kv('地界', esc(regionNameAt(ent.q, ent.r) || '未探明')));
-    row.push(kv('位次', (ent.q < 0 ? '西 ' + (-ent.q) : '东 ' + ent.q) + ' · ' +
-                         (ent.r < 0 ? '北 ' + (-ent.r) : '南 ' + ent.r)));
-    row.push(kv('距此', '<span class="sec-dist">' + pick.d + '</span> 格'));
-    var nv = nearestVein(ent.q, ent.r);
-    row.push(kv('灵脉', nv
-      ? esc(veinLabel(nv.v)) + ' · ' + nv.d + ' 格'
-      : '未附灵脉'));
-    var bl = ent.buildings || [], rs = ent.resources || [];
-    if (bl.length) {
-      row.push('<div class="sec-cap">山门营建</div>');
-      row.push(tagList(kindsOf(bl)));
-    }
-    if (rs.length) {
-      row.push('<div class="sec-cap">岁入</div>');
-      row.push(tagList(rs.map(function (x) { return { name: x.resource, n: x.amount }; })));
-    }
-    return row.join('');
-  }
-  /* 择宗菜单 (九版): 删掉「随行 · 就近择宗」那一项 —— 自动择宗已按用户要求移除,
-     这里只剩"点名择宗"。空列表才显示空态。 */
-  function sectMenuHTML() {
-    var h = '';
-    for (var i = 0; i < sect.items.length && i < 30; i++) {
-      var it = sect.items[i];
-      h += '<div class="mm-item' + (it.ent.id === sect.pinId ? ' cur' : '') +
-           '" data-id="' + esc(it.ent.id) + '"><span class="mm-nm">' + esc(it.ent.name) +
-           '</span><span class="mm-d">' + it.d + ' 格</span></div>';
-    }
-    if (!sect.items.length) h += '<div class="mm-empty">此方地界，未闻宗门</div>';
-    return h;
-  }
-  function openSectMenu(open) {
-    /* 每次展开都重新收一遍视野内宗门 (按距相机中心升序) —— 原由 pickSect() 顺带刷新,
-       九版 pickSect 已删, 改在这里取。 */
-    if (open) { sect.items = collectSects(); els.sectMenu.innerHTML = sectMenuHTML(); }
-    els.sectMenu.classList.toggle('open', open);
-    els.sectMenuBtn.classList.toggle('on', open);
-  }
-  /* 每 1.5s (与统计/小地图同节拍) 刷新一次。
-     ★ 重建判据除「当前宗门 id 变化」外还必须含「图层规模变化」: 区块响应的
-       settle/region/comm 是分先后到达的, 宗门实体往往先到 → 首帧渲染时
-       regionCells/commCells 还是空的, 「地界/灵脉」会算成未探明/未附并**永久滞留**
-       (id 不再变化 → 不再重建)。加了规模指纹后数据补到即自动纠正。 */
-  function layerFingerprint() {
-    return settleCells.size + '|' + regionCells.size + '|' + commCells.size;
   }
 
   /* ---------- 输入 ---------- */
@@ -2764,34 +2628,6 @@
         regenBusy(false);
       });
     });
-    /* 择宗菜单: 按钮开合 / 选项落定 / 点空白处收起 (九版: 不再有「随行」项) */
-    els.sectMenuBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      openSectMenu(!els.sectMenu.classList.contains('open'));
-    });
-    els.sectMenu.addEventListener('click', function (e) {
-      var it = e.target && e.target.closest ? e.target.closest('.mm-item') : null;
-      if (!it) return;
-      var id = it.getAttribute('data-id') || '';
-      var pick = id ? pickSectById(id) : null;
-      sect.pinId = pick ? id : '';
-      sect.pinEnt = pick ? pick.ent : null;
-      /* 选中即把朱砂圈也移过去 (与"点地图选宗"同一套标记) */
-      if (pick) {
-        var w = MC.tileToWorld(pick.ent.q, pick.ent.r);
-        selMark = { q: pick.ent.q, r: pick.ent.r, x: w.x, y: w.y };
-      } else {
-        selMark = null;
-      }
-      openSectMenu(false);
-      updateSectPanel(true);              // 立即重排面板
-    });
-    window.addEventListener('mousedown', function (e) {
-      if (!els.sectMenu.classList.contains('open')) return;
-      if (els.sectBox.contains(e.target) || els.sectMenu.contains(e.target)) return;
-      openSectMenu(false);
-    });
-
     $('infoClose').addEventListener('click', hideInfo);
     window.addEventListener('resize', onResize);
   }
@@ -2847,12 +2683,13 @@
       drawOverlay();
       frameCount++;
       /* R11: 小地图已完全交给独立模块 (自带 rAF + 节流), 主循环不再为它做任何事 ——
-         这里只剩「统计/宗门录」的 1.5s 节拍。 */
+         这里只剩「统计」的 1.5s 节拍。
+         ⚠ 2026-09-23: 原同节拍的 updateSectPanel() 已删 —— 本宗面板显示的是
+         玩家**自己的资产** (来自 PlayerSect 表), 不是「距此多少格」, 不随相机刷新。 */
       statsTimer += dt;
       if (statsTimer > 1.5) {
         statsTimer = 0;
         updateStats();
-        updateSectPanel(false);     // 「距此」随相机移动, 与统计同节拍刷新
       }
     } catch (err) {
       showFatal('渲染循环异常: ' + err.message);
@@ -2874,10 +2711,7 @@
       stats: $('stats'),
       info: $('info'),
       infoBody: $('infoBody'),
-      sectBox: $('sectBox'),
-      sectBody: $('sectBody'),
-      sectMenu: $('sectMenu'),
-      sectMenuBtn: $('sectMenuBtn')
+      sectBody: $('sectBody')
     };
 
     try {
@@ -2981,6 +2815,8 @@
       S.settings.on(applySettings);
       bindInput();
       initMinimap();          // R11: 挂载独立小地图模块 (可热拔插, 见 minimap-vein.js)
+      initInfoCard();         // 注入「他人聚落详情卡」数据源 (infocard.js, 暂不渲染)
+      renderMySect();         // 本宗面板: 开局先落引导态 (未立宗)
       /* 调试: ?set=1 开局即展开设置弹窗 (headless 无法点齿轮 —— 与 plaqdbg/sel 同类)。
          仅 DEBUG 生效, 不进产品路径。 */
       if (DEBUG && urlParams.get('set') === '1') openSettings(true);
@@ -3159,10 +2995,15 @@
             veinRings: statVeinRingRows.slice(0, 80),
             bridges: statBridge, waterQuads: statWaterQuads,
             factionsOn: FAC_OK, settleVer: settleVer,
-            /* 九版点选态: headless 用 Input.dispatchMouseEvent 点一下, 再读这两项
-               即知「朱砂标记落在哪一格 / 宗门录选中的是哪一座」。无点击时为 null/''。 */
+            /* 点选态: headless 用 Input.dispatchMouseEvent 点一下即可读回
+               「朱砂标记落在哪一格」。无点击时为 null。
+               ⚠ 2026-09-23: 原 sectPin (宗门录选中哪一座) 已删 —— 择宗闭环下线。 */
             sel: selMark ? [selMark.q, selMark.r] : null,
-            sectPin: sect.pinId ? String(sect.pinId) : '',
+            /* 本宗面板态: null = 未立宗 (面板显示引导文案); 立宗后为 PlayerSect 行。 */
+            mySect: mySect ? { id: mySect.id, name: mySect.name, q: mySect.q, r: mySect.r } : null,
+            /* 他人详情卡模块 (web/js/infocard.js) 是否就位 + 数据源是否已接。
+               当前不渲染, 只证明"模块可用、等 UI 接线"。 */
+            infoCard: (window.InkInfoCard && window.InkInfoCard.probe) ? window.InkInfoCard.probe() : null,
             zoom: +cam.zoom.toFixed(3), camTile: [Math.round(cam.x), Math.round(cam.y)]
           };
         };

@@ -138,6 +138,9 @@ async function main() {
       return JSON.stringify({
         metaStatus: metaStatus,
         data: window.__data ? window.__data() : null,
+        /* 本宗面板 (2026-09-23 十二版: 原「宗门录 + 择宗」整条闭环已下线)。
+           未立宗 ⇒ 三项为 ''/0/0, 面板显示引导文案「尚未择地立宗」;
+           立宗后口径与旧宗门录相同 (sec-name / kv / tag)。 */
         sectName: (document.querySelector('#sectBody .sec-name') || {}).textContent || '',
         sectRows: (document.querySelectorAll('#sectBody .kv') || []).length,
         sectTags: (document.querySelectorAll('#sectBody .tag') || []).length,
