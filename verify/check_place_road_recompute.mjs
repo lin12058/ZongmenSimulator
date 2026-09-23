@@ -17,9 +17,13 @@
  *   · 断言口径: 只断言**必有**的 (机制发生率 > 0)。不提「必须 >0」去苛真一个
  *     可能不发生的现象 —— 那是空真陷阱的镜像。未触发的如实报告。
  *
- * ⚠ 注入手法 (临时): 引擎**尚未**实现 setExternalSettlements。本脚本用「内存副本注入」
- *   模拟 ext —— 与 bench_road_drain.mjs 同手法 (只改内存副本, 不动源文件)。
- *   引擎落地真接口后本脚本应改为**真调用**; 届时「注入点未找到」会主动报错, 不静默跑旧路径。
+ * ⚠ 注入手法 (2026-09-23 已改为**真调用**): 引擎已落地
+ *   `setExternalSettlements` / `clearRoadSideFor` / `bumpRoadVer` / `placeSettlement`
+ *   (方案 §2.4)。本脚本直接调真接口 —— 旧版那套「把 settlementsFor 包一层」的源码改写
+ *   已删除: 它会在引擎自己也做了 ext 叠加之后**再叠一层**, 把 settlementsFor$base
+ *   变成自递归 (RangeError: Maximum call stack size exceeded)。
+ *   仅保留**只读内省**的一处注入 (把内部缓存/纯几何出口挂上导出表) —— 它不改任何行为,
+ *   纯为统计与「坑 C / 坑 E」归因。真 API 一旦改名, 脚本会立刻红, 不会静默跑假路径。
  *
  * 加载序必须 noise.js + mapgen-config.js + mapgen.js (漏 mapgen-config 会静默退回兜底参数)。
  * 用法: node verify/check_place_road_recompute.mjs [seed] [落点扫描半径=5]
@@ -42,37 +46,18 @@ const check = (name, ok, detail) => {
   else { FAIL++; console.log(`  FAIL ${name}${detail ? '  ← ' + detail : ''}`); }
 };
 
-/* ---------- 内存副本注入 ---------- */
+/* ---------- 内存副本: **只读内省**注入 (不改行为) ---------- */
 let src = fs.readFileSync(path.join(JSDIR, 'mapgen.js'), 'utf8').replace(/\r\n/g, '\n');
 function raw(a, b) {
   if (!src.includes(a)) throw new Error('注入点未找到 (源码已变, 请同步本脚本): ' + a);
   src = src.replace(a, b);
 }
 
-/* ① ext 注入: settlementsFor 包一层。ext **不进 settleCache** (原函数改名 $base 保留缓存),
-      扩展在缓存之外做 —— 这正是方案 §2.4 要的形状 (纯查询, 不污染纯函数缓存)。 */
-raw('  function settlementsFor(i, j) {',
-`  var extSettlements = [];
-  function extIn(i, j) {
-    var out = [];
-    for (var z = 0; z < extSettlements.length; z++) {
-      var sp = extSettlements[z].id.split('_');
-      if ((+sp[0]) === i && (+sp[1]) === j) out.push(extSettlements[z]);
-    }
-    return out;
-  }
-  function __setExt(list) { extSettlements = list || []; }
-  function settlementsFor(i, j) {
-    var __ex = extIn(i, j);
-    if (__ex.length) return settlementsFor$base(i, j).concat(__ex);
-    return settlementsFor$base(i, j);
-  }
-  function settlementsFor$base(i, j) {`);
-
-/* ② 暴露内部缓存 / 纯几何出口 / roadVer (统计与「坑 C」验证) */
+/* 唯一的一处注入: 把内部缓存 / 纯几何出口 / roadVer 挂上导出表。
+   ⚠ 这里**只加读出口**, 不包 settlementsFor —— ext 层由引擎自己实现
+     (setExternalSettlements), 本脚本只调真接口。 */
 raw('    settlementsFor: settlementsFor,',
     '    settlementsFor: settlementsFor,\n' +
-    '    __setExt: __setExt,\n' +
     '    __demandEdgesFor: demandEdgesFor,\n' +
     '    __skeletonEdgesFor: skeletonEdgesFor,\n' +
     '    __cache: { road: roadCache, roadFail: roadFail, demand: demandCache, skel: skeletonCache },\n' +
@@ -118,7 +103,7 @@ function fakeSect(site, idx) {
   const a = site.st[idx % site.st.length];
   const q = a.q + 2, r = a.r + 1;
   const f = MG.fields(q, r), w = MG.tileToWorld(q, r);
-  return { id: site.i + '_' + site.j + '_p' + (idx + 1), type: 'sect', q, r, x: w.x, y: w.y,
+  return { id: site.i + '_' + site.j + '_u' + (idx + 1), type: 'sect', q, r, x: w.x, y: w.y,
            name: '测试宗', pop: 5000, owner: '', tier: 3, state: 0, expireTs: 0,
            __land: f.biome !== 0 && !f.vein };
 }
@@ -155,11 +140,11 @@ for (const s of mech) {
     s: new Map(cells.map(([i, j]) => [i + ',' + j, [...MG.__skeletonEdgesFor(i, j)].sort().join(';')]))
   });
 
-  MG.__setExt([]); clearRoadSide();
+  MG.setExternalSettlements([]); clearRoadSide();
   const base = snap();
 
   /* ① 先故意【不清缓存】注入一次 ⇒ 应看到「注入无效」(缓存把旧几何喂回来) */
-  MG.__setExt([s.pl]);
+  MG.setExternalSettlements([s.pl]);
   const noClear = snap();
   if ([...noClear.d].sort().join(',') === [...base.d].sort().join(',')) missCacheDemo++;
 
@@ -191,10 +176,10 @@ check(`新宗门会翻转骨架集 (${siteHitSkel}/${n} 个落点命中, 累计 
 console.log(`\n== 2. roadFail「终身不建」是否被锁死 (理论风险, 实测触发率) ==`);
 let flipSites = 0, totFlip = 0;
 for (const s of landSites.slice(0, SITES_ROADFAIL)) {
-  clearRoadSide(); MG.__setExt([]);
+  clearRoadSide(); MG.setExternalSettlements([]);
   for (let i = s.i - RING; i <= s.i + RING; i++) for (let j = s.j - RING; j <= s.j + RING; j++) MG.roadsNear(i, j, 9999);
   const bf = new Set(ROADFAIL);
-  clearRoadSide(); MG.__setExt([s.pl]);
+  clearRoadSide(); MG.setExternalSettlements([s.pl]);
   for (let i = s.i - RING; i <= s.i + RING; i++) for (let j = s.j - RING; j <= s.j + RING; j++) MG.roadsNear(i, j, 9999);
   const flip = [...bf].filter(k => !ROADFAIL.has(k)).length
              + [...ROADFAIL].filter(k => !bf.has(k)).length;
@@ -227,7 +212,7 @@ const cells2 = worst.c;
 
 /* 先建一遍基线, 由跨界边推出「远端也必须重拉的格」—— 否则基线不公平 (基线也要跑这些格) */
 const inR3 = (i, j) => Math.abs(i - P2.i) <= RING && Math.abs(j - P2.j) <= RING;
-MG.__setExt([]); clearRoadSide();
+MG.setExternalSettlements([]); clearRoadSide();
 for (const [i, j] of cells2) MG.roadsNear(i, j, 9999);
 const remote = new Set();
 for (const key of ROAD.keys()) {
@@ -239,7 +224,7 @@ const cellsAll = cells2.concat([...remote].map(k => k.split(',').map(Number)));
 
 function runRoads(ext, freshTerrain) {
   if (freshTerrain) MG.init(seed); else clearRoadSide();
-  MG.__setExt(ext);
+  MG.setExternalSettlements(ext);
   const t = performance.now();
   for (const [i, j] of cellsAll) MG.roadsNear(i, j, 9999);
   return performance.now() - t;
@@ -265,7 +250,7 @@ console.log(`  ⇒ 真实场景取「仅清道路」口径: 同步重算 **${hB.
 console.log(`  ⚠ JIT 偏差实测: 单次计时会让后跑的一遍快 ~17% ⇒ 必须交替取中位 (本段已做)`);
 
 /* ---------- 段 4: 失效范围 / 脏块范围 ---------- */
-clearRoadSide(); MG.__setExt([]);
+clearRoadSide(); MG.setExternalSettlements([]);
 for (const [i, j] of cells2) MG.roadsNear(i, j, 9999);
 const baseKeys = [...ROAD.keys()];
 const inR2 = (i, j) => Math.abs(i - P2.i) <= RING && Math.abs(j - P2.j) <= RING;
@@ -284,7 +269,7 @@ console.log(`     否则远端 regionJson 不重拉, 仍持有含同一条边的
 
 /* ---------- 段 5: 坑 C —— roadVer 不前进 ⇒ tile 缓存不失效 ---------- */
 console.log(`\n== 5. roadVer (坑 C) ==`);
-console.log(`  roadVer++ 只在「新路落成」时发生 (mapgen.js:1666)`);
+console.log(`  roadVer++ 只在「新路落成」时发生 (mapgen.js roadsNear 尾部)`);
 console.log(`  ⇒ 删边 (段 1 证实会发生) 或重算后条数不变时 roadVer **不前进**`);
 console.log(`  ⇒ 而服务端 tile 缓存判据是 "cached.RoadVer == known ⇒ 直接返回" (MapWorldService.cs:694)`);
 console.log(`  ⇒ 结论: 放置流程必须**显式** roadVer++, 否则旧路仍画在 tile 上 (删边更是永远不可检测)`);
@@ -293,13 +278,13 @@ console.log(`     ⚠ 只能 +1 增量, **绝不能归零** —— 服务端 Obs
 /* ---------- 段 6: 「附近城市全部重算」多久 (与道路是两个独立代价) ---------- */
 /* 用户问: 「附近城市直接重新算太久了是吧?」—— 必须先分清「城市」与「道路」:
      城市重算 = 选址 (siteScore/prospectArea/pickSettlementCenter) + 足迹/建筑 (growTownFootprint)
-     这两条链路**都不读道路** (growTownFootprint 只读 fields/landuseOf/veinNear, mapgen.js:950~975)
+     这两条链路**都不读道路** (growTownFootprint 只读 fields/landuseOf/veinNear (函数头注释))
      ⇒ 与路网是两条独立开销, 必须分开计时, 否则归因错。
    口径: 先 warm 地形 (让 elev/field 热 = 服务端真实状态), 再比「城市缓存冷」vs「城市缓存热」。
    ⚠ warm 耗时**不计入**; 用 __cacheSizes() 前后对比**证明**地形确实热了 (否则结论无效)。 */
 console.log(`\n== 6. 「附近城市全部重算」代价 (地形热, 城市缓存冷 vs 热) ==`);
 
-const REGION_M = 18;      // ⚠ 硬编码自 mapgen.js:45 —— 引擎改了必须同步本脚本
+const REGION_M = 18;      // ⚠ 硬编码自 mapgen.js 顶部 var REGION_M —— 引擎改了必须同步本脚本
 const cellsU = [];        // 去重 (cells2 与 remote 可能有交集)
 {
   const seen = new Set();
@@ -325,7 +310,7 @@ for (const [i, j] of cellsU)
     for (let dr = -REGION_M; dr <= REGION_M; dr++) { MG.fields(i * REGION_M + dq, j * REGION_M + dr); warmN++; }
 const szWarm = MG.__cacheSizes();
 
-MG.__setExt([]);
+MG.setExternalSettlements([]);
 const A = timeIt(() => cityPass(cellsU));            // 热地形 + 冷城市 (首测, 含 JIT)
 const szA = MG.__cacheSizes();
 const B = timeIt(() => cityPass(cellsU));            // 热地形 + 热城市 (缓存命中基线)
@@ -352,7 +337,7 @@ console.log(`  [全冷·含建地形]             = ${D.ms.toFixed(0)} ms   ← 
 console.log(`  ⇒ 结论: 「附近城市全部重算」≈ **${Am.toFixed(0)} ms**  (纯城市 ≈ ${(Am - leakMs).toFixed(0)} ms)`);
 console.log(`     对比: 道路重算 **${hB.toFixed(0)} ms** (段 3)` +
             ` ⇒ 道路是纯城市的 ${(hB / Math.max(1, Am - leakMs)).toFixed(1)} 倍`);
-console.log(`  ⚠ 城市链路不读道路 (growTownFootprint 只读 fields/landuseOf/veinNear, mapgen.js:950~975)`);
+console.log(`  ⚠ 城市链路不读道路 (growTownFootprint 只读 fields/landuseOf/veinNear (函数头注释))`);
 console.log(`     ⇒ 若玩家实体不进 settlementsFor, 城市**根本不需要重算** (中心/足迹逐字节不变)`);
 console.log(`     ⇒ 「附近城市重算」的真正含义是「附近的**路**重算」—— 别把两笔账记成一笔`);
 const cityOk = leakCells <= szA.field * 0.06;        // warm 覆盖率 ≥94% 才算数
@@ -368,7 +353,7 @@ console.log(`  · 两笔合计: ${(hB + Am).toFixed(0)} ms —— 同步可承�
 console.log(`  · 机制: 需求边会被挤掉 (${totGone} 条/样本) + 骨架会翻转 (${totSkelFlip} 格)`);
 console.log(`  · ⇒ v2「旧边一条都不变」错误; 用户「这些城市对应的道路全部重算」是必要且正确的`);
 console.log(`  · ⚠ 真正的「太久」不在引擎算, 而在 **roadVer 归零 ⇒ 前端全图 tile 重拉**`);
-console.log(`     (resetRoads 会把 roadVer 设 0, mapgen.js:1851; 而 ObserveRoadVer 单调取大` +
+console.log(`     (resetRoads 曾把 roadVer 设 0 (真源 mapgen.js 的 resetRoads); 而 ObserveRoadVer 单调取大` +
             ` ⇒ 归零既让客户端全失效, 又让服务端判不出更新, MapWorldService.cs:114~121)`);
 console.log(`\n` + (FAIL === 0 ? `结构判据 ${PASS} PASS / 0 FAIL` : `结构判据 ${PASS} PASS / ${FAIL} FAIL`));
 process.exit(FAIL === 0 ? 0 : 1);

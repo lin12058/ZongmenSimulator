@@ -1177,3 +1177,70 @@ DETAILS 里当时甚至写着「占地**由引擎** veinFootKeep() 决定」—�
   `MaxSeeds` 名额、往世界台账里开新世）；用 `?seed=N` **调试覆盖**（不入账）+ `live_cap` 即可。
 - 实测数字（seed42）：39 根在场灵脉 → **大 9 根全 7 格 / 中 10 根全 3 格 / 小 20 根全 1 格**，
   合计 113 = 63+30+20，页面无 JS 异常。
+
+---
+
+## 41. 玩家放置宗门 P0 的验证姿势 + 五条新坑（2026-09-23）
+
+### A. 最高价值发现：离线**直调 `MapGenServer.commitPlace`**
+
+`Engine/js/mapgen-server.js` 是**纯搬运层**（不碰宿主）。所以在 Node 里
+`global.window = globalThis` + 按序 eval `[noise, mapgen-config, mapgen, mapgen-server]` 之后，
+可以**直接调** `GS.commitPlace(q, r, optsJson)`，一次跑完「清缓存 → 放置 → 算脏块 → bumpRoadVer」的
+**七步同步序列** —— 不需要服务端、不需要 WS、也**不用付 25 s 的 A\*** 代价。
+
+⇒ 想验「落定接口本身的契约」（id 形态 / `regions=25` / `cross=24` / `roadVer` 严格前进且非陈旧 /
+`blocks` 覆盖实际变化格 / `resetRoads`·`configure` 不归零）**一律走这条路**
+（`verify/check_place_rules.mjs`：**20 PASS / 6 s**）。
+只有要验**协议层**（帧 5/6 编解码、认证、配额、幂等键回放、rev 记账）才上 WS
+（`verify/w5_place_rev.mjs`）。判据分层 = 便宜的那层先跑。
+
+### B. runner 的 `rc=2` 契约曾经是坏的（已修）
+
+文件头写着「rc=2 = 跳过，不算红」（`check_mm_layout` / `check_mm_ui` / `check_calc_local` 都靠这个
+约定自跳过），实现却是 `if (r.status !== 0) ⇒ red` ⇒ **跳过被算成真红**。
+已修：`rc===2` 单列 `skip` 并**列入汇总行**（「不让任何跳过静默发生」）。
+顺带补两个开关：`--live-only`（离线组 8 分钟，只调在线组别白等）、`--with-place`（写入型判据的显式 opt-in）。
+
+### C. 写入型判据必须显式 opt-in，且自带「脏世界」前置闸
+
+`w5_place_rev.mjs` 会**真实落一座宗门**（写 `PlayerSect` + `placeVer` 前进）。
+它的 A 段期望值由**裸引擎参照实现**给出（`findCityAndSpot` 不注入 ext），
+⇒ **本世一旦已经落过宗门，两侧口径必然分叉**，表现成 A2/A3/A4/B1 一串**莫名其妙的 FAIL**
+（`reason` 为空、`too_close`）。本轮我连跑几遍把自己的隔离实例跑脏，差点误判成代码回归。
+
+⇒ 脚本自查 `GET /api/map/stats` 的 `playerSects`（= `CountRound(当前轮)`，**按轮**计数，正是要的信号）：
+`> 0` 就 **rc=2 跳过** + 打印重起姿势。runner 侧放进 `--with-place` 独立组，且**排在最后**
+（它会把本世弄脏）。`check_world_ledger.mjs` 同理但要更早 —— 后面等种子的判据都靠它。
+
+### D. ⚠ headless 虚拟时间下 `check_calc_local` 的 hybrid/ab 档会**假红**（已 A/B 证实）
+
+症状：`hybrid: local=false maskEff=31 块=0 引擎 seed=null`，probe 里 **`calc.lastError === ''`**
+—— 空 error 是关键线索：说明 `MC.requestScript()` **既没 resolve 也没 reject，还挂在半路**。
+`server` 档恒绿（48 块），因为它不依赖 WS 的 Script 帧（type=4）时机。
+
+**两步归因（照抄）**：
+1. **Node 直连做服务端正控**（30 行：`PB.encodeLogin` → 发帧 4 → 收帧 4）：
+   实测 **3/3 在 10~40 ms 到货**（60913 B gzip → 140932 B）⇒ 服务端毫无问题。
+2. **`git stash` 把 `web/` 退回 HEAD** 跑同一档：**原始前端同样红** ⇒ 与本次改动无关。
+   ⚠ `--wait` 加到 14000 也没用（虚拟时钟不等真实 WS 来回）。
+
+**⚠ 退 STASH 的两个坑（本轮真踩）**：
+- `git stash pop` 会被 `web/js/store.js` 的 **CRLF 伪修改**挡住（`git status` 有 ` M` 但 `git diff` 为空）
+  ⇒ 先 `git checkout -- <该文件>` 再 pop（内容等于 HEAD，不会丢东西）；
+- pop 之后**必须 `diff -rq <备份> <工作区>` 逐字节核对**再删备份。别信「pop 成功」的输出。
+
+### E. 源码守卫用「固定字符窗」做邻近判定 = 定时炸弹
+
+`frontend_smoke` 的「`showVeins`/`showLabels` 的运行时改写必须伴随静态置脏」原本是
+`src.slice(idx-200, idx+500)` 里找 `StaticDirty(`。本轮**加第 6 个设置项**（`domain`，领地圈）
+就把 `forceStaticDirty()` 挤出了 +500 ⇒ **假红**（代码完全正确）。
+
+⇒ 改成「取赋值点**所在的整个函数体**」：用**缩进**找函数头行（`function x(` / `var x = function(`）
+与「缩进 <= 函数头的下一行 `}`」定尾；⚠ **别做花括号配对**（main.js 的字符串/正则里花括号成堆）。
+找不到包围函数时**回落**旧字符窗（绝不静默放宽）。语义更强（必须真的同函数置脏）且对新增开关免疫。
+
+**⚠ 反空真的正确写法**：把 `forceStaticDirty()` 换成注释再跑 ⇒ 必须报红（本轮实测：
+`showVeins@L77 showLabels@L78`）。但**必须 `try/finally` 还原** —— 本轮忘了写回，
+直接把 `web/js/main.js` 写坏（靠 `verify/_webbak` 才查出来）。**读-改-跑-还原一律 try/finally。**
+

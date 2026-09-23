@@ -16,7 +16,11 @@ public sealed class SqliteVirtualContext : VirtualContext
 
     private readonly string _cs;
     private readonly object _flushLock = new();
-    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Key, byte[] Value)> _pending = new();
+    /* Value = null 表示**删除墓碑** (2026-09-23, 玩家放置需要按键失效: 区域包/足迹包
+       在落点后必须立刻作废, 而此前只有"入队写"这一条路 ⇒ 先 DeleteByKey 再被
+       一条滞后的 deferred 写"复活"是可能的)。墓碑与写走在同一个有序队列里 ⇒
+       同键的「写 → 删」按提交顺序落地, 不会倒挂。 */
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Key, byte[]? Value)> _pending = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _writer;
     private volatile bool _disposed;
@@ -68,14 +72,22 @@ public sealed class SqliteVirtualContext : VirtualContext
     public override void SetData(string key, byte[]? value)
     {
         if (_disposed) return;
-        _pending.Enqueue((key, value ?? Array.Empty<byte>()));
+        _pending.Enqueue((key, value));
     }
 
     /// <summary>批量异步落库的入队口 (MapWorldService.Store 调用)。</summary>
     public void SetDataDeferred(string key, byte[]? value)
     {
         if (_disposed) return;
-        _pending.Enqueue((key, value ?? Array.Empty<byte>()));
+        _pending.Enqueue((key, value));
+    }
+
+    /// <summary>异步删除 (2026-09-23, 玩家放置): 与 deferred 写同队列 ⇒ 与同键的
+    /// 未落库写在 Flush 里按提交顺序生效, 不会「删完又被旧批次复活」。</summary>
+    public void DeleteDeferred(string key)
+    {
+        if (_disposed) return;
+        _pending.Enqueue((key, null));
     }
 
     /// <summary>把积压写入一次性事务提交 (后台 writer 周期 / 统计前 / Dispose 前)。
@@ -88,7 +100,7 @@ public sealed class SqliteVirtualContext : VirtualContext
         lock (_flushLock)
         {
             if (_disposed) return;
-            var batch = new List<(string Key, byte[] Value)>();
+            var batch = new List<(string Key, byte[]? Value)>();
             while (_pending.TryDequeue(out var item)) batch.Add(item);
             if (batch.Count == 0) return;
             try
@@ -99,11 +111,19 @@ public sealed class SqliteVirtualContext : VirtualContext
                 {
                     using var cmd = c.CreateCommand();
                     cmd.Transaction = tx;
-                    cmd.CommandText =
-                        "INSERT INTO Data(Key, Value) VALUES($k, $v) " +
-                        "ON CONFLICT(Key) DO UPDATE SET Value=$v;";
-                    cmd.Parameters.AddWithValue("$k", key);
-                    cmd.Parameters.AddWithValue("$v", val);
+                    if (val == null)
+                    {
+                        cmd.CommandText = "DELETE FROM Data WHERE Key=$k;";
+                        cmd.Parameters.AddWithValue("$k", key);
+                    }
+                    else
+                    {
+                        cmd.CommandText =
+                            "INSERT INTO Data(Key, Value) VALUES($k, $v) " +
+                            "ON CONFLICT(Key) DO UPDATE SET Value=$v;";
+                        cmd.Parameters.AddWithValue("$k", key);
+                        cmd.Parameters.AddWithValue("$v", val);
+                    }
                     cmd.ExecuteNonQuery();
                 }
                 tx.Commit();

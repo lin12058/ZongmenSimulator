@@ -120,6 +120,21 @@ public sealed class WorldLedger : IDisposable
         }
     }
 
+    /// <summary>按 seed 反查是第几世 (2026-09-23 玩家宗门台账用: 记录按 Round 存,
+    /// 而请求只带 seed)。返回 null = 这个 seed 不在台账里 (如 ?seed= 调试覆盖的世界),
+    /// 此时该世没有玩家资产 —— 属正确结果, 不要临时补一世。</summary>
+    public WorldEntry? Find(string seed)
+    {
+        if (string.IsNullOrEmpty(seed)) return null;
+        lock (_gate)
+        {
+            EnsureLoaded();
+            for (var i = _mem.Count - 1; i >= 0; i--)
+                if (string.Equals(_mem[i].Seed, seed, StringComparison.Ordinal)) return _mem[i];
+            return null;
+        }
+    }
+
     /// <summary>调用方须持 _gate。轮次单调 +1, 种子不与本台账任何历史世重复。</summary>
     private WorldEntry Append(int round)
     {

@@ -128,13 +128,20 @@ function loadStore(opts = {}) {
 }
 
 function runBehavior() {
-  /* A1 默认值: 五个开关全开 */
+  /* A1 默认值 —— 开关清单**显式登记** (不写成 Object.keys().length, 那样加/删一项静默通过)。
+     2026-09-23 新增 domain (领地圈, 种植方案的放置预览配套): 它答的是「这里能不能立宗」,
+     属偶发需求, 故**默认关** —— 与其余「显示层开关默认全开」的成例刻意不同, 必须登记在此。 */
+  const SWITCH_ON = ['veins', 'nameSettle', 'nameVein', 'nameRegion', 'clouds'];
+  const SWITCH_OFF = ['domain'];
   {
     const { ZM } = loadStore();
     const d = ZM.settings.all();
-    check('A1 默认值: 五个开关齐全且全开',
-      Object.keys(ZM.defaults).length === 5 &&
-      ['veins', 'nameSettle', 'nameVein', 'nameRegion', 'clouds'].every((k) => d[k] === true),
+    check('A1a 开关清单与登记一致 (增删开关必须回来登记)',
+      Object.keys(ZM.defaults).sort().join(',') === SWITCH_ON.concat(SWITCH_OFF).sort().join(','),
+      '实际 ' + Object.keys(ZM.defaults).sort().join(','));
+    check('A1b 默认为「开」的开关全开', SWITCH_ON.every((k) => d[k] === true),
+      JSON.stringify(d));
+    check('A1c 默认为「关」的开关全关 (opt-in)', SWITCH_OFF.every((k) => d[k] === false),
       JSON.stringify(d));
   }
 

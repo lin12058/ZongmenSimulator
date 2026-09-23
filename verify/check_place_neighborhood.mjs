@@ -46,18 +46,24 @@ function check(name, cond, detail = '') {
   else { failures++; console.log('  FAIL ' + name + (detail ? '  ' + detail : '')); }
 }
 
-/* ---- 待落地的常量 (本方案 §2.1 / §2.5) ----
-   ⚠ 这些常量目前**尚未进 mapgen-config.js** (方案阶段)。本脚本先按方案取值断言,
-     实施后应改为从 CFG.DOMAIN_R 读取 (届时把下面的 SOURCE 标记为 cfg)。 */
-const DOMAIN_R_MAX = 8;
-const DOMAIN_R_SOURCE = 'plan';        // 'plan' | 'cfg'
+/* ---- 领地半径真源 (2026-09-23 已落地: CFG.DOMAIN_R) ----
+   ⚠ 本脚本原先按方案取值 (SOURCE='plan') 并**要求**实施后改成从 CFG 读。
+     现已落地 ⇒ 直接读 CFG, 且断言该表存在 —— 源没落地就红, 不会静默按旧值推导。 */
+const DOMAIN_R = CFG.DOMAIN_R;
+const DOMAIN_R_SOURCE = (DOMAIN_R && typeof DOMAIN_R === 'object') ? 'cfg' : 'missing';
+const DOMAIN_R_MAX = DOMAIN_R_SOURCE === 'cfg'
+  ? Math.max(...Object.values(DOMAIN_R)) : 0;
 
 /* ---- 引擎真源参数 ---- */
-const REGION_M = 18;                   // mapgen.js:45 —— 先按真源值断言, 不一致即红
+const REGION_M = 18;                   // mapgen.js 顶部 `var REGION_M` (内部 var, 未导出)
 const PROSPECT_R = CFG.PROSPECT_R;
 const JIT_HALF = 0.35;                 // 锚点抖动 = REGION_M * 0.7 / 2
 
 console.log('== A. 参数与引擎真源一致 ==');
+check('CFG.DOMAIN_R 已落地 (真源 = mapgen-config.js, 非本脚本硬编码)',
+  DOMAIN_R_SOURCE === 'cfg', `实测 ${DOMAIN_R_SOURCE}`);
+check(`DOMAIN_R_MAX = ${DOMAIN_R_MAX} 与城市档 city 一致 (用户原话「8 格附近有城市中心」)`,
+  DOMAIN_R && DOMAIN_R.city === DOMAIN_R_MAX, JSON.stringify(DOMAIN_R));
 check('CFG.PROSPECT_R === 4', PROSPECT_R === 4, `实测 ${PROSPECT_R}`);
 /* REGION_M 是 mapgen.js 的内部 var, 未导出 —— 用「相邻区域格的 spiritAt 锚点差」间接确认
    它在 (0, 36] 区间内且 1 环不足以覆盖 (这才是本脚本真正要守的东西)。

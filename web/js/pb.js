@@ -338,7 +338,7 @@
    *   服务端契约: Server/Zongmen/Domain/MapMessages.cs (WsFrame 起始)。
    * ============================================================ */
 
-  var FRAME = { LOGIN: 1, TILE: 2, PING: 3, SCRIPT: 4 };
+  var FRAME = { LOGIN: 1, TILE: 2, PING: 3, SCRIPT: 4, PLACE_CHECK: 5, PLACE_COMMIT: 6 };
   var MASK = { CHUNK: 1, REGION: 2, SETTLE: 4, POI: 8, COMM: 16, ALL: 31 };
 
   /* ---------------- 微型编码器 (仅覆盖本协议所需) ---------------- */
@@ -412,6 +412,138 @@
       if (t.field === 1) m.ok = (t.wire === 0) ? r.vi() === 1 : (r.skip(t.wire), false);
       else if (t.field === 2) m.err = rdStr(r, t);
       else if (t.field === 3) m.account = rdStr(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+
+  /* ---------------- 玩家宗门放置 (帧 5/6, 方案 §4.1/§4.2) ----------------
+     与 Login/Pong 同口径: 载荷恒**明文** protobuf (不 gzip) —— 客户端按帧类型
+     判别压缩, 帧 5/6 解出的是明文, 别再套一层 gunzip。
+     契约: Server/Zongmen/Domain/MapMessages.cs 的 PlaceCheck / PlaceCommit 系列。 */
+  /* encodePlaceCheck({seed,q,r,seq,excludeId}) */
+  function encodePlaceCheck(o) {
+    var w = new Writer();
+    if (o.seed) wstr(w, 1, o.seed);
+    wtag(w, 2, 0); wzz(w, o.q | 0);
+    wtag(w, 3, 0); wzz(w, o.r | 0);
+    wtag(w, 4, 0); wvi(w, o.seq || 0);
+    if (o.excludeId) wstr(w, 5, o.excludeId);
+    return w.done();
+  }
+  /* encodePlaceCommit({seed,q,r,name,tier,seq,idemKey}) */
+  function encodePlaceCommit(o) {
+    var w = new Writer();
+    if (o.seed) wstr(w, 1, o.seed);
+    wtag(w, 2, 0); wzz(w, o.q | 0);
+    wtag(w, 3, 0); wzz(w, o.r | 0);
+    if (o.name) wstr(w, 4, o.name);
+    wtag(w, 5, 0); wvi(w, Math.max(1, Math.min(3, o.tier | 0)) || 1);
+    wtag(w, 6, 0); wvi(w, o.seq || 0);
+    if (o.idemKey) wstr(w, 7, o.idemKey);
+    return w.done();
+  }
+  function rdInt32(r, t, dflt) { return (t.wire === 0) ? r.vi() : (dflt == null ? 0 : dflt); }
+  function rdSInt32(r, t) { return (t.wire === 0) ? r.zz() : 0; }
+  function rdBool(r, t) { return (t.wire === 0) ? r.vi() === 1 : false; }
+  function rdF32(r, t) { return (t.wire === 5) ? r.f32() : 0; }
+  /* ⚠ 契约里 **只有 Q/R/RegionI/RegionJ/Ca/Cb 是 ZigZag** (sint32), 其余 int 都是
+     普通 varint。混用会静默读出「看着像数字但全错」的值 (tier 3 → -2, need 8 → 4,
+     ms 450 → -225) —— 这类错不会抛异常, 只会让前端画错颜色/前端判断全反。 */
+  function decodePlaceBlock(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { id: '', type: '', tier: 0, q: 0, r: 0, dist: 0, need: 0, name: '' };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.id = rdStr(r, t);
+      else if (t.field === 2) m.type = rdStr(r, t);
+      else if (t.field === 3) m.tier = rdInt32(r, t);
+      else if (t.field === 4) m.q = rdSInt32(r, t);
+      else if (t.field === 5) m.r = rdSInt32(r, t);
+      else if (t.field === 6) m.dist = rdInt32(r, t);
+      else if (t.field === 7) m.need = rdInt32(r, t);
+      else if (t.field === 8) m.name = rdStr(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  /* BlockRef: 1 ca (sint32) 2 cb (sint32) */
+  function decodeBlockRef(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { ca: 0, cb: 0 };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.ca = rdSInt32(r, t);
+      else if (t.field === 2) m.cb = rdSInt32(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  function decodePlaceCheckResponse(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { ok: false, reason: '', q: 0, r: 0, regionI: 0, regionJ: 0, deep: false,
+              onVein: false, veinD: 0, spirit: 0, spiritMin: 0, biome: 0, elev: 0,
+              blocker: null, near: [], seq: 0, quota: 0, quotaMax: 0, err: '' };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.ok = rdBool(r, t);
+      else if (t.field === 2) m.reason = rdStr(r, t);
+      else if (t.field === 3) m.q = rdSInt32(r, t);
+      else if (t.field === 4) m.r = rdSInt32(r, t);
+      else if (t.field === 5) m.regionI = rdSInt32(r, t);
+      else if (t.field === 6) m.regionJ = rdSInt32(r, t);
+      else if (t.field === 7) m.deep = rdBool(r, t);
+      else if (t.field === 8) m.onVein = rdBool(r, t);
+      else if (t.field === 9) m.veinD = rdInt32(r, t);
+      else if (t.field === 10) m.spirit = rdF32(r, t);
+      else if (t.field === 11) m.spiritMin = rdF32(r, t);
+      else if (t.field === 12) m.biome = rdInt32(r, t);
+      else if (t.field === 13) m.elev = rdF32(r, t);
+      else if (t.field === 14) {
+        var len = r.vi(), eN = r.p + len;
+        m.blocker = decodePlaceBlock(r.b.subarray(r.p, eN));
+        r.p = eN;
+      }
+      else if (t.field === 15) {
+        var len2 = r.vi(), eN2 = r.p + len2;
+        m.near.push(decodePlaceBlock(r.b.subarray(r.p, eN2)));
+        r.p = eN2;
+      }
+      else if (t.field === 16) m.seq = r.vi();
+      else if (t.field === 17) m.quota = rdInt32(r, t);
+      else if (t.field === 18) m.quotaMax = rdInt32(r, t);
+      else if (t.field === 19) m.err = rdStr(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  function decodePlaceCommitResponse(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { ok: false, reason: '', sect: null, regionI: 0, regionJ: 0, roadVer: 0,
+              ms: 0, seq: 0, err: '', blocks: [], roads: 0, idemKey: '' };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.ok = rdBool(r, t);
+      else if (t.field === 2) m.reason = rdStr(r, t);
+      else if (t.field === 3) {
+        var len = r.vi(), eN = r.p + len;
+        /* SettlementDto 与 PlaceEntity 的 wire 布局逐字段相同 (1..16) ⇒ 复用同一个解析器 */
+        m.sect = parsePlaceEntity(r.b.subarray(r.p, eN));
+        r.p = eN;
+      }
+      else if (t.field === 4) m.regionI = rdSInt32(r, t);
+      else if (t.field === 5) m.regionJ = rdSInt32(r, t);
+      else if (t.field === 6) m.roadVer = r.vi();
+      else if (t.field === 7) m.ms = rdInt32(r, t);
+      else if (t.field === 8) m.seq = r.vi();
+      else if (t.field === 9) m.err = rdStr(r, t);
+      else if (t.field === 10) {
+        var l2 = r.vi(), e2 = r.p + l2;
+        m.blocks.push(decodeBlockRef(r.b.subarray(r.p, e2)));
+        r.p = e2;
+      }
+      else if (t.field === 11) m.roads = rdInt32(r, t);
+      else if (t.field === 12) m.idemKey = rdStr(r, t);
       else r.skip(t.wire);
     }
     return m;
@@ -595,8 +727,15 @@
     encodeTileRequest: encodeTileRequest,
     encodeLogin: encodeLogin,
     encodeScriptRequest: encodeScriptRequest,
+    encodePlaceCheck: encodePlaceCheck,
+    encodePlaceCommit: encodePlaceCommit,
     decodeScriptPack: decodeScriptPack,
     decodeLoginResponse: decodeLoginResponse,
-    decodeTileResponse: decodeTileResponse
+    decodeTileResponse: decodeTileResponse,
+    /* 玩家宗门放置 (帧 5/6; 载荷明文 protobuf, 不 gzip) */
+    decodePlaceCheckResponse: decodePlaceCheckResponse,
+    decodePlaceCommitResponse: decodePlaceCommitResponse,
+    decodePlaceBlock: decodePlaceBlock,
+    decodeBlockRef: decodeBlockRef
   };
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));

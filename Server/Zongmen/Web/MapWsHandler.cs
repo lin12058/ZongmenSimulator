@@ -68,6 +68,15 @@ public static class MapWsHandler
                             await HandleScriptAsync(ws, engineJsDir, recvBuf, count, ctx.RequestAborted);
                             break;
 
+                        /* ---- 玩家宗门放置 (方案 §4.1) ---- */
+                        case WsFrame.PlaceCheck:
+                            await HandlePlaceCheckAsync(ws, svc, session, recvBuf, count, ctx.RequestAborted);
+                            break;
+
+                        case WsFrame.PlaceCommit:
+                            await HandlePlaceCommitAsync(ws, svc, session, recvBuf, count, ctx.RequestAborted);
+                            break;
+
                         default:
                             /* 未知类型: 忽略 (前向兼容) */
                             break;
@@ -222,8 +231,110 @@ public static class MapWsHandler
         await SendFrameAsync(ws, WsFrame.Script, ProtoCodec.SerToByte(pack), ct);
     }
 
-    /* ---- 帧收发 ---- */
+    /* ============================================================
+     * 玩家宗门放置 (2026-09-23 方案 §4.1/§4.2)
+     * ------------------------------------------------------------
+     * 帧 5 = PlaceCheck (只读, 悬停即问); 帧 6 = PlaceCommit (写, 含同步重算 ~450ms)。
+     * 载荷恒**明文** protobuf (与 Login/Pong 同口径, 不做按大小切换 —— 客户端按帧类型
+     * 判别压缩, 混用会解错)。
+     * ⚠ 限流必须在这里做: ApiRateLimitMiddleware 是 HTTP 中间件, 对 WS 帧**完全无效**。
+     *   PlaceCheck 是悬停驱动的高频路径 (前端 ≥150ms 节流), 不设闸的话单条连接就能把
+     *   V8 门闩钉死, 把整台服务拖住 (Chunk/Region 也走同一把门闩)。
+     * ⚠ 两条载荷都必须先过「seed 非空 + 已登录」的粗筛, 再进 V8。
+     * ============================================================ */
 
+    /// <summary>悬停校验稳态速率 (次/秒) 与突发额度。</summary>
+    private const double CheckRatePerSec = 8;
+    private const double CheckBurst = 8;
+
+    private static async Task HandlePlaceCheckAsync(
+        WebSocket ws, MapWorldService svc, WsSession session, byte[] buf, int count, CancellationToken ct)
+    {
+        PlaceCheckRequest req;
+        try
+        {
+            req = ProtoCodec.DesFromByte<PlaceCheckRequest>(buf.AsSpan(1, count - 1).ToArray());
+        }
+        catch (Exception ex)
+        {
+            await SendPlaceAsync(ws, WsFrame.PlaceCheck,
+                new PlaceCheckResponse { Err = "PlaceCheck 解析失败: " + ex.Message }, ct);
+            return;
+        }
+        if (!session.AllowCheck())
+        {
+            await SendPlaceAsync(ws, WsFrame.PlaceCheck,
+                new PlaceCheckResponse { Q = req.Q, R = req.R, Seq = req.Seq, Err = "落点校验过于频繁" }, ct);
+            return;
+        }
+        try
+        {
+            var resp = await Task.Run(() => svc.PlaceCheck(
+                req.Seed, session.Account, session.Authed, req.Q, req.R, req.ExcludeId, req.Seq), ct)
+                .WaitAsync(ct);
+            await SendPlaceAsync(ws, WsFrame.PlaceCheck, resp, ct);
+        }
+        catch (OperationCanceledException) { /* 客户端断开 */ }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[ws/map] PlaceCheck 异常: " + ex);
+            try
+            {
+                await SendPlaceAsync(ws, WsFrame.PlaceCheck,
+                    new PlaceCheckResponse { Q = req.Q, R = req.R, Seq = req.Seq, Err = "落点校验失败: " + ex.Message }, ct);
+            }
+            catch { /* 套接字已失效 */ }
+        }
+    }
+
+    private static async Task HandlePlaceCommitAsync(
+        WebSocket ws, MapWorldService svc, WsSession session, byte[] buf, int count, CancellationToken ct)
+    {
+        PlaceCommitRequest req;
+        try
+        {
+            req = ProtoCodec.DesFromByte<PlaceCommitRequest>(buf.AsSpan(1, count - 1).ToArray());
+        }
+        catch (Exception ex)
+        {
+            await SendPlaceAsync(ws, WsFrame.PlaceCommit,
+                new PlaceCommitResponse { Err = "PlaceCommit 解析失败: " + ex.Message }, ct);
+            return;
+        }
+        /* ⚠ 提交**不**在传输层限流 —— 传输层看到的是「同一请求重发」, 而幂等回放正是
+           为这种重发设计的 (廉价、不碰 V8)。在这里设闸会把重放一起挡掉, 表现为
+           「狂点确认键 → 第二下报频繁」。真正的闸在 MapWorldService.PlaceCommit 里,
+           且只卡**贵的那条路** (回放与配额拒绝都不经它)。 */
+        try
+        {
+            /* ⚠ 同步重算 ~450ms, 必须放线程池 + 允许断开时放弃等待 (同 Tile 的 C6 理由):
+               直接内联 await 会占着请求线程池线程跑完整条 A* 流水线。 */
+            var resp = await Task.Run(() => svc.PlaceCommit(
+                req.Seed, session.Account, session.Authed, req.Q, req.R, req.Name, req.Tier, req.IdemKey, req.Seq), ct)
+                .WaitAsync(ct);
+            await SendPlaceAsync(ws, WsFrame.PlaceCommit, resp, ct);
+            if (resp.Ok)
+                Console.WriteLine($"[ws/map] 卜居 account={session.Account} at ({req.Q},{req.R}) " +
+                                  $"id={resp.Sect?.Id} roads={resp.Roads} blocks={resp.Blocks.Count} ms={resp.Ms}");
+        }
+        catch (OperationCanceledException) { /* 客户端断开 */ }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[ws/map] PlaceCommit 异常: " + ex);
+            try
+            {
+                await SendPlaceAsync(ws, WsFrame.PlaceCommit,
+                    new PlaceCommitResponse { Seq = req.Seq, IdemKey = req.IdemKey, Err = "卜居失败: " + ex.Message }, ct);
+            }
+            catch { /* 套接字已失效 */ }
+        }
+    }
+
+    /// <summary>放置帧的发送口 (恒明文; 与 Tile 的 gzip 约定区分开 = 客户端按帧类型判别)。</summary>
+    private static Task SendPlaceAsync<T>(WebSocket ws, byte type, T msg, CancellationToken ct)
+        => SendFrameAsync(ws, type, ProtoCodec.SerToByte(msg), ct, gzip: false);
+
+    /* ---- 帧收发 ---- */
     private static async Task SendFrameAsync(
         WebSocket ws, byte type, byte[]? payload, CancellationToken ct, bool gzip = false)
     {
@@ -263,5 +374,25 @@ public static class MapWsHandler
     {
         public bool Authed { get; set; }
         public string Account { get; set; } = "";
+
+        /* ---- 令牌桶 (WS 帧不走 HTTP 限流中间件, 见 HandlePlaceCheckAsync 头注释) ---- */
+        private double _checkTokens = CheckBurst;
+        private long _checkRefillAt;
+
+        /// <summary>悬停校验令牌桶: 稳态 CheckRatePerSec 次/秒, 突发 CheckBurst 次。</summary>
+        public bool AllowCheck()
+        {
+            var now = Environment.TickCount64;
+            if (_checkRefillAt == 0) _checkRefillAt = now;
+            var dt = (now - _checkRefillAt) / 1000.0;
+            if (dt > 0)
+            {
+                _checkTokens = Math.Min(CheckBurst, _checkTokens + dt * CheckRatePerSec);
+                _checkRefillAt = now;
+            }
+            if (_checkTokens < 1) return false;
+            _checkTokens -= 1;
+            return true;
+        }
     }
 }

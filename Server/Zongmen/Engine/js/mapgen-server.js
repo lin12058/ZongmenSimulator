@@ -180,6 +180,17 @@
         if (MG.hexDist(ri.q, ri.r, ccq, ccr) <= reach) regions.push([i, j]);
       }
     }
+    /* ⚠ 玩家宗门 (ext) 的归属格可能落在本几何判据**之外** (它的区域中心离块中心 > reach,
+       而实体本身就在块里) —— 不补这一笔, 玩家宗门**永远画不出来** (无异常、无日志)。
+       ext 数量 = 每账号每世一座, 代价可忽略。 */
+    var exr = MG.externalRegionsWithin(ccq, ccr, reach + MG.REGION_M);
+    for (var xr = 0; xr < exr.length; xr++) {
+      var dup = false;
+      for (var rq = 0; rq < regions.length; rq++) {
+        if (regions[rq][0] === exr[xr][0] && regions[rq][1] === exr[xr][1]) { dup = true; break; }
+      }
+      if (!dup) regions.push(exr[xr]);
+    }
     var k0 = Math.floor((ccq - CL) / CL) - 1, k1 = Math.floor((ccq + CL) / CL) + 1;
     var l0 = Math.floor((ccr - CL) / CL) - 1, l1 = Math.floor((ccr + CL) / CL) + 1;
     var comms = [];
@@ -267,9 +278,157 @@
       seaLevel: MG.SEA_LEVEL, biomeMeta: MG.BIOME_META,
       /* 五行/异灵根配色: 与 biomeMeta 同理交给客户端 (前端曾各自复制一份字面量,
          必须人工同步 —— 改色板时极易漂移。现由 meta 单点下发) */
-      elementRGB: MG.ELEMENT_RGB, variantRGB: MG.VARIANT_RGB
+      elementRGB: MG.ELEMENT_RGB, variantRGB: MG.VARIANT_RGB,
+      /* 领地半径表 (DOMAIN_R) + 最小间距 + 足迹半径: 前端画「领地圈」和做落点预览
+         都必须用**服务端这一份**, 不许自己复制字面量 (同 elementRGB 的教训)。
+         ⚠ 这张表在 C# 侧**没有**镜像 —— 判定只在引擎里做 (domainCheck), 表也只从这里
+           下发。check_domain_radius.mjs 断言「全仓库只有一处 DOMAIN_R 字面量」。 */
+      domainR: MG.CFG.DOMAIN_R, settleMinDist: MG.CFG.SETTLE_MIN_DIST, townR: MG.CFG.TOWN_R
     };
     return JSON.stringify(meta);
+  }
+
+  /* ============================================================
+   * 玩家宗门放置 (2026-09-23 方案 §3.3) —— 服务端编排出口
+   * ------------------------------------------------------------
+   * 与地图数据出口的区别: 这里是**写操作**, 会改 VM 内的 ext 层与 roadCache。
+   * 因此三条硬约束:
+   *   ① 一次提交必须在**同一个 V8 门闩调用**里做完 (清缓存 → 重算路 → 版本号 +1),
+   *      否则「路已重算但版本号未前进」的中间态会被并发请求看见;
+   *   ② roadVer **只能 +1, 绝不归零** (宿主 ObserveRoadVer 单调取大 ⇒ 归零 = 路永远送不出去);
+   *   ③ 返回的 blocks = 客户端必须重拉的块 —— 前端对**已加载**的块不会自动重拉
+   *      (updateStreaming 的队列条件含 `!chunkData.has(key)`), 所以这份名单是必需的。
+   * ============================================================ */
+
+  /* 脏区块集合 (矩形包围盒 + 余量)。
+     为什么是「包围盒 + 大余量」而不是精确反查: 一个块请求会带上「与块中心距离
+     ≤ CHUNK_SCAN + REGION_M (=33) 的区域格」, 而区域格中心本身可离它的代表格 ~10 格
+     ⇒ 区块中心的容差 ≈ 43 格 ≈ 2 个区块间距 (21); 再留 2 环余量 ⇒ PAD = 4。
+     ⚠ 宁可多标 (多标只是让客户端多拉一次内容相同的块), 绝不漏标 (漏标 = 画面永久陈旧)。 */
+  var DIRTY_BLOCK_PAD = 4;
+  function dirtyBlocksFor(tiles) {
+    var minCa = 1e18, maxCa = -1e18, minCb = 1e18, maxCb = -1e18;
+    for (var n = 0; n < tiles.length; n++) {
+      var cc = MG.chunkOfTile(tiles[n][0], tiles[n][1]);
+      if (cc.ca < minCa) minCa = cc.ca;
+      if (cc.ca > maxCa) maxCa = cc.ca;
+      if (cc.cb < minCb) minCb = cc.cb;
+      if (cc.cb > maxCb) maxCb = cc.cb;
+    }
+    if (minCa > maxCa) return [];
+    var out = [];
+    for (var ca = minCa - DIRTY_BLOCK_PAD; ca <= maxCa + DIRTY_BLOCK_PAD; ca++)
+      for (var cb = minCb - DIRTY_BLOCK_PAD; cb <= maxCb + DIRTY_BLOCK_PAD; cb++)
+        out.push([ca, cb]);
+    return out;
+  }
+
+  var REGION_ROAD_BUDGET0 = REGION_ROAD_BUDGET;
+
+  /* 落点校验 (悬停即问): 一次调用把 §2.3 判据链 5~7 全部算完, 免得前端每 150ms
+     灌一串 V8 往返。⚠ 判据 1/2/3/9 (seed 新鲜度 / 登录 / 配额 / 名字) 是**服务端
+     自身状态**, 不在这里 —— 服务端拿到本结果后再叠上去 (见 MapWorldService.PlaceCheck)。 */
+  function placeCheckJson(q, r, excludeId) {
+    q = q | 0; r = r | 0;
+    var f = MG.fields(q, r);
+    var vn = MG.veinNear(q, r);
+    var veinD = vn ? vn.d : 99;
+    var rs = MG.regionSeedOf(q, r);
+    var dom = MG.domainCheck(q, r, excludeId || '');
+    var deep = f.biome === MG.BIOME.DEEP;
+    var onVein = !!f.vein;
+    var veinNearEnough = veinD >= (MG.CFG.SETTLE_VEIN_FOOT_PAD | 0);
+    var spirit = MG.spiritAt(q, r);
+    var spOk = spirit >= MG.CFG.SEA_SETTLE_MIN_SPIRIT;
+    var reason = '';
+    if (deep) reason = 'deep_water';
+    else if (onVein) reason = 'on_vein';
+    else if (!veinNearEnough) reason = 'on_vein';
+    else if (!dom.ok) reason = 'too_close';
+    else if (!spOk) reason = 'spirit_too_low';
+    return JSON.stringify({
+      ok: 1, q: q, r: r,
+      can: reason === '',
+      reason: reason,
+      deep: deep, onVein: onVein, veinD: veinD,
+      spirit: spirit, spiritMin: MG.CFG.SEA_SETTLE_MIN_SPIRIT,
+      biome: f.biome, elev: f.e,
+      regionI: rs.i, regionJ: rs.j,
+      blocker: dom.blocker,
+      /* 前端画「领地圈」用: 附近聚落的中心 + 领地半径 (含它们自己也是候选障碍) */
+      near: nearbyDomains(q, r),
+      /* 自己已有的宗门 (用于「原地重建」时豁免) */
+      excludeId: excludeId || ''
+    });
+  }
+
+  /* 附近聚落的 {q,r,tier,type,need,dist} —— 供前端画圈与落点预览。
+     范围 = 12 格 (最大 DOMAIN_R = 8, 留 4 格余量给"圈画得出来")。 */
+  function nearbyDomains(q, r) {
+    var M = MG.REGION_M;
+    var ci = Math.floor(q / M), cj = Math.floor(r / M);
+    var out = [], seen = {};
+    for (var di = -1; di <= 1; di++) {
+      for (var dj = -1; dj <= 1; dj++) {
+        var arr = MG.settlementsFor(ci + di, cj + dj);
+        for (var n = 0; n < arr.length; n++) {
+          var st = arr[n];
+          if (seen[st.id]) continue;
+          seen[st.id] = 1;
+          var d = MG.hexDist(q, r, st.q, st.r);
+          if (d > 12) continue;
+          var need = MG.domainRadiusOf(st);
+          if (need <= 0) continue;
+          out.push({ id: st.id, type: st.type, tier: st.tier | 0, q: st.q, r: st.r,
+                     dist: d, need: need, name: st.name || '' });
+        }
+      }
+    }
+    out.sort(function (a, b) { return a.dist - b.dist; });
+    return out;
+  }
+
+  /* 提交落点 —— 方案 §3.3 的七步同步序列 (在 V8 门闩内一次做完)。 */
+  function commitPlace(q, r, optsJson) {
+    var t0 = Date.now();
+    var opts = {};
+    if (optsJson) {
+      try { opts = typeof optsJson === 'string' ? JSON.parse(optsJson) : optsJson; }
+      catch (e) { opts = {}; }
+    }
+    /* 步 1: 引擎侧放置 (id 由引擎按 {区域i}_{区域j}_u{n} 生成) */
+    var st = MG.placeSettlement(q, r, opts);
+    var rs = MG.regionSeedOf(st.q, st.r);
+    /* 步 2: 清派生状态 (需求边 / 骨架 / 道路 / roadFail / 足迹) —— 五个坑的正面处理 */
+    var clr = MG.clearRoadSideFor(rs.i, rs.j, 0, [st.id]);
+    /* 步 3: 同步重算受影响区域的**全部**道路 (预算 = 无上限, 与区域包同口径)。
+       实测 25 个区域格 ≈ 400~450ms (热地形) —— 这就是用户要的「放下去时附近直接重算」。 */
+    var tiles = [[st.q, st.r]];
+    for (var n = 0; n < clr.regions.length; n++) {
+      var ri = MG.regionInfo(clr.regions[n][0], clr.regions[n][1]);
+      tiles.push([ri.q, ri.r]);
+    }
+    for (var n2 = 0; n2 < clr.regions.length; n2++)
+      MG.roadsNear(clr.regions[n2][0], clr.regions[n2][1], REGION_ROAD_BUDGET0);
+    /* 步 4: 统计本次真正挂在玩家宗门上的道路 (新路) */
+    function onSt(k) { var ids = k.split('|'); return ids[0] === st.id || ids[1] === st.id; }
+    var nRoad = 0;
+    MG.roadCache.forEach(function (_v, k) { if (onSt(k)) nRoad++; });
+    /* 步 5: 道路版本号 +1 (必须在道路重算**之后** —— 先建后报) */
+    var ver = MG.bumpRoadVer();
+    /* 步 6: 脏区块 (客户端必须重拉的那些块) */
+    var blocks = dirtyBlocksFor(tiles);
+    return JSON.stringify({
+      ok: 1, ms: Date.now() - t0,
+      st: settlementJson(st),
+      regionI: rs.i, regionJ: rs.j,
+      roadVer: ver,
+      regions: clr.regions,
+      cross: clr.cross,
+      blocks: blocks,
+      nRoad: nRoad,
+      cleared: clr.n
+    });
   }
 
   global.MapGenServer = {
@@ -284,6 +443,34 @@
     metaJson: metaJson,
     /* 道路版本号: tile 缓存新鲜度校验用 (roadCache 新增道路即 +1) */
     roadVersion: function () { return MG.roadVersion(); },
+    /* ---- 玩家宗门放置 (2026-09-23 方案 §2.4/§3.3) ----
+       ⚠ 每一个新出口都必须在 JsEngineHost.Call 的 switch 白名单里加 case ——
+       漏了就是 `InvalidOperationException: 未知 JS 函数` (运行时才炸, 编译期不报)。 */
+    placeCheckJson: placeCheckJson,
+    commitPlace: commitPlace,
+    setExternalSettlements: function (json) {
+      var list = [];
+      if (json) { try { list = typeof json === 'string' ? JSON.parse(json) : json; } catch (e) { list = []; } }
+      var r = MG.setExternalSettlements(list);
+      return JSON.stringify(r);
+    },
+    externalSettlementsJson: function () {
+      return JSON.stringify({ list: MG.externalSettlements() });
+    },
+    removeExternalSettlement: function (id) {
+      return JSON.stringify({ ok: MG.removeExternalSettlement(String(id)) ? 1 : 0 });
+    },
+    domainCheckJson: function (q, r, excludeId) {
+      return JSON.stringify(MG.domainCheck(q | 0, r | 0, excludeId || ''));
+    },
+    domainRadius: function (type, tier) {
+      return MG.domainRadiusOf({ type: String(type), tier: tier | 0 });
+    },
+    archetypeOf: function (type, tier) {
+      return MG.archetypeOf({ type: String(type), tier: tier | 0 });
+    },
+    /* 道路版本号强制前进 (拆除/外部改动后手工推进时用) */
+    bumpRoadVer: function () { return MG.bumpRoadVer(); },
     /* 统计/自检钩子 */
     _countVeins: function () { return JSON.stringify({ n: MG.countVeins() }); }
   };

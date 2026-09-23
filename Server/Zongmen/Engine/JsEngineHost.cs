@@ -86,6 +86,15 @@ public sealed class JsWorldVm : IDisposable
                 "tileJson" => (string)_svc.tileJson(args[0], args[1]),
                 "fieldGridJson" => (string)_svc.fieldGridJson(args[0], args[1], args[2], args[3]),
                 "metaJson" => (string)_svc.metaJson(),
+                /* ---- 玩家宗门放置 (2026-09-23 方案 §2.4) ----
+                   ⚠ 每个 JS 出口都必须在这里有 case: 漏了就是运行期
+                   `InvalidOperationException: 未知 JS 函数` (编译期不报)。 */
+                "placeCheckJson" => (string)_svc.placeCheckJson(args[0], args[1], args[2]),
+                "commitPlace" => (string)_svc.commitPlace(args[0], args[1], args[2]),
+                "setExternalSettlements" => (string)_svc.setExternalSettlements(args[0]),
+                "externalSettlementsJson" => (string)_svc.externalSettlementsJson(),
+                "removeExternalSettlement" => (string)_svc.removeExternalSettlement(args[0]),
+                "domainCheckJson" => (string)_svc.domainCheckJson(args[0], args[1], args[2]),
                 "_countVeins" => (string)_svc._countVeins(),
                 _ => throw new InvalidOperationException($"未知 JS 函数: {fn}")
             };
@@ -113,13 +122,20 @@ public sealed class JsEngineHost : IDisposable
        例如 tile 缓存的 roadVer 观测值) —— 否则新 VM 的 roadVer 从 0 重新计数,
        旧观测值会让 tile 缓存命中判断失真。 */
     private readonly Action<string>? _onEvicted;
+    /* P (2026-09-23, 玩家放置): VM **新建完成**时的回调 —— 宿主在这里把本世的
+       玩家宗门记录重放回引擎 ext 层 (VM 被 LRU 淘汰后重建是常态, 漏了这一步
+       「玩家的宗门在服务端重启/换世/淘汰后就消失」)。回调在 VM 入表**之前**于
+       锁外执行 ⇒ 里面可以安全地 vm.Call(...) (此时没人能看见这个 VM)。 */
+    private readonly Action<JsWorldVm>? _onCreated;
 
-    public JsEngineHost(string jsDir, int maxSeeds, Action<string>? onEvicted = null)
+    public JsEngineHost(string jsDir, int maxSeeds, Action<string>? onEvicted = null,
+                        Action<JsWorldVm>? onCreated = null)
     {
         /* C1: MaxSeeds 配 0/负数时, 原实现 while (Count > MaxSeeds) 会把刚建好的
            实例立刻淘汰 → 每次请求都「建了又杀」, 100% 拿到已 Dispose 的实例。 */
         _maxSeeds = Math.Max(1, maxSeeds);
         _onEvicted = onEvicted;
+        _onCreated = onCreated;
         var sb = new StringBuilder();
         sb.AppendLine("'use strict';");
         sb.AppendLine("var window = globalThis; var global = window; var self = window;");
@@ -161,6 +177,11 @@ public sealed class JsEngineHost : IDisposable
            double-check: 并发同 seed 可能各建一个, 以「先入表者胜」收敛, 多余实例释放。 */
         var created = new JsWorldVm(seed, _bundle);
         created.Enter();                     // C1: 借出计数在入表前就置位
+        /* P: 重放本世的玩家宗门 (ext 层)。放在入表**之前** = 锁外执行, 且此刻
+           还没有别的线程能拿到这个 VM ⇒ 不必与并发请求抢 V8 门闩。
+           回调抛异常 ⇒ 直接向上抛 (宁可这一次请求失败, 也不要一个「丢了玩家资产」
+           的世界悄悄服役)。 */
+        _onCreated?.Invoke(created);
         lock (_lock)
         {
             if (_vms.TryGetValue(seed, out var existing))

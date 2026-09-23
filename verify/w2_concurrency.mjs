@@ -128,8 +128,15 @@ console.log('\n== 冷 VM 24 路并发 ==');
     after.liveSeeds <= after.maxSeeds && after.maxSeeds > 0,
     JSON.stringify({ before: before.liveSeeds, after: after.liveSeeds, max: after.maxSeeds }));
   console.log(`  (并发耗时 ${Date.now() - t0}ms, liveSeeds ${before.liveSeeds} → ${after.liveSeeds}, maxSeeds=${after.maxSeeds})`);
-  /* 锁定「appsettings.json 被静默忽略」回归: 配置里 MaxSeeds=3, 代码默认是 4 */
-  check('appsettings.json 已生效 (maxSeeds=3, 非代码默认 4)', after.maxSeeds === 3, String(after.maxSeeds));
+  /* 锁定「appsettings.json 被静默忽略」回归: 配置里 MaxSeeds=3, 代码默认是 4。
+     ⚠ 但起**隔离实例**时惯例会显式放大 (skill §22: `check_mm_ui` 每次用新随机 seed,
+       名额用满后会假报「快照未就绪」, 长得像产品回归) ⇒ 环境变量
+       `Zongmen__MaxSeeds=64` 会覆盖 appsettings —— 那时本条的 `=== 3` 就是**假红**。
+     本条的真意是「**配置链生效了**」(而不是被忽略后回落到硬编码默认)。故判据改为
+       「≠ 代码默认 4 且 > 0」: 3(appsettings) 与 64(env 覆盖) 都过, 只有"配置全被忽略"
+       才会得 4 ⇒ 原来的守护力一点没丢。 */
+  check('MaxSeeds 走配置链 (≠ 代码默认 4; 3=appsettings / >4=隔离实例 env 放大)',
+    after.maxSeeds !== 4 && after.maxSeeds > 0, String(after.maxSeeds));
 
   /* 同块重复请求一致性 (blockLayersJson / raw 缓存命中路径) */
   const w = clients[0];

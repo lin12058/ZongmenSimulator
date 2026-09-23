@@ -49,4 +49,28 @@ public sealed class LruCache<V> where V : class
     }
 
     public int Count { get { lock (_lock) return _map.Count; } }
+
+    /* P (2026-09-23, 玩家放置): 逐键失效与清空 —— 玩家落点会改「某几个区域格」的
+       派生内容 (区域包/足迹包/块归属映射), 必须能把对应条目踢掉。
+       原实现只有 Get/Set, 于是落点后只能靠 LRU 自然淘汰 → 旧区域包继续被下发
+       (客户端看着"宗门放下去没反应")。 */
+    public bool Remove(string key)
+    {
+        lock (_lock)
+        {
+            if (!_map.TryGetValue(key, out var e)) return false;
+            _order.Remove(e.Node);
+            _map.Remove(key);
+            return true;
+        }
+    }
+
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _map.Clear();
+            _order.Clear();
+        }
+    }
 }

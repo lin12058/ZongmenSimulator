@@ -48,7 +48,11 @@
     nameSettle: true,   // 聚落名: 城镇·宗门·景点的竖排纸签
     nameVein: true,     // 灵脉名: 灵脉签 (签面淡染五行色)
     nameRegion: true,   // 区域名: 山川注记淡字 (旧「注记」开关)
-    clouds: true        // 云气层
+    clouds: true,       // 云气层
+    /* 领地圈 (2026-09-23 玩家宗门放置方案 §4.4): 常显各聚落的**领地范围**
+       (六边形, 半径 = 规模映射, 真源 = 服务端 CFG.DOMAIN_R 经 meta 下发)。
+       默认关 —— 它回答的是「这里能不能立宗」, 属偶发需求而非常态信息。 */
+    domain: false
   };
 
   var settings = null;          // 内存副本 (读路径只认它)

@@ -153,7 +153,47 @@
   button:hover { border-color: var(--seal); color: var(--seal); }
   button.primary { border-color: var(--seal); color: var(--seal); }
   button.off { opacity: 0.45; text-decoration: line-through; }
+  button.on { border-color: var(--seal); color: var(--seal); }
+  #btnPlace { letter-spacing: 3px; }
   #stats { font-size: 12px; color: var(--ink-soft); letter-spacing: 1px; }
+
+  /* ---- 卜居浮层 (方案 §4.4) ----
+     ⚠ 必须与 #topbar **同级**放在 <body> 下: `.panel` 的 clip-path 会裁掉整棵子树
+       (弹窗/全屏小地图踩过同一条)。顶栏左右两块面板已占满, 故取视口顶部居中。
+     pointer-events 保持 auto: 它是可交互的 (起名/品阶/取消), 且它下面的画布仍能收
+     到拖动 —— 面板只覆盖自己那块 (没有铺满全屏的遮罩)。 */
+  #placeBox {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 66; width: 306px; max-width: calc(100vw - 24px); padding: 9px 13px 11px;
+  }
+  #placeBox.hidden { display: none; }
+  #placeBox .pb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #placeBox .pb-title { font-size: 13px; letter-spacing: 5px; color: var(--ink); }
+  #placeBox .pb-title b { font-weight: 400; color: var(--seal); }
+  #btnPlaceClose { padding: 1px 6px; font-size: 12px; letter-spacing: 0; border: none; background: none; color: var(--ink-soft); }
+  #btnPlaceClose:hover { color: var(--seal); }
+  .pb-row { display: flex; align-items: center; gap: 7px; margin: 6px 0; font-size: 12.5px; }
+  .pb-row .k { flex: 0 0 auto; letter-spacing: 2px; color: var(--ink-soft); }
+  #placeName {
+    flex: 1; min-width: 0; padding: 3px 6px; font-family: inherit; font-size: 13px;
+    color: var(--ink); letter-spacing: 1px;
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.95), rgba(238,229,208,0.9));
+  }
+  #placeName:focus { outline: none; border-color: var(--seal); }
+  #placeTier {
+    padding: 3px 6px; font-family: inherit; font-size: 12.5px; color: var(--ink);
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.95), rgba(238,229,208,0.9));
+  }
+  #placeMsg { min-height: 17px; margin-top: 3px; font-size: 12.5px; line-height: 1.5; letter-spacing: 1px; }
+  #placeMsg.ok  { color: #3a6b46; }
+  #placeMsg.bad { color: var(--seal); }
+  #placeMsg.busy { color: var(--ink-soft); }
+  .pb-kv { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0; font-size: 12px; color: var(--ink-soft); }
+  .pb-kv .v { color: var(--ink); }
+  .pb-kv .v.bad { color: var(--seal); }
+  .pb-hint { margin-top: 5px; font-size: 11px; line-height: 1.7; color: var(--ink-faint); }
 
   /* ---- 本宗面板 (代替原「山河五色」图例) ----
      2026-09-23 十二版: 旧「宗门录 + 择宗」整条闭环下线 —— 本面板只显示玩家
@@ -320,8 +360,35 @@
       </div>
     </div>
     <div id="controls" class="panel">
+      <button id="btnPlace" title="卜居 · 择地立宗">卜居</button>
       <button id="btnGear" title="设置 · 显示项 / 世界" aria-label="设置">⚙</button>
     </div>
+  </div>
+
+  <!-- 卜居浮层: 落点校验提示 + 起名/品阶 (方案 §4.4)。
+       与 #topbar 同级 —— .panel 的 clip-path 会裁掉子树, 塞进顶栏面板会被切。 -->
+  <div id="placeBox" class="panel hidden">
+    <div class="pb-head">
+      <span class="pb-title">卜<b>居</b></span>
+      <button id="btnPlaceClose" title="取消 (Esc)">✕</button>
+    </div>
+    <div class="ink-rule"></div>
+    <div class="pb-row">
+      <span class="k">名号</span>
+      <input id="placeName" type="text" maxlength="12" placeholder="1~12 字" autocomplete="off">
+    </div>
+    <div class="pb-row">
+      <span class="k">品阶</span>
+      <select id="placeTier">
+        <option value="1">下品宗门 · 领 6 格</option>
+        <option value="2">中品宗门 · 领 7 格</option>
+        <option value="3">上品宗门 · 领 8 格</option>
+      </select>
+      <span class="k" id="placeQuota"></span>
+    </div>
+    <div id="placeState"></div>
+    <div id="placeMsg"></div>
+    <div class="pb-hint">移动鼠标择地, 单击落定 · Esc 取消<br>朱砂 = 不可立 · 墨绿 = 可立</div>
   </div>
 
   <div id="info" class="panel hidden">
@@ -348,6 +415,8 @@
         <span class="nm">灵脉名</span><span class="dsc">灵脉签 · 签面敷五行色</span></label>
       <label class="set-item"><input type="checkbox" data-zm="nameRegion">
         <span class="nm">区域名</span><span class="dsc">山川注记淡字</span></label>
+      <label class="set-item"><input type="checkbox" data-zm="domain">
+        <span class="nm">领地圈</span><span class="dsc">各聚落的领地范围 (规模决定)</span></label>
       <label class="set-item"><input type="checkbox" data-zm="clouds">
         <span class="nm">云气</span><span class="dsc">云毯 · 地面云影</span></label>
       <div class="ink-rule"></div>

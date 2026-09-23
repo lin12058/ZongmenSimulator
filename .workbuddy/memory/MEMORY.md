@@ -1,8 +1,9 @@
 # 宗门模拟器 demo · 长期备忘
 > 本文件只钉**跨模块契约 & 会误事的坑**（刻意压到最小）。向下指针：
 > - **`DETAILS-引擎与表现层.md`** —— 引擎/灵脉/建筑/小地图/前端自算/渔村A2/归属势力B/匾额C/世界种子W/构建验证坑 的**细则与实测数字**
-> - **仓库内 skill `.workbuddy/skills/zongmen-verify-pipeline/SKILL.md`** §1~§39 —— **跑法/验收姿势/教训**（唯一真源）
-> - 同目录 `YYYY-MM-DD.md` —— 每日叙事（2026-09-16 二次压缩：长细则继续外迁 DETAILS）
+> - **仓库内 skill `.workbuddy/skills/zongmen-verify-pipeline/SKILL.md`** §1~§41 —— **跑法/验收姿势/教训**（唯一真源）
+> - 同目录 `YYYY-MM-DD.md` —— 每日叙事（2026-09-23：玩家放置宗门 **P0 落地**，跨模块契约见本文件「玩家放置宗门」节）
+> - `待办事项/玩家宗门放置与城市迭代方案.md` —— **实施稿 v4**，P0 的**改动清单/判据矩阵/4 处与设计稿不一致**全在它的 **§十**
 
 ## 全局 / 架构
 - 坐标「格」(q,r)，渲染才 tileToWorld。服务端 .NET8(ClearScript.V8 + protobuf-net3 + SQLite/WAL)，Kestrel :8140（`127.0.0.1` 与 LAN `192.168.63.62` 均通）；⚠ **引擎真源只在 `Server/Zongmen/Engine/js/`**（旧备忘的 `Engine/js/` **不存在**），前端 `web/js/`。
@@ -45,12 +46,19 @@
 - **世界种子 = 服务端资产**：`WorldLedger.cs` **独立表**（⚠ 绝不能塞 `Data(Key,Value)`，`PruneExcept` 会静默删台账）＋ `/api/world/current|next|list`；前端拿不到种子直接 `showFatal`，**绝不回落前端造**；`?seed=` 仅调试覆盖（削掉即废验证管线）。
 - **设置唯一真源 `web/js/store.js`**（键 `zongmen.settings.v1`）；⚠ `showVeins/showLabels` 变量名**不能改**（`frontend_smoke` 逐名扫原文）。
 
-## 玩家放置宗门（方案 `docs/玩家宗门放置与城市迭代方案.md`；**细则全在该文档 §2~§4**）
+## 玩家放置宗门（**P0 已落地** 2026-09-23；方案 = `待办事项/玩家宗门放置与城市迭代方案.md`，**实施记录全在 §十**）
 - **两笔账必须分账**：道路重算 **405~443 ms**（热地形，25 区域格）vs 城市重算 **31 ms**（纯城市 ≈ **23 ms**）⇒ 道路 ≈ 19 倍。⚠ `growTownFootprint` **不读道路**（只读 fields/landuseOf/veinNear，mapgen.js:950~975）⇒ 玩家实体不进 `settlementsFor` 则**既有城市无需重算**；用户口中的「附近城市重算」实为「附近**道路**重算」。
-- ⚠ **`roadVer` 只能 +1 增量，绝不归零**：`resetRoads()` 设 roadVer=0（mapgen.js:1851）撞 `ObserveRoadVer` 单调取大（MapWorldService.cs:114~121）⇒ known 保持旧值 ⇒ tile 判「新鲜」⇒ **路重建了却永远送不出去**（无异常无日志）。只按边清 roadCache/roadFail + 显式 roadVer++。
+- ⚠ **`roadVer` 只能 +1 增量，绝不归零**（红线）：归零撞 `ObserveRoadVer` 单调取大（MapWorldService.cs:114~121）⇒ known 保持旧值 ⇒ tile 判「新鲜」⇒ **路重建了却永远送不出去**（无异常无日志）。**已从代码层消除**：`resetRoads()`/`configure()`/放置流程三者都走 `bumpRoadVer()`。
 - ⚠ **邻域校验必须扫 2 环（25 格）**：REGION_M=18 + 锚点抖动 6.3 + PROSPECT_R=4 ⇒ 单侧最大偏移 10.3；第 1 环最近可能仅 7.7 格 < 8 禁区。判据 `check_place_neighborhood.mjs`。
-- 判据：`check_place_road_recompute.mjs`（4 PASS / 25 s；段 2 跑 A*，样本数已参数化）。注入手法仍是**内存副本注入** —— 引擎尚无 `setExternalSettlements`，真接口落地后脚本会**主动报错**而不是静默跑旧路径。
+- **领地半径 `DOMAIN_R` 真源在引擎**（`mapgen-config.js`，43 键之一）：`city:8 town:6 sect3:8 sect2:7 sect1:6 village:4 fishing:4 poi:0`。口径 = **中心距阈值、单向判定**（拿新落点量**既有**聚落），边界 `dist < need` 才拒（`=== need` 放行）。⚠ **C# 不镜像**（几何判定只在引擎 `domainCheck`，C# 只做廉价前置）；**前端必须镜像**（`main.js domainRof` 画领地圈），由 `check_domain_radius.mjs` 段 G 跨源逐值钉死。判据 **44 PASS**。
+- ⚠ **玩家实体 id = `{区域i}_{区域j}_u{n}`**（**不是** `p_…`）：硬约束是**前两段为区域格坐标的十进制整数**（`rngDominated`/`roadsNear` 要 `id.split('_')` 反解，NaN ⇒ 静默扫空需求边池）；**id 由引擎自己算**，不接受 C# 传入。
+- ⚠ **ext 只在缓存之外叠加（零拷贝）**：`settlementsFor = settlementsFor$base + extIn`；`settleCache`/`townCache`/`siteScoreCache` **内容逐字节不变**（判据 `check_place_no_pollute.mjs` 18 PASS：指纹逐格比对 + 增删对称）。`demandCache`/`skeletonCache`/`roadCache`/`roadFail` **含 ext 影响 ⇒ 必须显式按边清**（`clearRoadSideFor`）。
+- ⚠ **五个静默坑**（旧边被删 / `roadFail` 锁死 / `roadVer` 不前进 / 一条边进两个区域包 / 缓存不失效 ⇒ 注入静默无效）**已在 `MapGenServer.commitPlace` 的七步序列里一次处置**。
+- ⭐ **验证姿势：离线直调 `MapGenServer.commitPlace`**（`mapgen-server.js` 是**纯搬运层**，无宿主依赖）⇒ 不要服务端/WS/不付 25s A*，`check_place_rules.mjs` 20 PASS / **6 s**；只有协议层才上 WS（`w5_place_rev.mjs` 30 PASS）。**细则 → skill §41.A**。
+- 判据：`check_place_road_recompute.mjs`（4 PASS / 25 s；段 2 跑 A*）已改用**真接口** `MG.setExternalSettlements` —— 原来的源码改写注入会在新 `settlementsFor` 上**自递归**（RangeError）。⚠ `regionJson` 的差分会掺入道路装配的惰性补算 ⇒ 「不清缓存几何完全没变」只能当**报数**，不能当断言。
 - ⚠ 测「重算代价」前必须 **warm 上一层缓存**（否则测出的是两层之和），且 warm 是否充分要做成**断言**；首测含 JIT（85ms vs 中位 31ms）⇒ **必须交替多轮取中位**。
+- ⚠ **`w5_place_rev.mjs` 会写入**（真落一座宗门）且**要求「本世还没落过宗门」** —— 它的 A 段期望值由**裸引擎参照实现**给出，世界跑脏 ⇒ 一串莫名其妙的 FAIL。已加前置闸（自查 `stats.playerSects`，**按轮**计数）⇒ rc=2 跳过。
+
 
 ## 前端 UI 模块边界（2026-09-23 十二版）
 - ⚠ **`#sectWrap` = 「本宗」面板**，数据源 = 服务端 `PlayerSect` 表（**不读 `settleCells`** —— 本宗是持久资产，不在视野内也要显示）。旧「宗门录 + 择宗」闭环**已全删**（`pinId`/择宗菜单/点图认领/`layerFingerprint`）。地图渲染仍走 `EntityGroup→PlaceEntity→settleCells`（与 NPC 同通路），两条路独立。
@@ -62,11 +70,15 @@
 ## ⚠ 文件删除高危
 - 已 3 次误删。清理一律 Node `fs.unlinkSync` 绝对路径 + basename/数量断言，**先按 `git -c core.quotepath=false ls-files` 过滤被跟踪名单**；禁 shell 通配与 `git rm`。恢复 `git restore --source=HEAD --worktree -- verify/`。⚠ `verify/_scratch_diag.mjs` 是**被跟踪**的，别按 `_` 前缀当临时件。⚠ core.quotepath 给非 ASCII 路径加引号 ⇒ 统计必带 `-c core.quotepath=false`。
 
-## 构建 / 验证（跑法见 skill §1~§39；**坑清单 → DETAILS 末节**）
-- 基线（离线）**19 条** + 在线 **4 条**；总 runner `verify/run_regression.mjs`（`--offline-only`/`--with-server`/`--base=`/`--only=`/`--skip=`/`--list`）。服务端 verify_map/w1/w2/w4 全绿。
-- ⚠ **服务端验证别 kill 用户 8140** ⇒ 起临时独立实例，且 **`MaxSeeds` 必须显式放大**（默认 3；`check_mm_ui` 每次用新随机 seed ⇒ 名额用满后判据报「快照未就绪」，**长得像产品回归**）。姿势见 skill §22。
-- ⚠ 判据三防：① 绝对值阈值必假红 ⇒ 改 **A/B 归因** ② **参照系不能是被测规则自己的目标函数**（自证陷阱）⇒ §32 ③ 复算必须与实现**同容差语义**（2e-13 的 tie 就能翻案）⇒ §32.1。
+## 构建 / 验证（跑法见 skill §1~§41；**坑清单 → DETAILS 末节**）
+- 基线（离线）**24 条** + 在线 **5 条** + 写入型 **1 条**；总 runner `verify/run_regression.mjs`：`--offline-only` / `--live-only`（⚠ 新增：离线组要 ~8 分钟，只调在线组别白等）/ `--with-server` / `--with-place`（⚠ 新增：**写入型判据的显式 opt-in**，跑 `w5_place_rev`）/ `--base=` / `--only=` / `--skip=` / `--list`。
+- ⚠ **`rc=2` = 跳过**（既有约定；`check_mm_layout`/`check_mm_ui`/`check_calc_local`/`w5_place_rev` 都用它自跳过）。runner 早先把 rc≠0 一律当真红 ⇒ 与文档自相矛盾，**已修为单列 `skip` 并列入汇总行**（不让跳过静默发生）。
+- ⚠ **被跑脏的实例会伪造「回归」**：`w5_place_rev` 要求「本世还没落过宗门」（自查 `stats.playerSects`，按轮计数，不满足即 rc=2）；`check_world_ledger` 会真实开一世。两者都只该对**隔离实例 + 全新 DB** 跑，且 `w5` 排在最后。
+- ⚠ **`check_calc_local` 的 hybrid/ab 档在本机 headless 虚拟时间下假红**（`local=false / 块=0 / engine seed=null`，probe 里 `calc.lastError === ''` = `MC.requestScript()` 挂着）。已 A/B 定案：① Node 直连验 WS **帧 4 在 10~40 ms 到货**（3/3）② `git stash` 退回 HEAD 后**原始前端同样红** ⇒ 与本改无关；`--wait` 加到 14000 也无效。细则 → skill §41.D。
+- ⚠ **服务端验证别 kill 用户 8140** ⇒ 起临时独立实例，且 **`MaxSeeds` 必须显式放大**（默认 3；`check_mm_ui` 每次用新随机 seed ⇒ 名额用满后判据报「快照未就绪」，**长得像产品回归**）。姿势见 skill §22。⚠ 显式放大后 `w2_concurrency` 的 `maxSeeds===3` 硬断言会假红 ⇒ 已改判「≠ 代码默认 4」。
+- ⚠ 判据三防：① 绝对值阈值必假红 ⇒ 改 **A/B 归因** ② **参照系不能是被测规则自己的目标函数**（自证陷阱）⇒ §32 ③ 复算必须与实现**同容差语义**（2e-13 的 tie 就能翻案）⇒ §32.1。④ 新增：**源码守卫别用「固定字符窗」判邻近**（每加一个设置项就假红）⇒ 改判「赋值点所在**整个函数体**」⇒ §41.E。
 - ⚠ 几何对齐类断言：**优先数值探针（`?plaqprobe=1`/`?mmprobe=1`）+ 离线复算**，不要写像素阈值（截图目测误差 >60px，Read PNG 还会等比缩小）。
-- ⚠ 本机环境：**WMIC 已进黑名单**（查进程用 `netstat -ano` + `tasklist /FI` + `taskkill /PID`）；**PowerShell 工具输出会被吞** ⇒ 诊断走 Node；Bash shim 缺 `ls/cd/dirname` ⇒ 先 `export PATH="/c/Program Files/Git/usr/bin:$PATH"`。
+- ⚠ 本机环境：**WMIC 已进黑名单**（查进程用 `netstat -ano` + `tasklist /FI` + `taskkill /PID`）；**PowerShell 工具输出会被吞** ⇒ 诊断走 Node；Bash shim 缺 `ls/cd/dirname` ⇒ 先 `export PATH="/c/Program Files/Git/usr/bin:$PATH"`。⚠ `taskkill //PID` 会被 Git Bash 路径转换吃掉 ⇒ 用 PowerShell `Stop-Process -Id`。⚠ **循环里带管道的命令输出会被 shim 吞**（`for ... | grep` 常返空）⇒ 拆成单次调用。
+- ⚠ **`git stash` 退工作区做 A/B 时**：`web/js/store.js` 有 **CRLF 伪修改**（`status` 有 ` M` 但 `diff` 为空）会挡住 `stash pop` ⇒ 先 `git checkout -- <该文件>` 再 pop；pop 后**必须 `diff -rq <备份> <工作区>` 逐字节核对**再删备份。⚠ **反空真脚本（读-改-跑-还原）必须 `try/finally`** —— 本轮忘写回，把 `web/js/main.js` 写坏。
 - ⚠ **后台起的实例/服务活不过一个回合** ⇒ **起实例 + 跑实机判据必须同一回合**；跨回合先 `net.connect` 探端口，别直接怀疑代码。仓库外起临时实例时 `/api/debug/snap` 落在**实例自己目录**旁（`FindRoot` 向上找 `web/index.html`）⇒ `live_cap` 必超时但探针其实已写出（细则 → skill §35.2/§35.3）。
 - ⚠ 文档-磁盘漂移：`verify/_vv_crop.mjs` / `verify/_vv_pick.mjs` 文档里被当「常驻工具」引用，但**磁盘上不存在**（要用先按文档接口重建）。

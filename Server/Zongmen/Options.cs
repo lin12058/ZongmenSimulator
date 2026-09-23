@@ -14,6 +14,11 @@ public sealed class ZongmenOptions
     public int MaxSeeds { get; set; } = 4;
     public bool PersistEnabled { get; set; } = true;
 
+    /// <summary>每人每世可立的宗门数上限 (P0 = 1, 方案 §六「一世 1 个」)。
+    /// ⚠ 口径是**按账号**而非按世界: demo 鉴权下"任意非空账号即登录", 若按世界限制,
+    ///   第一个进入的玩家就把整世锁死了 —— 显然不是本意。</summary>
+    public int PlayerSectMaxPerAccount { get; set; } = 1;
+
     /// <summary>js 沙箱脚本目录 (noise.js/mapgen.js/mapgen-server.js)。</summary>
     public string? EngineJsDir { get; set; }
 }

@@ -451,6 +451,21 @@
     SETTLE_VEIN_CENTER_PEN2: 20, // 中心候选 距灵脉中心 d===2 的扣分 (必须 < CENTER_PEN)
     SETTLE_VEIN_FOOT_PAD: 2,     // 足迹建筑 距灵脉中心的最小格距 (0=关; 1→几乎无效; 2→留两格空地)
 
+    /* ---------- 领地半径 (2026-09-23 玩家放置宗门方案 §2.1) ----------
+       「领地」= 聚落不许别人插足的**势力范围**, 与「足迹半径 TOWN_R=3」是两个概念:
+         · 足迹 = 这座城镇的建筑铺到哪 (TOWN_R);
+         · 领地 = 这座城镇周边多少格内不许再立新聚落 (本表)。
+       关系恒为 领地 >= 足迹 (否则领地内已经有别人的建筑)。
+       ⚠ 口径是「**中心距**」阈值, 不是「半径之和」:
+           判定 = `hexDist(新落点, 既有聚落中心) < DOMAIN_R(既有聚落)` ⇒ 拒绝。
+           即拿新落点去量**既有聚落**的领地 (单向), 与玩家自己宗门多大无关。
+       分档依据 = `tier` (离散档, 稳定可预期), **不用 pop** (连续量, 且灵脉域内还会 ×1.3)。
+       city = 8 来自用户原话「8 格附近有城市中心就不允许建造」。
+       poi (秘境) 不设领地 —— 秘境是荒僻地标, 允许贴着建。
+       ⚠ 改本表必须同步: ① C# 侧镜像表 (DomainRadius.cs) ② verify/check_domain_radius.mjs
+          (跨源逐值断言) —— 只改一处会静默错档 (同 FOOT_MIRROR 的教训)。 */
+    DOMAIN_R: { city: 8, town: 6, sect3: 8, sect2: 7, sect1: 6, village: 4, fishing: 4, poi: 0 },
+
     /* ---------- 贸易 (§四): 纯计算层, 不落库 ---------- */
     TRADE_REACH: 40        // 相邻城镇连通预算 (格): 六边距超此值不成 tradeEdge
   };
@@ -530,6 +545,8 @@
     TOWN_BUILD_MAX: { village: 8, town: 16, city: 25, sect: 16, fishing: 8 },
     SETTLE_MIN_DIST: 7,
     SEA_TERR: -10, SEA_SETTLE_MIN_SPIRIT: 0.20, SEA_SETTLE_NEAR_LAND: 1,
+    SETTLE_VEIN_CENTER_PEN: 40, SETTLE_VEIN_CENTER_PEN2: 20, SETTLE_VEIN_FOOT_PAD: 2,
+    DOMAIN_R: { city: 8, town: 6, sect3: 8, sect2: 7, sect1: 6, village: 4, fishing: 4, poi: 0 },
     TRADE_REACH: 40
   };
   /* A10 一致性校验: 若 config 已加载, 兜底表与真源的键集必须一致 (防止只改一处)。
@@ -731,7 +748,10 @@
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     skeletonCache.clear();  // A2
     roadFail.clear();
-    roadVer = 0;
+    /* ext (玩家层) 随世界重铸一并清空 —— 换 seed = 换界, 旧世的宗门不属于新世。
+       ⚠ 服务端必须在 init 之后**重新** setExternalSettlements(本世记录)。 */
+    extByRegion.clear(); extById.clear(); extUGen = {};
+    roadVer = 0;                 // 新 VM 的冷启 (bundle 求值 → init): 从 0 起, 无历史观测
   }
 
   /* ---------- 海拔场 (纯函数, 带缓存) ---------- */
@@ -1699,7 +1719,7 @@
        而 2 环邻格的中心距 ≥ REGION_M×2 的对角 = 36 格 ⇒ 最近也 ≥ 36−2×10.8 = 14.4 > 7,
        不可能触发抑制。选 1 环 = 用最少的邻域查询覆盖全部可能的冲突。
      秘境界 (poi) 不是聚落, 不参与抑制 (否则秘境会把城镇挤掉)。 */
-  function settlementsFor(i, j) {
+  function settlementsFor$base(i, j) {
     var key = i + ',' + j;
     var c = settleCache.get(key);
     if (c) return c;
@@ -1732,6 +1752,270 @@
     cacheSet(settleCache, key, out, SETTLE_CAP);
     return out;
   }
+
+  /* ============================================================
+   * 玩家放置聚落 —— 外部聚落叠加层 (ext)   [2026-09-23 玩家宗门放置方案 §2.4]
+   * ------------------------------------------------------------
+   * 切法: 把「纯的部分」与「可变的部分」在**缓存边界**上切开 ——
+   *   · settlementsFor$base = 自动生成层 (纯函数 + settleCache, 永不受 ext 影响);
+   *   · extIn(i,j)          = 玩家放置层 (可增删, 不缓存);
+   *   · settlementsFor      = 两层拼接 = **唯一**对外入口。
+   * 于是自动生成的世界逐字节不变: rawSettlementsFor / settleCache / R7 间距抑制
+   * 都只看自动层 ⇒ 落一座玩家宗门**不会**把旁边的自动城镇挤掉。
+   *
+   * ⚠ ext 的归属区域格 = **id 的前两段** (放置时由 regionSeedOf(q,r) 定下, 此后以
+   *   id 为权威, 见 setExternalSettlements)。不重算 regionSeedOf: 同一份持久化数据
+   *   只能有一种归属, 否则「区域包里的位置」与「明细面板查到的位置」会分叉。
+   * ⚠ 与自动层是**两套独立的间距规则**:
+   *     自动↔自动 : SETTLE_MIN_DIST(=7) + R7 单向抑制 (抑制只看自动层);
+   *     玩家↔既有 : DOMAIN_R(领地半径), 单向 —— 拿新落点去量**既有聚落**的领地。
+   * ============================================================ */
+  var extByRegion = new Map();   // "i,j" -> [聚落, ...] (按放置顺序, 顺序稳定)
+  var extById = new Map();       // id -> 聚落 (去重/删除用)
+  var extUGen = {};              // "i,j" -> 下一个可用 u 序号 (单调只增, 不复用 id)
+  var EMPTY_EXT = [];
+
+  function extIn(i, j) { return extByRegion.get(i + ',' + j) || EMPTY_EXT; }
+
+  /* 对外聚落 = 自动层 (已过 R7 抑制) + 玩家层。
+     ext 为空时**直接返回 settleCache 里那个数组** (零拷贝) ⇒ 未放置玩家宗门的世界
+     与改造前逐字节相同 (这是「自动世界不受影响」的运行时保证)。 */
+  function settlementsFor(i, j) {
+    var ex = extIn(i, j);
+    return ex.length ? settlementsFor$base(i, j).concat(ex) : settlementsFor$base(i, j);
+  }
+
+  /* 聚落档位键 (DOMAIN_R 的表键): sect 按 tier 分 3 档, 其余按 type 直取。
+     ⚠ 必须与 mapgen-config.js 的 DOMAIN_R 键集一一对应 (check_domain_radius.mjs 断言)。 */
+  function archetypeOf(st) {
+    if (st.type === 'sect') {
+      var t = st.tier | 0;
+      return 'sect' + (t < 1 ? 1 : t > 3 ? 3 : t);
+    }
+    return String(st.type);
+  }
+  /* 某聚落的领地半径 (格, 中心距阈值)。未知档位 / poi ⇒ 0 (= 不设领地)。 */
+  function domainRadiusOf(st) {
+    if (!st) return 0;
+    var D = CFG.DOMAIN_R || {};
+    var v = D[archetypeOf(st)];
+    return typeof v === 'number' ? v : 0;
+  }
+
+  /* 领地判定: 新落点 (q,r) 能否立聚落 —— 规则 = 「拿新落点量既有聚落的领地」,
+     **单向** (与玩家自己宗门多大无关, 方案 §2.6)。
+     excludeId 供「原地重建 / 升级自己」时豁免自己。
+     扫 2 环 = 5x5 = 25 个区域格: 单侧最大偏移 = 锚点抖动 6.3 + 勘测半径 4 = 10.3,
+     而最大 DOMAIN_R = 8 ⇒ 1 环 (最近邻格可能只 7.7 格) 不够, 必须 2 环 (方案 §2.7)。
+     边界语义: hexDist === DOMAIN_R **允许** (判据用 <, 不用 <=)。
+     返回 { ok, blocker } —— blocker 取「侵占最深」(dist-need 最小) 的一个, 供前端标红。 */
+  function domainCheck(q, r, excludeId) {
+    q = q | 0; r = r | 0;
+    var ci = Math.floor(q / REGION_M), cj = Math.floor(r / REGION_M);
+    var best = null;
+    for (var di = -2; di <= 2; di++) {
+      for (var dj = -2; dj <= 2; dj++) {
+        var arr = settlementsFor(ci + di, cj + dj);
+        for (var n = 0; n < arr.length; n++) {
+          var st = arr[n];
+          if (excludeId && st.id === excludeId) continue;
+          var need = domainRadiusOf(st);
+          if (need <= 0) continue;                       // poi 等不设领地
+          var d = hexDist(q, r, st.q, st.r);
+          if (d >= need) continue;                       // 边界: d === need 视为可建
+          if (!best || (d - need) < best.margin) {
+            best = { id: st.id, type: st.type, tier: st.tier | 0, q: st.q, r: st.r,
+                     dist: d, need: need, margin: d - need };
+          }
+        }
+      }
+    }
+    return best ? { ok: false, blocker: best } : { ok: true, blocker: null };
+  }
+
+  function extAddTo(st, i, j) {
+    var key = i + ',' + j;
+    var arr = extByRegion.get(key);
+    if (!arr) { arr = []; extByRegion.set(key, arr); }
+    arr.push(st);
+    extById.set(st.id, st);
+    var um = /_u(\d+)$/.exec(st.id);
+    var un = um ? (+um[1]) + 1 : 1;
+    if (!(extUGen[key] >= un)) extUGen[key] = un;
+    return st;
+  }
+
+  /* 放置一座玩家聚落。id 由引擎按 {区域i}_{区域j}_u{n} 生成。
+     ⚠ id 前两段**必须是区域格坐标的十进制整数**: 引擎在 rngDominated / 骨架归属处
+       会 `id.split('_')` 反解 (本文件 :1361 / :1653) —— 用 `p_…` 这类前缀会得 NaN,
+       需求边池静默扫空、道路永不生成 (方案 §4.3 的硬约束, 无异常无日志)。 */
+  function placeSettlement(q, r, opts) {
+    opts = opts || {};
+    q = q | 0; r = r | 0;
+    var rs = regionSeedOf(q, r);
+    var key = rs.i + ',' + rs.j;
+    var n = extUGen[key] | 0, id;
+    do { id = rs.i + '_' + rs.j + '_u' + n; n++; } while (extById.has(id));
+    extUGen[key] = n;
+    var f = fields(q, r);
+    var type = opts.type ? String(opts.type) : 'sect';
+    var tier = opts.tier != null ? (opts.tier | 0) : 1;
+    return extAddTo({
+      id: id, type: type, q: q, r: r, x: f.x, y: f.y,
+      name: opts.name ? String(opts.name) : genName(type, rs.i, rs.j, 900 + n),
+      pop: opts.pop != null ? (opts.pop | 0) : (tier * 800 + 400),
+      owner: opts.owner ? String(opts.owner) : '',
+      tier: tier, state: 0, expireTs: 0,
+      ext: true
+    }, rs.i, rs.j);
+  }
+
+  /* 全量替换玩家层 —— 服务端启动 / 换世 / 拆除后**重放持久化记录**的唯一入口。
+     ⚠ 归属区域格**必须从 id 反解** (前两段), 不重算 regionSeedOf: id 是落库时定下的
+       权威, 重算会因口径漂移把同一条记录挂到别的区域格 (同一条记录两种归属)。
+     list 元素: { id, type, q, r, name, pop, owner, tier, state, expireTs } */
+  function setExternalSettlements(list) {
+    extByRegion.clear(); extById.clear(); extUGen = {};
+    if (!list || !list.length) return { n: 0 };
+    for (var n = 0; n < list.length; n++) {
+      var s = list[n];
+      if (!s) continue;
+      var q = s.q | 0, r = s.r | 0;
+      var f = fields(q, r);
+      var type = s.type ? String(s.type) : 'sect';
+      var id = s.id ? String(s.id) : '';
+      var pi = NaN, pj = NaN;
+      if (id) { var pp = id.split('_'); pi = +pp[0]; pj = +pp[1]; }
+      if (!id || !isFinite(pi) || !isFinite(pj)) {     // 兜底: 无 id / 坏 id ⇒ 现算
+        var rs = regionSeedOf(q, r);
+        pi = rs.i; pj = rs.j;
+        var use = -1, id2;
+        do { use++; id2 = pi + '_' + pj + '_u' + use; } while (extById.has(id2));
+        id = id2;
+      }
+      extAddTo({
+        id: id, type: type, q: q, r: r, x: f.x, y: f.y,
+        name: s.name ? String(s.name) : genName(type, pi, pj, 900),
+        pop: s.pop != null ? (s.pop | 0) : 1200,
+        owner: s.owner ? String(s.owner) : '',
+        tier: s.tier != null ? (s.tier | 0) : 1,
+        state: s.state != null ? (s.state | 0) : 0,
+        expireTs: s.expireTs != null ? (s.expireTs | 0) : 0,
+        ext: true
+      }, pi, pj);
+    }
+    return { n: extById.size };
+  }
+
+  function removeExternalSettlement(id) {
+    var st = extById.get(id);
+    if (!st) return false;
+    extById.delete(id);
+    var rs = regionSeedOf(st.q, st.r);
+    for (var di = -1; di <= 1; di++) for (var dj = -1; dj <= 1; dj++) {
+      var arr = extByRegion.get((rs.i + di) + ',' + (rs.j + dj));
+      if (!arr) continue;
+      var k = arr.indexOf(st);
+      if (k >= 0) arr.splice(k, 1);
+    }
+    return true;
+  }
+
+  function externalSettlements() {
+    var out = [];
+    extByRegion.forEach(function (arr) { for (var i = 0; i < arr.length; i++) out.push(arr[i]); });
+    return out;
+  }
+  function externalById(id) { return extById.get(id) || null; }
+
+  /* 某区块应**额外**包含的区域格 (ext 归属格) —— 给 blockLayersJson 用。
+     blockLayersJson 的几何判据只看 regionInfo 中心, 看不见「玩家把宗门放到了
+     这个块的 Voronoi 边缘」; 不补这一笔, 玩家宗门会**永远画不出来**。 */
+  function externalRegionsWithin(ccq, ccr, reach) {
+    var out = [], seen = {};
+    extByRegion.forEach(function (arr, key) {
+      for (var i = 0; i < arr.length; i++) {
+        if (hexDist(arr[i].q, arr[i].r, ccq, ccr) > reach) continue;
+        if (seen[key]) continue;
+        seen[key] = 1;
+        var p = key.indexOf(',');
+        out.push([+key.slice(0, p), +key.slice(p + 1)]);
+      }
+    });
+    return out;
+  }
+
+  /* ---------- 落点/拆除的派生状态失效 (方案 §3.2 五个坑的正面处理) ----------
+     (ci,cj) = 受影响的区域格中心; ring = 影响半径 (单点落子 = 0)。
+     职责与依据:
+       ① demandCache / skeletonCache: key (a,b) 的值依赖 (a±2,b±2) 的聚落 ⇒ 只要改动
+          落在 (a,b) 的 5x5 窗口内, 该条必须清 ⇒ **反向覆盖**: 清掉所有距改动格
+          ≤ ring+2 的 key (漏这一层的表现 = 路网拿旧需求图算, 静默无异常)。
+       ② roadCache / roadFail: 边按 "idA|idB" 索引 ⇒ 解析两端 id 的前两段 (区域格),
+          任一端落在范围内就删 **或** 该 id 就是本次改动的聚落。**为什么 ring+2 够**:
+          一条受影响的边 (a,b) 要么 a 的格在改动格的 2 环内 (ext 进了它的 5x5 池),
+          要么 b 的格在 2 环内 (rngDominated 从 b 侧读池) ⇒ 至少一端必被覆盖。
+       ③ townCache: 只清本次**改动/移除**的聚落 id (其余城镇足迹与本次无关)。
+       ④ **刻意不动** settleCache / settleRawCache / siteScoreCache / prospectCache /
+          centerCache / tradeCache / commCache / elevCache / fieldCache —— 它们只依赖
+          静态地形与自动生成层。check_place_no_pollute.mjs 断言前五张表的 key 集与
+          内容逐字节不变 (注入 ext 静默无效 = 本次改造最大的风险点)。
+     返回 { regions, cross, n }:
+       regions = 全部被清到的区域格 (含改动格自己) ⇒ 需重算道路 + 重发区域包的范围;
+       cross   = 其中**落在 ring 之外**的 ⇒ 坑 D: 一条边进两个区域包, 脏块必须含
+                 "跨界边另一端的格", 否则那一侧的画面永远陈旧。
+     ⚠ 绝不碰 roadVer —— 见 bumpRoadVer 的注释 (归零 = 路永远送不出去)。 */
+  function clearRoadSideFor(ci, cj, ring, changedIds) {
+    ci = ci | 0; cj = cj | 0; ring = ring | 0;
+    var R2 = ring + 2;
+    var regions = [], cross = [], inScope = {};
+    for (var di = -R2; di <= R2; di++) {
+      for (var dj = -R2; dj <= R2; dj++) {
+        var i = ci + di, j = cj + dj;
+        regions.push([i, j]);
+        inScope[i + ',' + j] = 1;
+        if (Math.abs(di) > ring || Math.abs(dj) > ring) cross.push([i, j]);
+      }
+    }
+    var changed = {};
+    if (changedIds) for (var c = 0; c < changedIds.length; c++) changed[changedIds[c]] = 1;
+
+    function sweepRegionKeyed(map) {
+      var kill = [];
+      map.forEach(function (_v, k) { if (inScope[k]) kill.push(k); });
+      for (var n = 0; n < kill.length; n++) map.delete(kill[n]);
+      return kill.length;
+    }
+    function edgeHit(k) {
+      var ids = k.split('|');
+      for (var x = 0; x < ids.length; x++) {
+        if (changed[ids[x]]) return true;
+        var p = ids[x].split('_');
+        if (inScope[(+p[0]) + ',' + (+p[1])]) return true;
+      }
+      return false;
+    }
+    var nDemand = sweepRegionKeyed(demandCache);
+    var nSkel = sweepRegionKeyed(skeletonCache);
+    var killR = [];
+    roadCache.forEach(function (_v, k) { if (edgeHit(k)) killR.push(k); });
+    for (var n1 = 0; n1 < killR.length; n1++) roadCache.delete(killR[n1]);
+    var killF = [];
+    roadFail.forEach(function (k) { if (edgeHit(k)) killF.push(k); });
+    for (var n2 = 0; n2 < killF.length; n2++) roadFail.delete(killF[n2]);
+    var nTown = 0;
+    if (changedIds)
+      for (var t = 0; t < changedIds.length; t++)
+        if (townCache.delete(changedIds[t])) nTown++;
+    return { regions: regions, cross: cross,
+             n: { demand: nDemand, skel: nSkel, road: killR.length, fail: killF.length, town: nTown } };
+  }
+
+  /* 道路版本号强制前进 (一次「落点」的后半段)。
+     **只能 +1, 绝不归零** —— 宿主 (MapWorldService.ObserveRoadVer) 对 roadVer 是
+     **单调取大**的: 归零会被已有的大值挡住 ⇒ 宿主认为 tile 缓存仍新鲜 ⇒ 路重建了
+     却永远送不出去 (无异常、无日志, 只在画面上「路没变」)。方案 §3.2 坑 C / 红线 4。 */
+  function bumpRoadVer() { roadVer++; return roadVer; }
 
   /* ---------- 道路 (A* 寻路: Dial 桶优先队列 + 三重剪枝; 路网优先拓扑) ----------
    * 权重表 ROAD_W 见 mapgen-config.js (深海8/浅海6/沙岸4/草地3/林地4/沙漠5/山地8/雪峰8)。
@@ -2298,7 +2582,9 @@
     roadCache.clear(); demandCache.clear(); roadFail.clear();
     siteScoreCache.clear(); prospectCache.clear(); centerCache.clear(); townCache.clear(); tradeCache.clear();
     skeletonCache.clear();  // A2
-    roadVer = 0;
+    /* ⚠ configure 同样**不能**把 roadVer 归零 (同 resetRoads 的坑 C): 参数覆写
+       会清掉全部派生缓存 ⇒ 路必然重算 ⇒ 宿主必须看到版本前进。 */
+    bumpRoadVer();
   }
 
   /* 当前道路版本号 (供宿主做 tile 缓存新鲜度校验) */
@@ -2310,7 +2596,10 @@
   function resetRoads() {
     roadCache.clear();
     roadFail.clear();
-    roadVer = 0;                                 // 归零 ⇒ 宿主的 tile onRoad 缓存整体失效
+    /* ⚠ 必须是 roadVer++ 而**不是** `= 0` (方案 §3.2 坑 C / 红线 4): 宿主的
+       ObserveRoadVer 单调取大, 归零会被已有的大值挡住 ⇒ 清空后重建的路
+       **永远送不出去** (无异常、无日志)。 */
+    bumpRoadVer();
   }
 
   /* ---------- 导出 ---------- */
@@ -2326,6 +2615,26 @@
     settlementsFor: settlementsFor,
     /* R7: 无间距抑制的原始聚落 (诊断/回归对照用, 业务一律用 settlementsFor) */
     rawSettlementsFor: rawSettlementsFor,
+    /* ---- 玩家放置聚落 / 领地 (2026-09-23 玩家宗门放置方案 §2.4) ----
+       ext 叠加层的全部出口。⚠ 每个新出口都必须在 JsEngineHost.Call 的 switch
+       白名单里加 case (漏了 = InvalidOperationException: 未知 JS 函数),
+       且都必须在 mapgen-server.js 的 global.MapGenServer 上挂透传。 */
+    externalSettlements: externalSettlements,
+    externalById: externalById,
+    externalRegionsWithin: externalRegionsWithin,
+    setExternalSettlements: setExternalSettlements,
+    placeSettlement: placeSettlement,
+    removeExternalSettlement: removeExternalSettlement,
+    /* 领地半径 (DOMAIN_R) 的读取与判定 —— 判定只在引擎里做, C#/前端都不复制这张表 */
+    archetypeOf: archetypeOf,
+    domainRadiusOf: domainRadiusOf,
+    domainCheck: domainCheck,
+    /* 落点/拆除的派生状态失效 (需求/骨架/道路/足迹) + 道路版本号强制前进 */
+    clearRoadSideFor: clearRoadSideFor,
+    bumpRoadVer: bumpRoadVer,
+    /* 只读调试出口 (验证脚本用): 直接看 ext 层的分格归属 */
+    extByRegion: extByRegion,
+    extById: extById,
     roadsNear: roadsNear,
     /* 城镇三段式生成 (§三): 供 mapgen-server.regionJson 与预览页/前端直接调用。
        prospectArea = 勘测适宜度图; pickSettlementCenter = 选址中心;

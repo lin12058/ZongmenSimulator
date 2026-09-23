@@ -213,6 +213,13 @@ public static class WsFrame
        mapgen 三件套 (noise/mapgen-config/mapgen)。走 WS 而非新增静态挂载,
        保证「单真源」: 浏览器拿到的永远是服务端当前 bundle, 不会与前端副本漂移。 */
     public const byte Script = 4;
+    /* ---- 玩家宗门放置 (2026-09-23 方案 §4.1) ----
+       与 Login/Tile 同例: **请求与响应共用同一个类型号** (方向由上下文区分)。
+       PlaceCheck  = 悬停即问 (高频, 只读, 不落库)
+       PlaceCommit = 确认落子 (低频, 写: 落库 + 重算道路 + 版本号前进)
+       ⚠ 7 号 (CityQuery) 是 P2「城市迭代」的预留位, 本轮**不实现** —— 别占。 */
+    public const byte PlaceCheck = 5;
+    public const byte PlaceCommit = 6;
 }
 
 [ProtoContract]
@@ -366,4 +373,134 @@ public static class WorldKeys
     /// <summary>城镇足迹包 (Phase3): 建筑/产出/风格, 独立持久化 (会随事件演化)。</summary>
     public static string Settle(string seed, int i, int j)
         => $"w:{SeedPrefix(seed)}:settle:{i}:{j}";
+}
+
+/* ============================================================
+ * 玩家宗门放置协议 (2026-09-23 方案 §4.2)
+ * ------------------------------------------------------------
+ * 两条路径的分工:
+ *   PlaceCheck  = 只读, 悬停即问 (前端 ≥150ms 节流)。判据 5~7 (深海/灵脉/领地)
+ *                 在引擎里算, 判据 1~3/9 (seed/登录/配额/名字) 在服务端叠上去。
+ *   PlaceCommit = 写。服务端**重新**跑一遍全部判据 (前端的 check 只是提示,
+ *                 绝不可信), 再落库 + 引擎侧重算道路 + 版本号前进, 最后返回
+ *                 「客户端必须重拉的块」清单。
+ * ⚠ 客户端对**已加载**的块不会自动重拉 (main.js updateStreaming 的入队条件是
+ *   `!chunkData.has(key)`) ⇒ PlaceCommitResponse.Blocks 是让新宗门/新路立刻可见的
+ *   唯一手段, 服务端只 BumpBlockRev 是不够的。
+ * ============================================================ */
+
+/// <summary>落点校验请求 (帧 5, C→S, 明文 protobuf)。</summary>
+[ProtoContract]
+public sealed class PlaceCheckRequest
+{
+    [ProtoMember(1)] public string Seed { get; set; } = "";
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(3, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(4)] public uint Seq { get; set; }
+    /// <summary>「原地重建/升级」时豁免自己的聚落 id (P0 恒空)。</summary>
+    [ProtoMember(5)] public string ExcludeId { get; set; } = "";
+}
+
+/// <summary>领地被侵占的元凶 (前端标红用)。</summary>
+[ProtoContract]
+public sealed class PlaceBlockDto
+{
+    [ProtoMember(1)] public string Id { get; set; } = "";
+    [ProtoMember(2)] public string Type { get; set; } = "";
+    [ProtoMember(3)] public int Tier { get; set; }
+    [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(5, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    /// <summary>新落点到它的中心距 (格)。</summary>
+    [ProtoMember(6)] public int Dist { get; set; }
+    /// <summary>它的领地半径 (格, DOMAIN_R)。判定 = Dist &lt; Need ⇒ 拒绝。</summary>
+    [ProtoMember(7)] public int Need { get; set; }
+}
+
+/// <summary>附近一座聚落的领地圈 (前端画环用; 与 blocker 同形状但语义不同)。</summary>
+[ProtoContract]
+public sealed class PlaceDomainDto
+{
+    [ProtoMember(1)] public string Id { get; set; } = "";
+    [ProtoMember(2)] public string Type { get; set; } = "";
+    [ProtoMember(3)] public int Tier { get; set; }
+    [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(5, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(6)] public int Dist { get; set; }
+    [ProtoMember(7)] public int Need { get; set; }
+    [ProtoMember(8)] public string Name { get; set; } = "";
+}
+
+/// <summary>落点校验响应 (帧 5, S→C, 明文 protobuf)。</summary>
+[ProtoContract]
+public sealed class PlaceCheckResponse
+{
+    [ProtoMember(1)] public bool Ok { get; set; }
+    /// <summary>拒绝原因码: deep_water / on_vein / too_close / spirit_too_low /
+    /// world_stale / need_login / quota_exceeded / bad_coord / bad_name /
+    /// too_frequent / "" (可建)。</summary>
+    [ProtoMember(2)] public string Reason { get; set; } = "";
+    [ProtoMember(3, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(5, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int RegionI { get; set; }
+    [ProtoMember(6, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int RegionJ { get; set; }
+    [ProtoMember(7)] public bool Deep { get; set; }
+    [ProtoMember(8)] public bool OnVein { get; set; }
+    [ProtoMember(9)] public int VeinD { get; set; }
+    [ProtoMember(10)] public float Spirit { get; set; }
+    [ProtoMember(11)] public float SpiritMin { get; set; }
+    [ProtoMember(12)] public int Biome { get; set; }
+    [ProtoMember(13)] public float Elev { get; set; }
+    [ProtoMember(14)] public PlaceBlockDto? Blocker { get; set; }
+    [ProtoMember(15)] public List<PlaceDomainDto> Near { get; set; } = [];
+    [ProtoMember(16)] public uint Seq { get; set; }
+    /// <summary>本账号本世已立宗门数 / 上限 (前端在按钮上做提示)。</summary>
+    [ProtoMember(17)] public int Quota { get; set; }
+    [ProtoMember(18)] public int QuotaMax { get; set; }
+    [ProtoMember(19)] public string Err { get; set; } = "";
+}
+
+/// <summary>落子提交请求 (帧 6, C→S, 明文 protobuf)。</summary>
+[ProtoContract]
+public sealed class PlaceCommitRequest
+{
+    [ProtoMember(1)] public string Seed { get; set; } = "";
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(3, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(4)] public string Name { get; set; } = "";
+    /// <summary>宗门档位 1~3 (下品/中品/上品); 决定领地半径档 (DOMAIN_R.sect1/2/3)。</summary>
+    [ProtoMember(5)] public int Tier { get; set; } = 1;
+    [ProtoMember(6)] public uint Seq { get; set; }
+    /// <summary>幂等键 (前端每次「点确认」生成一个; 同键重发直接回放上次响应,
+    /// 不再落库、不再重算道路 —— 这是「同步重算 ~450ms 时用户狂点」的兜底)。</summary>
+    [ProtoMember(7)] public string IdemKey { get; set; } = "";
+}
+
+[ProtoContract]
+public sealed class BlockRef
+{
+    [ProtoMember(1, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Ca { get; set; }
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Cb { get; set; }
+}
+
+/// <summary>落子提交响应 (帧 6, S→C, 明文 protobuf)。</summary>
+[ProtoContract]
+public sealed class PlaceCommitResponse
+{
+    [ProtoMember(1)] public bool Ok { get; set; }
+    [ProtoMember(2)] public string Reason { get; set; } = "";
+    /// <summary>落成的宗门实体 (与 Settle 图层同形状 ⇒ 前端可先用它乐观上屏)。</summary>
+    [ProtoMember(3)] public SettlementDto? Sect { get; set; }
+    [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int RegionI { get; set; }
+    [ProtoMember(5, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int RegionJ { get; set; }
+    /// <summary>重算后的道路版本号 (单调递增; 前端可用它做诊断/握手)。</summary>
+    [ProtoMember(6)] public long RoadVer { get; set; }
+    /// <summary>服务端本次同步重算耗费的毫秒 (实测 400~450ms 属预期)。</summary>
+    [ProtoMember(7)] public int Ms { get; set; }
+    [ProtoMember(8)] public uint Seq { get; set; }
+    [ProtoMember(9)] public string Err { get; set; } = "";
+    /// <summary>⚠ **必须重拉**的块清单 (>0 个)。理由见本区头注释。</summary>
+    [ProtoMember(10)] public List<BlockRef> Blocks { get; set; } = [];
+    /// <summary>挂在玩家宗门上的道路条数 (诊断)。</summary>
+    [ProtoMember(11)] public int Roads { get; set; }
+    [ProtoMember(12)] public string IdemKey { get; set; } = "";
 }

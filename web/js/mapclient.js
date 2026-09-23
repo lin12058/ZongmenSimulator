@@ -39,6 +39,10 @@
         chunkScan: meta.chunkScan, regionM: meta.regionM,
         commCl: meta.commCl, commR: meta.commR, seaLevel: meta.seaLevel,
         biomeMeta: meta.biomeMeta,
+        /* 玩家宗门放置 (方案 §2.1): 规模 → 领地半径。真源是服务端 CFG.DOMAIN_R,
+           前端只读不推 —— 老服务端无此字段时为空对象, 领地圈自然不画 (静默降级)。 */
+        domainR: meta.domainR || null,
+        settleMinDist: meta.settleMinDist, townR: meta.townR,
         /* 色板由 meta 单点下发 (缺失时由调用方字面兜底, 见 main.js) */
         elementRGB: meta.elementRGB, variantRGB: meta.variantRGB,
         /* S4: 引擎指纹 (服务端下发给前端的三个 js 的哈希; 老服务端无此字段 = undefined) */
@@ -230,6 +234,29 @@
       }, function (err) { failScript(new Error('引擎脚本解压失败: ' + err.message)); });
       return;
     }
+    /* 帧 5/6: 落点校验 / 落定 (方案 §4.1)。
+       ⚠ 载荷恒**明文** protobuf —— 服务端 SendPlaceAsync 固定 `gzip: false`
+       (与 Login/Pong 同口径), 这里绝不能再套 gunzip: 解出来的是明文, 套了必炸。 */
+    if (type === PB.FRAME.PLACE_CHECK || type === PB.FRAME.PLACE_COMMIT) {
+      var pr;
+      try {
+        pr = (type === PB.FRAME.PLACE_CHECK)
+          ? PB.decodePlaceCheckResponse(payload)
+          : PB.decodePlaceCommitResponse(payload);
+      } catch (e) {
+        /* ⚠ 解码异常必须 reject 在途请求 —— 否则 Promise 永久悬挂 (UI 卡在「落定中…」,
+           且 pending 表只增不减)。载荷边界已不可知 ⇒ 只能全拒 (同 TileResponse 的规矩)。 */
+        console.error('放置响应解码失败', e);
+        failAllPending(new Error('放置响应解码失败: ' + e.message));
+        return;
+      }
+      var pp = pending.get(pr.seq);
+      if (!pp) return;                          // 重连前的迟到响应: 丢弃
+      pending.delete(pr.seq);
+      clearTimeout(pp.timer);
+      pp.resolve(pr);
+      return;
+    }
     if (type === PB.FRAME.TILE) {
       gunzip(payload).then(function (buf) {
         var resp;
@@ -371,6 +398,51 @@
   function blockForget(key) { revs.delete(key); }
   function blockForgetAll() { revs.clear(); }
 
+  /* ---------- 放置宗门 (帧 5/6, 方案 §4.1/§4.2) ----------
+     与 block() 共用同一条连接与同一张 pending/seq 表 —— 帧类型不同, 且 seq 全局自增,
+     故不会串号。**不写 revs 记账**: 这两条请求不改图层 rev; 真正的失效由 commit
+     响应里的 blocks 列表驱动 (上层负责 blockForget + 重拉, 见 main.js onPlaced)。 */
+  var PLACE_TIMEOUT = 20000;      // 提交是**同步**重算 (实测 118~450ms), 但要排在 V8 门闩之后
+  function placeCall(frameType, body) {
+    return connect().then(function () {
+      return new Promise(function (resolve, reject) {
+        if (!sock || sock.readyState !== 1) { reject(new Error('WS 未就绪')); return; }
+        var sseq = ++seq;
+        body.seq = sseq;
+        var u8 = (frameType === PB.FRAME.PLACE_CHECK)
+          ? PB.encodePlaceCheck(body) : PB.encodePlaceCommit(body);
+        var frame = new Uint8Array(1 + u8.length);
+        frame[0] = frameType;
+        frame.set(u8, 1);
+        var entry = {
+          resolve: resolve, reject: reject,
+          timer: setTimeout(function () {
+            pending.delete(sseq);
+            reject(new Error('放置请求超时'));
+          }, PLACE_TIMEOUT)
+        };
+        pending.set(sseq, entry);
+        if (!wsSend(frame)) {
+          pending.delete(sseq);
+          clearTimeout(entry.timer);
+          reject(new Error('WS 发送失败'));
+        }
+      });
+    });
+  }
+  /* excludeId: 排除某座自己的宗门 —— 立宗后再悬停校验时, 别把自己算成"障碍"。
+     ⚠ 服务端**不会**因前端传了它就放行: 写路径 (PlaceCommit) 重跑全套判据。 */
+  function placeCheck(seed, q, r, excludeId) {
+    return placeCall(PB.FRAME.PLACE_CHECK,
+      { seed: seed, q: q, r: r, excludeId: excludeId || '' });
+  }
+  /* idemKey: 幂等键 —— 同键重发由服务端回放首次响应 (同步重算期间狂点确认键的兜底)。
+     调用方用**确定性**键 (落点+名字), 重复点击即回放, 不会立两座。 */
+  function placeCommit(seed, q, r, name, tier, idemKey) {
+    return placeCall(PB.FRAME.PLACE_COMMIT,
+      { seed: seed, q: q, r: r, name: name, tier: tier | 0, idemKey: idemKey || '' });
+  }
+
   /* ---------- 单格详情 / 字段网格 (保留 HTTP) ---------- */
   function getProto(url, signal) {
     return fetch(base + url, signal ? { signal: signal } : undefined).then(function (r) {
@@ -416,6 +488,9 @@
     onReconnect: onReconnect,
     /* R11: 引擎脚本 (WS 下发, 前端按 seed 自算地形) */
     requestScript: requestScript,
+    /* 玩家宗门放置 (帧 5/6) */
+    placeCheck: placeCheck,
+    placeCommit: placeCommit,
     /* HTTP 辅助接口 */
     tile: tile
   };

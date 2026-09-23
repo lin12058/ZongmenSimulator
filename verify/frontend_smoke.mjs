@@ -137,13 +137,37 @@ function checkDomIds() {
 function checkStaticDirtyContract() {
   const src = fs.readFileSync(path.join(ROOT, 'web', 'js', 'main.js'), 'utf8');
   const bad = [];
-  /* 1) 运行时改写 showVeins/showLabels (排除 `var showX = <初值>` 声明) 必须邻近置脏 */
+  /* 1) 运行时改写 showVeins/showLabels (排除 `var showX = <初值>` 声明) 必须**同函数内**置脏。
+     ⚠ 这里原来用固定字符窗 (±200 / +500) 做邻近判定 —— 每**加一个设置项**就会把
+       `forceStaticDirty()` 挤出窗口 ⇒ 假红。2026-09-23 加第 6 个开关 (`domain`, 领地圈)
+       时正是这样红的 (`showVeins@L77`), 而代码本身完全正确。
+       改为「取赋值点所在的整个函数体」: 语义更强 (必须真的在同一函数里置脏),
+       且对新增开关免疫。找不到包围函数时**回落**到旧字符窗 (绝不静默放宽)。 */
+  function enclosingFn(src, idx) {
+    /* ⚠ 不做花括号配对 —— main.js 的字符串/正则里花括号成堆, 朴素配对必错。
+       改用**缩进**: 函数头行 indent=n ⇒ 「缩进 <= n 的下一行 `}`」就是函数尾。 */
+    const lines = src.split('\n');
+    let head = -1, indent = -1;
+    const upTo = src.slice(0, idx).split('\n').length - 1;
+    for (let i = upTo; i >= 0; i--) {
+      const m = /^(\s*)(?:function\s+[\w$]+\s*\(|var\s+[\w$]+\s*=\s*function\s*\()/.exec(lines[i]);
+      if (m) { head = i; indent = m[1].length; break; }
+    }
+    if (head < 0) return '';
+    for (let i = head + 1; i < lines.length; i++) {
+      const m = /^(\s*)\}/.exec(lines[i]);
+      if (m && m[1].length <= indent) return lines.slice(head, i + 1).join('\n');
+    }
+    return '';
+  }
   for (const m of src.matchAll(/\b(showVeins|showLabels)\s*=/g)) {
     const lineStart = src.lastIndexOf('\n', m.index) + 1;
     if (/\bvar\b/.test(src.slice(lineStart, m.index))) continue;      // 声明, 跳过
-    const near = src.slice(Math.max(0, m.index - 200), m.index + 500);
+    const body = enclosingFn(src, m.index);
+    const near = body || src.slice(Math.max(0, m.index - 200), m.index + 500);
     if (!/StaticDirty\s*\(/.test(near))
-      bad.push(`${m[1]}@L${src.slice(0, m.index).split('\n').length}`);
+      bad.push(`${m[1]}@L${src.slice(0, m.index).split('\n').length}` +
+               (body ? '' : '(无包围函数, 回落字符窗)'));
   }
   check('showVeins/showLabels 的运行时改写都伴随静态置脏', bad.length === 0, bad.join(' '));
 
