@@ -283,7 +283,10 @@
          都必须用**服务端这一份**, 不许自己复制字面量 (同 elementRGB 的教训)。
          ⚠ 这张表在 C# 侧**没有**镜像 —— 判定只在引擎里做 (domainCheck), 表也只从这里
            下发。check_domain_radius.mjs 断言「全仓库只有一处 DOMAIN_R 字面量」。 */
-      domainR: MG.CFG.DOMAIN_R, settleMinDist: MG.CFG.SETTLE_MIN_DIST, townR: MG.CFG.TOWN_R
+      domainR: MG.CFG.DOMAIN_R, settleMinDist: MG.CFG.SETTLE_MIN_DIST, townR: MG.CFG.TOWN_R,
+      /* 城市扩张 (附属城镇): 辖域半径 + 允许的聚落类型 —— 同 domainR 口径, 只从这里下发。
+         前端用它画「本宗辖域环」(外圈) 与档位下拉 (镇/村); 判定仍在引擎 (expandCheck)。 */
+      expandR: MG.CFG.EXPAND_R, expandTypes: MG.CFG.EXPAND_TYPES
     };
     return JSON.stringify(meta);
   }
@@ -327,21 +330,47 @@
 
   /* 落点校验 (悬停即问): 一次调用把 §2.3 判据链 5~7 全部算完, 免得前端每 150ms
      灌一串 V8 往返。⚠ 判据 1/2/3/9 (seed 新鲜度 / 登录 / 配额 / 名字) 是**服务端
-     自身状态**, 不在这里 —— 服务端拿到本结果后再叠上去 (见 MapWorldService.PlaceCheck)。 */
-  function placeCheckJson(q, r, excludeId) {
+     自身状态**, 不在这里 —— 服务端拿到本结果后再叠上去 (见 MapWorldService.PlaceCheck)。
+
+     modeJson (第 4 参, 可空): { type, aq, ar, maxR } —— 「拓土/扩张」档。
+       · type = 'sect'(默认, 立宗) 或 EXPAND_TYPES 白名单里的 town/village;
+       · aq/ar = **锚点**(本宗中心), maxR = 扩张半径 (>0 = 扩张档)。
+       ⚠ 锚点与半径由**服务端**从 PlayerSect 台账推出来再传进来, 不接受前端直传的
+         坐标 —— 前端那份只是画圈用的显示口径 (同 DOMAIN_R: 判定永不信任客户端)。 */
+  function placeCheckJson(q, r, excludeId, modeJson) {
     q = q | 0; r = r | 0;
+    var mode = {};
+    if (modeJson) {
+      try { mode = typeof modeJson === 'string' ? JSON.parse(modeJson) : modeJson; }
+      catch (e) { mode = {}; }
+    }
+    var type = mode.type ? String(mode.type) : 'sect';
+    var maxR = mode.maxR | 0;
+    var aq = mode.aq == null ? null : (mode.aq | 0);
+    var ar = mode.ar == null ? null : (mode.ar | 0);
     var f = MG.fields(q, r);
     var vn = MG.veinNear(q, r);
     var veinD = vn ? vn.d : 99;
     var rs = MG.regionSeedOf(q, r);
     var dom = MG.domainCheck(q, r, excludeId || '');
+    var ex = MG.expandCheck(q, r, aq, ar, maxR);
     var deep = f.biome === MG.BIOME.DEEP;
     var onVein = !!f.vein;
     var veinNearEnough = veinD >= (MG.CFG.SETTLE_VEIN_FOOT_PAD | 0);
     var spirit = MG.spiritAt(q, r);
     var spOk = spirit >= MG.CFG.SEA_SETTLE_MIN_SPIRIT;
+    /* 类型白名单: 扩张档只认 EXPAND_TYPES; 立宗档只认 'sect' */
+    var typeOk = (maxR > 0) ? MG.isExpandType(type) : (type === 'sect');
+    /* 判据优先级 (单一 reason, 取第一条命中的):
+       bad_type → too_far → 深海 → 灵脉 → 领地 → 灵机。
+       为什么 too_far 排在深海/灵脉**之前**: 扩张档下「超出本宗辖域」是最强解释 ——
+       半径 10 之外满地都是, 若让深海/灵脉先命中, 悬停到 50 格外只会看到「深海之上
+       不可立」这种跟本次动作无关的提示。半径之内的格 dist<=maxR ⇒ too_far 恒不命中,
+       故深海/灵脉/领地三条的原有语义**一格都没被遮挡**。 */
     var reason = '';
-    if (deep) reason = 'deep_water';
+    if (!typeOk) reason = 'bad_type';
+    else if (!ex.ok) reason = 'too_far';
+    else if (deep) reason = 'deep_water';
     else if (onVein) reason = 'on_vein';
     else if (!veinNearEnough) reason = 'on_vein';
     else if (!dom.ok) reason = 'too_close';
@@ -350,11 +379,15 @@
       ok: 1, q: q, r: r,
       can: reason === '',
       reason: reason,
+      type: type,
       deep: deep, onVein: onVein, veinD: veinD,
       spirit: spirit, spiritMin: MG.CFG.SEA_SETTLE_MIN_SPIRIT,
       biome: f.biome, elev: f.e,
       regionI: rs.i, regionJ: rs.j,
       blocker: dom.blocker,
+      /* 扩张档: 距本宗的实测距离 + 上限 (前端画「辖域环」与文案都用这两个数) */
+      expand: { dist: ex.dist, maxR: ex.maxR },
+      anchor: aq == null ? null : { q: aq, r: ar },
       /* 前端画「领地圈」用: 附近聚落的中心 + 领地半径 (含它们自己也是候选障碍) */
       near: nearbyDomains(q, r),
       /* 自己已有的宗门 (用于「原地重建」时豁免) */
@@ -388,7 +421,11 @@
     return out;
   }
 
-  /* 提交落点 —— 方案 §3.3 的七步同步序列 (在 V8 门闩内一次做完)。 */
+  /* 提交落点 —— 方案 §3.3 的七步同步序列 (在 V8 门闩内一次做完)。
+     optsJson: { type, tier, name, owner, aq, ar, maxR } —— aq/ar/maxR 只在扩张档有值。
+     ⚠ 步 0 的**二次校验不是冗余**: 服务端 PlaceCommit 会重跑 CheckCore (含 placeCheckJson),
+       但那条链依赖调用方把同一份 aq/ar/maxR 传对; 这里独立再判一次, 让「传错了参数」
+       表现为明确的 { ok:0, reason } 而不是默默按无锚点落一座 (无异常无日志)。 */
   function commitPlace(q, r, optsJson) {
     var t0 = Date.now();
     var opts = {};
@@ -396,6 +433,16 @@
       try { opts = typeof optsJson === 'string' ? JSON.parse(optsJson) : optsJson; }
       catch (e) { opts = {}; }
     }
+    /* 步 0: 类型白名单 + 扩张半径 (在动引擎状态之前拒 —— 别把坏落点写进 ext 层) */
+    var type = opts.type ? String(opts.type) : 'sect';
+    var maxR = opts.maxR | 0;
+    var aq = opts.aq == null ? null : (opts.aq | 0);
+    var ar = opts.ar == null ? null : (opts.ar | 0);
+    if (!((maxR > 0) ? MG.isExpandType(type) : (type === 'sect')))
+      return JSON.stringify({ ok: 0, reason: 'bad_type', type: type });
+    var ex = MG.expandCheck(q, r, aq, ar, maxR);
+    if (!ex.ok)
+      return JSON.stringify({ ok: 0, reason: 'too_far', dist: ex.dist, maxR: ex.maxR });
     /* 步 1: 引擎侧放置 (id 由引擎按 {区域i}_{区域j}_u{n} 生成) */
     var st = MG.placeSettlement(q, r, opts);
     var rs = MG.regionSeedOf(st.q, st.r);
@@ -462,6 +509,10 @@
     },
     domainCheckJson: function (q, r, excludeId) {
       return JSON.stringify(MG.domainCheck(q | 0, r | 0, excludeId || ''));
+    },
+    /* 扩张判据 (距本宗 <= maxR) —— 与 domainCheckJson 对称的只读出口, 验证脚本用 */
+    expandCheckJson: function (q, r, aq, ar, maxR) {
+      return JSON.stringify(MG.expandCheck(q | 0, r | 0, aq | 0, ar | 0, maxR | 0));
     },
     domainRadius: function (type, tier) {
       return MG.domainRadiusOf({ type: String(type), tier: tier | 0 });

@@ -53,7 +53,7 @@ public static class MapWsHandler
                     switch (type)
                     {
                         case WsFrame.Login:
-                            await HandleLoginAsync(ws, session, recvBuf, count, ctx.RequestAborted);
+                            await HandleLoginAsync(ws, svc, session, recvBuf, count, ctx.RequestAborted);
                             break;
 
                         case WsFrame.Tile:
@@ -89,7 +89,7 @@ public static class MapWsHandler
     }
 
     private static async Task HandleLoginAsync(
-        WebSocket ws, WsSession session, byte[] buf, int count, CancellationToken ct)
+        WebSocket ws, MapWorldService svc, WsSession session, byte[] buf, int count, CancellationToken ct)
     {
         LoginRequest req;
         try
@@ -113,8 +113,28 @@ public static class MapWsHandler
         session.Account = req.Account.Trim();
         session.Authed = true;
         Console.WriteLine($"[ws/map] 登录 account={session.Account}");
+        /* 「我的聚落」(主宗 + 附属城镇) 随登录回填 —— 前端靠它决定显示「卜居」还是「拓土」、
+           本宗面板画什么。放在登录响应里而不是新开一帧: 这正是需要它的那一刻 (见 DTO 注释)。
+           ⚠ 查询异常一律吞掉 (回一个空列表): 登录本身不该因为读台账失败而失败 ——
+             前端拿不到记录时表现为「尚未择地立宗」, 而落子路径仍会重新校验配额,
+             不会因此写出第二座宗门。 */
+        List<SettlementDto> places = [];
+        var townMax = 0;
+        try
+        {
+            var mine = svc.MyPlaces(session.Account);
+            places = mine.Places;
+            townMax = mine.TownMax;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[ws/map] 登录回填我的聚落失败: " + ex.Message);
+        }
         await SendFrameAsync(ws, WsFrame.Login,
-            ProtoCodec.SerToByte(new LoginResponse { Ok = true, Account = session.Account }), ct, gzip: false);
+            ProtoCodec.SerToByte(new LoginResponse
+            {
+                Ok = true, Account = session.Account, MyPlaces = places, TownMax = townMax,
+            }), ct, gzip: false);
     }
 
     private static async Task HandleTileAsync(
@@ -270,7 +290,7 @@ public static class MapWsHandler
         try
         {
             var resp = await Task.Run(() => svc.PlaceCheck(
-                req.Seed, session.Account, session.Authed, req.Q, req.R, req.ExcludeId, req.Seq), ct)
+                req.Seed, session.Account, session.Authed, req.Q, req.R, req.ExcludeId, req.Type, req.Seq), ct)
                 .WaitAsync(ct);
             await SendPlaceAsync(ws, WsFrame.PlaceCheck, resp, ct);
         }
@@ -310,12 +330,15 @@ public static class MapWsHandler
             /* ⚠ 同步重算 ~450ms, 必须放线程池 + 允许断开时放弃等待 (同 Tile 的 C6 理由):
                直接内联 await 会占着请求线程池线程跑完整条 A* 流水线。 */
             var resp = await Task.Run(() => svc.PlaceCommit(
-                req.Seed, session.Account, session.Authed, req.Q, req.R, req.Name, req.Tier, req.IdemKey, req.Seq), ct)
+                req.Seed, session.Account, session.Authed, req.Q, req.R, req.Name, req.Tier,
+                req.Type, req.IdemKey, req.Seq), ct)
                 .WaitAsync(ct);
             await SendPlaceAsync(ws, WsFrame.PlaceCommit, resp, ct);
             if (resp.Ok)
-                Console.WriteLine($"[ws/map] 卜居 account={session.Account} at ({req.Q},{req.R}) " +
-                                  $"id={resp.Sect?.Id} roads={resp.Roads} blocks={resp.Blocks.Count} ms={resp.Ms}");
+                Console.WriteLine($"[ws/map] {(string.IsNullOrEmpty(req.Type) || req.Type == "sect" ? "卜居" : "拓土")} " +
+                                  $"account={session.Account} at ({req.Q},{req.R}) " +
+                                  $"id={resp.Sect?.Id} type={resp.Sect?.Type} roads={resp.Roads} " +
+                                  $"blocks={resp.Blocks.Count} ms={resp.Ms}");
         }
         catch (OperationCanceledException) { /* 客户端断开 */ }
         catch (Exception ex)

@@ -406,12 +406,21 @@
 
   function decodeLoginResponse(buf) {
     var r = new Reader(new Uint8Array(buf));
-    var m = { ok: false, err: '', account: '' };
+    var m = { ok: false, err: '', account: '', myPlaces: [], townMax: 0 };
     while (r.p < r.end) {
       var t = r.tag();
       if (t.field === 1) m.ok = (t.wire === 0) ? r.vi() === 1 : (r.skip(t.wire), false);
       else if (t.field === 2) m.err = rdStr(r, t);
       else if (t.field === 3) m.account = rdStr(r, t);
+      /* 4 = repeated SettlementDto (我的聚落: 主宗 + 附属城镇)。⚠ 与 PlaceCommitResponse.sect
+         同一个 wire 布局 (SettlementDto 1..16) ⇒ 复用 parsePlaceEntity, 不另写一份解析器
+         (两份解析器 = 迟早漂移)。空数组 = 尚未立宗。 */
+      else if (t.field === 4) {
+        var pl = r.vi(), pe = r.p + pl;
+        m.myPlaces.push(parsePlaceEntity(r.b.subarray(r.p, pe)));
+        r.p = pe;
+      }
+      else if (t.field === 5) m.townMax = rdInt32(r, t);
       else r.skip(t.wire);
     }
     return m;
@@ -421,7 +430,7 @@
      与 Login/Pong 同口径: 载荷恒**明文** protobuf (不 gzip) —— 客户端按帧类型
      判别压缩, 帧 5/6 解出的是明文, 别再套一层 gunzip。
      契约: Server/Zongmen/Domain/MapMessages.cs 的 PlaceCheck / PlaceCommit 系列。 */
-  /* encodePlaceCheck({seed,q,r,seq,excludeId}) */
+  /* encodePlaceCheck({seed,q,r,seq,excludeId,type}) */
   function encodePlaceCheck(o) {
     var w = new Writer();
     if (o.seed) wstr(w, 1, o.seed);
@@ -429,9 +438,10 @@
     wtag(w, 3, 0); wzz(w, o.r | 0);
     wtag(w, 4, 0); wvi(w, o.seq || 0);
     if (o.excludeId) wstr(w, 5, o.excludeId);
+    if (o.type) wstr(w, 6, o.type);        // 城市扩张: 'town'/'village'; 空 = 立宗
     return w.done();
   }
-  /* encodePlaceCommit({seed,q,r,name,tier,seq,idemKey}) */
+  /* encodePlaceCommit({seed,q,r,name,tier,seq,idemKey,type}) */
   function encodePlaceCommit(o) {
     var w = new Writer();
     if (o.seed) wstr(w, 1, o.seed);
@@ -441,6 +451,7 @@
     wtag(w, 5, 0); wvi(w, Math.max(1, Math.min(3, o.tier | 0)) || 1);
     wtag(w, 6, 0); wvi(w, o.seq || 0);
     if (o.idemKey) wstr(w, 7, o.idemKey);
+    if (o.type) wstr(w, 8, o.type);        // 城市扩张: 同 encodePlaceCheck
     return w.done();
   }
   function rdInt32(r, t, dflt) { return (t.wire === 0) ? r.vi() : (dflt == null ? 0 : dflt); }
@@ -483,7 +494,10 @@
     var r = new Reader(new Uint8Array(buf));
     var m = { ok: false, reason: '', q: 0, r: 0, regionI: 0, regionJ: 0, deep: false,
               onVein: false, veinD: 0, spirit: 0, spiritMin: 0, biome: 0, elev: 0,
-              blocker: null, near: [], seq: 0, quota: 0, quotaMax: 0, err: '' };
+              blocker: null, near: [], seq: 0, quota: 0, quotaMax: 0, err: '',
+              /* 城市扩张 (字段 20~27) */
+              type: '', anchorQ: 0, anchorR: 0, hasAnchor: false,
+              maxR: 0, anchorDist: 0, towns: 0, townMax: 0 };
     while (r.p < r.end) {
       var t = r.tag();
       if (t.field === 1) m.ok = rdBool(r, t);
@@ -513,6 +527,15 @@
       else if (t.field === 17) m.quota = rdInt32(r, t);
       else if (t.field === 18) m.quotaMax = rdInt32(r, t);
       else if (t.field === 19) m.err = rdStr(r, t);
+      else if (t.field === 20) m.type = rdStr(r, t);
+      /* ⚠ 21/22 是坐标 ⇒ ZigZag (契约里只有 Q/R/Region/Ca/Cb/AnchorQ/AnchorR 是 sxint32) */
+      else if (t.field === 21) m.anchorQ = rdSInt32(r, t);
+      else if (t.field === 22) m.anchorR = rdSInt32(r, t);
+      else if (t.field === 23) m.hasAnchor = rdBool(r, t);
+      else if (t.field === 24) m.maxR = rdInt32(r, t);
+      else if (t.field === 25) m.anchorDist = rdInt32(r, t);
+      else if (t.field === 26) m.towns = rdInt32(r, t);
+      else if (t.field === 27) m.townMax = rdInt32(r, t);
       else r.skip(t.wire);
     }
     return m;
@@ -520,7 +543,7 @@
   function decodePlaceCommitResponse(buf) {
     var r = new Reader(new Uint8Array(buf));
     var m = { ok: false, reason: '', sect: null, regionI: 0, regionJ: 0, roadVer: 0,
-              ms: 0, seq: 0, err: '', blocks: [], roads: 0, idemKey: '' };
+              ms: 0, seq: 0, err: '', blocks: [], roads: 0, idemKey: '', places: 0, towns: 0 };
     while (r.p < r.end) {
       var t = r.tag();
       if (t.field === 1) m.ok = rdBool(r, t);
@@ -544,6 +567,8 @@
       }
       else if (t.field === 11) m.roads = rdInt32(r, t);
       else if (t.field === 12) m.idemKey = rdStr(r, t);
+      else if (t.field === 13) m.places = rdInt32(r, t);
+      else if (t.field === 14) m.towns = rdInt32(r, t);
       else r.skip(t.wire);
     }
     return m;

@@ -140,9 +140,30 @@
        分档依据 = `tier` (离散档, 稳定可预期), **不用 pop** (连续量, 且灵脉域内还会 ×1.3)。
        city = 8 来自用户原话「8 格附近有城市中心就不允许建造」。
        poi (秘境) 不设领地 —— 秘境是荒僻地标, 允许贴着建。
-       ⚠ 改本表必须同步: ① C# 侧镜像表 (DomainRadius.cs) ② verify/check_domain_radius.mjs
-          (跨源逐值断言) —— 只改一处会静默错档 (同 FOOT_MIRROR 的教训)。 */
+       ⚠ 本表的**唯一真源就在这里**: C# 侧**不镜像** (几何判定只在引擎 domainCheck,
+         C# 只做廉价前置); 需要这张表的是**前端**(画领地圈) —— 经 metaJson.domainR 下发。
+         改本表必须同步 verify/check_domain_radius.mjs (段 G 跨源逐值: 引擎 ↔ meta ↔
+         main.js 镜像口径), 否则静默错档 (同 FOOT_MIRROR 的教训)。 */
     DOMAIN_R: { city: 8, town: 6, sect3: 8, sect2: 7, sect1: 6, village: 4, fishing: 4, poi: 0 },
+
+    /* ---------- 附属城镇 / 城市扩张 (2026-09-23 用户: 「选完宗门后可以进行城市扩张,
+       建立附属城镇, 但不能距离超过一个区块的边缘的大小, 避免跨太多区块」) ----------
+       EXPAND_R = 附属城镇距**本宗中心**的最大六边距 (格)。
+       = CHUNK_R (mapgen.js: 区块六边形半径 = 10) ⇒ 整片领地必落在本宗所在区块内,
+         一格都不出块 (区块中心间距 CHUNK_S = 2×CHUNK_R+1 = 21, 是「跨到邻块」的量级)。
+       ⚠ 锚点恒为**本宗**(不是「上一座附属城镇」): 否则一颗接一颗地串出去, 总和仍可跨很多块,
+         与用户「避免跨太多区块」的原意相反。链式扩张要放开时, 锚点改这里一处即可。
+       ⚠ 可玩性下界: 允许区 = 距本宗 (DOMAIN_R(本宗), EXPAND_R] 的**环带** ——
+         上品宗门 DOMAIN_R=8 ⇒ 环带只剩 8~10 三圈。所以 EXPAND_R 必须显著大于
+         max(DOMAIN_R) 才是可玩的 (check_expand_rules.mjs 段 B 对这条做断言)。
+       ⚠ 与 DOMAIN_R 一样只在引擎里判 (expandCheck), C# 不镜像; 前端经 meta.expandR 取用。 */
+    EXPAND_R: 10,
+
+    /* 扩张模式允许建立的聚落类型 (键 = 聚落 type, 值恒 1)。
+       ⚠ 必须**白名单**而不是「前端传什么就建什么」: placeSettlement 不校验 type,
+         传 'city' 就得到 8 格领地、传 'poi' 就得到 0 格领地 (可贴脸建) —— 都是静默的口子。
+       档位 → 领地半径仍由 DOMAIN_R 管 (town=6 / village=4)。 */
+    EXPAND_TYPES: { town: 1, village: 1 },
 
     /* ---------- 贸易 (§四): 纯计算层, 不落库 ---------- */
     TRADE_REACH: 40        // 相邻城镇连通预算 (格): 六边距超此值不成 tradeEdge

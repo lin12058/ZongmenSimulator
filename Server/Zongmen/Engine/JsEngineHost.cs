@@ -89,12 +89,13 @@ public sealed class JsWorldVm : IDisposable
                 /* ---- 玩家宗门放置 (2026-09-23 方案 §2.4) ----
                    ⚠ 每个 JS 出口都必须在这里有 case: 漏了就是运行期
                    `InvalidOperationException: 未知 JS 函数` (编译期不报)。 */
-                "placeCheckJson" => (string)_svc.placeCheckJson(args[0], args[1], args[2]),
+                "placeCheckJson" => (string)_svc.placeCheckJson(args[0], args[1], args[2], args[3]),
                 "commitPlace" => (string)_svc.commitPlace(args[0], args[1], args[2]),
                 "setExternalSettlements" => (string)_svc.setExternalSettlements(args[0]),
                 "externalSettlementsJson" => (string)_svc.externalSettlementsJson(),
                 "removeExternalSettlement" => (string)_svc.removeExternalSettlement(args[0]),
                 "domainCheckJson" => (string)_svc.domainCheckJson(args[0], args[1], args[2]),
+                "expandCheckJson" => (string)_svc.expandCheckJson(args[0], args[1], args[2], args[3], args[4]),
                 "_countVeins" => (string)_svc._countVeins(),
                 _ => throw new InvalidOperationException($"未知 JS 函数: {fn}")
             };

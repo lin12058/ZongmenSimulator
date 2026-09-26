@@ -5,9 +5,9 @@
  * 用途: 把散在 verify/ 下的判据脚本按固定顺序跑一遍, 汇总「红 N / 共 M」, 避免每次手拼命令行。
  *
  * 用法:
- *   node verify/run_regression.mjs                     # 24 条离线 + 5 条需活服务端(对 127.0.0.1:8140)
+ *   node verify/run_regression.mjs                     # 25 条离线 + 5 条需活服务端(对 127.0.0.1:8140)
  *   node verify/run_regression.mjs --base=192.168.63.62:8140
- *   node verify/run_regression.mjs --offline-only      # 只跑不需要活服务端的 24 条
+ *   node verify/run_regression.mjs --offline-only      # 只跑不需要活服务端的 25 条
  *   node verify/run_regression.mjs --live-only         # 只跑需要活服务端的 (离线组要 8 分钟, 别白等)
  *   node verify/run_regression.mjs --with-server       # 追加 verify_map/w1/w2/w4(建议对着隔离 8141 跑)
  *   node verify/run_regression.mjs --with-place        # 追加 w5_place_rev(⚠ 它会**写入**: 真落一座宗门)
@@ -109,6 +109,16 @@ const JOBS = [
      · D 增删对称: 放一个再删掉 ⇒ 自动层指纹回到原样。
      实测读数: ms=188 nRoad=3 blocks=156 regions=25 cross=24。 */
   ['check_place_rules.mjs', [], 'off'],
+  /* 城市扩张 (附属城镇 EXPAND_R) 契约 (2026-09-23, 用户: 「立宗后可建附属城镇, 但不能
+     距离超过一个区块的边缘」, A~E 五段, 32 条) —— 纯离线直调 mapgen-server:
+     · A 真源: EXPAND_R(10) === CHUNK_R ⇒ 整片领地在块内; EXPAND_TYPES 只 town/village;
+       可玩性下界 EXPAND_R >= DOMAIN_R(sect3)+2 (环带非空); meta 下发 expandR/expandTypes;
+     · B expandCheck 边界: dist===maxR 放行 / maxR+1 拒 / maxR<=0 或 null 锚点 = 不限;
+     · C 判据优先级: bad_type 白名单 → **too_far 优先于深海/灵脉** (超距提示才切题);
+     · D commitPlace 步 0 二次校验: 坏类型/超距被拒且**未写入 ext**;
+     · E 端到端「立宗后拓土」: 注入本宗为 ext ⇒ 环带内可建 / 半径外 too_far。
+     实测: 拓土点距本宗 10 格 · 道路 2 条 / 413ms。 */
+  ['check_expand_rules.mjs', [], 'off'],
   /* ext 叠加层「不污染自动层」契约 (2026-09-23, A~D 四段):
      · A 零拷贝: settlementsFor 返回的数组**不得**是 settleCache 里那份 (append 会原地改缓存);
      · B 指纹: 加 ext 前后 rawSettlementsFor/settleCache **逐格逐字节不变** (自动世界一个像素都不许动);
@@ -168,7 +178,7 @@ const SERVER_JOBS = [
 /* ⚠ **会写入**服务端的判据, 只在显式 `--with-place` 时才跑 (默认不碰用户的世界)。
    放在最后: 它把本世「弄脏」(落一座宗门) ⇒ 别的依赖干净世界的判据必须排在它前面。 */
 const PLACE_JOBS = [
-  ['w5_place_rev.mjs', [BASE_URL], 'live', '⚠ 会写入: 真落一座宗门 (只对隔离实例跑)'],
+  ['w5_place_rev.mjs', [BASE_URL], 'live', '⚠ 会写入: 真落一座宗门 + 一座附属城镇 (只对隔离实例跑)'],
 ];
 
 const want = (f) => (!ONLY || f.includes(ONLY)) && !(SKIP && SKIP.split(',').some((s) => s && f.includes(s)));

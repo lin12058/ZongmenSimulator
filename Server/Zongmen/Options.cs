@@ -19,6 +19,14 @@ public sealed class ZongmenOptions
     ///   第一个进入的玩家就把整世锁死了 —— 显然不是本意。</summary>
     public int PlayerSectMaxPerAccount { get; set; } = 1;
 
+    /// <summary>每座宗门可带**附属城镇**数上限; 0 = 不限 (默认)。
+    /// 用户 2026-09-23: 「先不限制, 后续会根据等级来限制」⇒ 这就是那个钩子:
+    ///   判定目前是 `CountTowns(account, round) >= PlayerTownMaxPerSect` (0 = 短路放行);
+    ///   将来改成 `>= f(本宗 tier)` 时, 存储层已按 (Account,Round,Id) + SectId 支持多行,
+    ///   结构不用再动。距离/地形/领地三条硬判据**不在这里** —— 它们在引擎里
+    ///   (EXPAND_R / placeCheckJson), 本条只是"还能不能再建一座"的数量闸。</summary>
+    public int PlayerTownMaxPerSect { get; set; }
+
     /// <summary>js 沙箱脚本目录 (noise.js/mapgen.js/mapgen-server.js)。</summary>
     public string? EngineJsDir { get; set; }
 }

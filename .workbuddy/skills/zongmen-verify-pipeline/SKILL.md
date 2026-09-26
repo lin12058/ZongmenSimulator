@@ -1244,3 +1244,65 @@ DETAILS 里当时甚至写着「占地**由引擎** veinFootKeep() 决定」—�
 `showVeins@L77 showLabels@L78`）。但**必须 `try/finally` 还原** —— 本轮忘了写回，
 直接把 `web/js/main.js` 写坏（靠 `verify/_webbak` 才查出来）。**读-改-跑-还原一律 try/finally。**
 
+
+## 42. 城市扩张 P2-α（附属城镇）的验证姿势 + 六条新坑（2026-09-23）
+
+### A. 「引擎常量门控的放置特性」怎么验
+
+P2-α 引入 `EXPAND_R`(10) + `EXPAND_TYPES{town,village}`（真源只在 `mapgen-config.js`，
+C# **不镜像**，前端经 `meta.expandR/expandTypes` 读）。验证同 §41.A 的姿势：
+**离线直调** `MapGenServer.placeCheckJson / commitPlace`（`mapgen-server.js` 是纯搬运层），
+只读出口 `MG.expandCheck` / `MS.expandCheckJson` 供边界段直接对拍。
+`verify/check_expand_rules.mjs`（A~E 五段，**34 PASS / 0.6 s**）覆盖：
+真源与可玩性下界（`EXPAND_R >= DOMAIN_R(sect3)+2`，否则环带空 = 有宗却无处拓土）/
+边界（`dist===maxR` 放行、`maxR+1` 拒、`maxR<=0` 或 null 锚点 = 不限）/
+判据优先级（`bad_type → too_far → 深海 → 灵脉 → 领地 → 灵机`，⚠ **too_far 必须在深海/灵脉之前**，
+否则超距悬停只看到无关提示）/ `commitPlace` 步 0 二次校验且**未写入 ext** /
+端到端「注入本宗为 ext ⇒ 环带内可建、半径外 too_far」。
+
+段 E「立宗后拓土」的取样法：`MS.setExternalSettlements([{type:'sect',tier:1,q,r}])` 注入本宗，
+再在锚点周边方窗里按 `hexDist ∈ [need, EXPAND_R]` + `fields/veinNear/spirit/domainCheck` 过滤找候选
+（= `check_expand_rules` 与 `w5` 段 H 共用同一段取样逻辑；`w5` 里本宗 tier=2 ⇒ `need=7`）。
+
+### B. ⚠⚠ 判据里别混用「JSON 名」与「protobuf 字段名」（本轮踩，代价一次假红）
+
+`placeCheckJson`（引擎 JSON）返回 **`can`**；但线上 `PlaceCheckResponse` 的 protobuf 字段是 **`Ok`**
+（前端 `res.ok`）。`w5` 段 H 初版写 `check(... ec.can === true ...)` ⇒ `ec.can` 恒 `undefined` ⇒
+**H2 假 FAIL**（而服务端其实已判可建；H4 随之连带红）。
+⇒ 写协议层判据时，字段名一律以 `pb.js` 的解码器为准，别照抄离线 JSON 的键。
+
+### C. ⚠ 同一账号连提两次会撞提交频率闸
+
+`MapWorldService.PlaceCommitMinGapMs = 700`。`w5` 段 B 刚提交过一次，段 H 紧接着拓土 ⇒
+`too_frequent`。⚠ **幂等回放（E1）与配额拒绝（F1）都在闸之前返回，不更新 `_lastPlaceCommitMs`** ——
+所以只有「真提交」才刷新闸。⇒ 写入型判据里连续提交之间 `await new Promise(r=>setTimeout(r,900))`。
+
+### D. ⚠ `dotnet build -o` 的两种翻车
+
+1. **POSIX 路径被当字面量**：`-o /d/codes/.../bin` 在 Git Bash + MSBuild 下会拼成
+   **`D:\d\codes\...\bin`**（歪目录，`/d` 不是盘符转换而是被当相对段）。本轮实测产物落到 `D:\d\...`
+   ⇒ 输出路径一律用 **Windows 绝对路径** `-o "D:\codes\...\bin"`。清歪目录用 Node 递归删（带前缀断言）。
+2. **输出 dll 被自己的遗留隔离实例锁住**（`MSB3027/MSB3021`：文件被 `.NET Host` 锁定）
+   ⇒ 构建前先 `netstat -ano | grep :<port>` 找到**自己的**那个 PID，`Stop-Process -Id`（PowerShell，
+   因为 `taskkill //PID` 会被 Git Bash 路径转换吃掉）；**绝不碰用户的 8140**。
+
+### E. ⚠ protobuf 的 `int32` 哨兵**别用 -1**
+
+负 `int32` 是 **10 字节 varint**，前端 `pb.js` 的 varint 累加（`v += (b&0x7f)*Math.pow(2,s)`）
+会溢出 2^53 读成**巨大正数**。`PlaceCheckResponse.AnchorDist` 的「不适用」改用 **0**。
+（同族：长度前缀必须 `var len=r.vi();var eN=r.p+len;`。）
+
+### F. 表结构迁移（⚠ 玩家资产级）的验证三部曲
+
+`PlayerSectStore` v1→v2（PK `(Account,Round)` → `(Account,Round,Id)` + 加 `SectId` 列）：
+① 用 Python/SQL 造一个 **v1 老库**（旧 PK、无 `SectId`、塞一行真数据）；
+② 起**新引擎**隔离实例指向它（`EnsureSchema` 走 RENAME→建新表→`INSERT…SELECT`→`DROP`，**单事务**）；
+③ 断言：PK 变 v2 / 有 `SectId` 列 / **无残留 `_v1` 表** / 数据行逐字段完好 / 日志含
+`[PlayerSectStore] 表结构 v1 → v2 迁移完成`。这类改动**必须**有这条实测，光看代码不算数。
+
+### G. 一条判据方法学：`w5` 段 H 的「期望候选」要在**裸引擎 + 注入本宗**上算
+
+服务端的 `placeCheck`/`placeCommit` 看到的是「裸世界 + 本世台账里的主宗」，而 `w5` 的 A 段期望值
+来自**不注入 ext 的裸引擎**。段 H 必须把本宗用 `MG.setExternalSettlements([...])` 补进去，
+才能与服务端口径一致（否则 `domainCheck` 少算本宗 ⇒ 候选点被服务端判 `too_close`）。
+

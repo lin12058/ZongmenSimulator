@@ -43,6 +43,10 @@
            前端只读不推 —— 老服务端无此字段时为空对象, 领地圈自然不画 (静默降级)。 */
         domainR: meta.domainR || null,
         settleMinDist: meta.settleMinDist, townR: meta.townR,
+        /* 城市扩张 (附属城镇): 辖域半径 + 允许类型。同 domainR —— 真源在引擎, 前端只读,
+           老服务端无此字段时 expandR = 0 ⇒ 不画辖域环、不显示「拓土」(静默降级)。 */
+        expandR: meta.expandR || 0,
+        expandTypes: meta.expandTypes || null,
         /* 色板由 meta 单点下发 (缺失时由调用方字面兜底, 见 main.js) */
         elementRGB: meta.elementRGB, variantRGB: meta.variantRGB,
         /* S4: 引擎指纹 (服务端下发给前端的三个 js 的哈希; 老服务端无此字段 = undefined) */
@@ -120,7 +124,7 @@
       sock = s;
       s.onopen = function () {
         /* 连接即登录 (设计 §五): demo 账号 guest */
-        var login = PB.encodeLogin({ account: 'guest', token: 'demo' });
+        var login = PB.encodeLogin({ account: lastAccount, token: 'demo' });
         var frame = new Uint8Array(1 + login.length);
         frame[0] = PB.FRAME.LOGIN;
         frame.set(login, 1);
@@ -157,6 +161,30 @@
       try { reLoginHooks[i](); } catch (e) { console.warn('reconnect 钩子异常', e); }
     }
   }
+  /* 城市扩张 (2026-09-23): 登录钩子 —— **每次**登录成功都触发 (含首次), 载荷 = 登录响应,
+     里面带着「我的聚落」(主宗 + 附属城镇)。
+     ⚠ 与 onReconnect 分开: 那个只在「重连」时触发 (首次不触发, 因为 boot 已取过 meta);
+       而「我的聚落」在**首次**登录时同样需要 —— 它决定按钮显示哪一个。
+     ⚠ 这也是换世后前端能刷新资产的唯一通路: 换世不走断开重连 (socket 没断),
+       所以 regenerate() 必须显式调 loginAgain() 主动重取一次。 */
+  var loginHooks = [];
+  function onLogin(fn) { if (typeof fn === 'function') loginHooks.push(fn); }
+  function fireLogin(lr) {
+    for (var i = 0; i < loginHooks.length; i++) {
+      try { loginHooks[i](lr); } catch (e) { console.warn('login 钩子异常', e); }
+    }
+  }
+  /* 主动重登 (只发一个 Login 帧; 连接未就绪时静默跳过 —— 下次 connect 的 onopen 会带上)。
+     用途: ① 换世后刷新「我的聚落」② onReconnect 钩子里重取 meta 之外的资产。 */
+  function loginAgain(account) {
+    if (!sock || sock.readyState !== 1) return false;
+    var login = PB.encodeLogin({ account: (account || lastAccount || 'guest'), token: 'demo' });
+    var frame = new Uint8Array(1 + login.length);
+    frame[0] = PB.FRAME.LOGIN;
+    frame.set(login, 1);
+    return wsSend(frame);
+  }
+  var lastAccount = 'guest';
 
   /* D8: 容错扫描 —— 在 TileResponse 顶层找 field 6 (seq, varint)。
      仅在「正常解码已失败」时调用, 用途是把失败精确归到某一条在途请求,
@@ -206,11 +234,13 @@
       var lr = PB.decodeLoginResponse(payload);
       if (lr.ok) {
         reconnectDelay = 500;                  // 连接恢复 → 退避重置
+        if (lr.account) lastAccount = lr.account;
         if (sockReadyRes) { sockReadyRes(lr); sockReadyRes = null; sockReadyRej = null; }
         /* S4: 「重连」而非首次登录才触发钩子 —— 页面长开期间服务端可能已升级引擎。
            (首次登录不做任何额外请求: meta 已在 boot 取过) */
         if (everLogged) fireReconnect();
         everLogged = true;
+        fireLogin(lr);                         // 每次登录都发: 载荷里的「我的聚落」是 UI 的输入
       }
       else {
         if (sockReadyRej) { sockReadyRej(new Error('登录失败: ' + lr.err)); sockReadyRej = null; sockReadyRes = null; }
@@ -431,16 +461,19 @@
     });
   }
   /* excludeId: 排除某座自己的宗门 —— 立宗后再悬停校验时, 别把自己算成"障碍"。
-     ⚠ 服务端**不会**因前端传了它就放行: 写路径 (PlaceCommit) 重跑全套判据。 */
-  function placeCheck(seed, q, r, excludeId) {
+     ⚠ 服务端**不会**因前端传了它就放行: 写路径 (PlaceCommit) 重跑全套判据。
+     type: 'sect'(空) = 立宗; 'town'/'village' = 拓土。⚠ 扩张档**绝不能**传 excludeId
+     (= 本宗): 本宗的领地正是那条间距约束的来源, 豁免了就能贴着自己的宗门建。 */
+  function placeCheck(seed, q, r, excludeId, type) {
     return placeCall(PB.FRAME.PLACE_CHECK,
-      { seed: seed, q: q, r: r, excludeId: excludeId || '' });
+      { seed: seed, q: q, r: r, excludeId: excludeId || '', type: type || '' });
   }
   /* idemKey: 幂等键 —— 同键重发由服务端回放首次响应 (同步重算期间狂点确认键的兜底)。
-     调用方用**确定性**键 (落点+名字), 重复点击即回放, 不会立两座。 */
-  function placeCommit(seed, q, r, name, tier, idemKey) {
+     调用方用**确定性**键 (类型+落点+名字), 重复点击即回放, 不会立两座。 */
+  function placeCommit(seed, q, r, name, tier, idemKey, type) {
     return placeCall(PB.FRAME.PLACE_COMMIT,
-      { seed: seed, q: q, r: r, name: name, tier: tier | 0, idemKey: idemKey || '' });
+      { seed: seed, q: q, r: r, name: name, tier: tier | 0, idemKey: idemKey || '',
+        type: type || '' });
   }
 
   /* ---------- 单格详情 / 字段网格 (保留 HTTP) ---------- */
@@ -486,6 +519,9 @@
     blockForgetAll: blockForgetAll,
     reconnectDue: reconnectDue,
     onReconnect: onReconnect,
+    /* 城市扩张: 「我的聚落」登录钩子 + 主动重登 (换世后刷新资产) */
+    onLogin: onLogin,
+    loginAgain: loginAgain,
     /* R11: 引擎脚本 (WS 下发, 前端按 seed 自算地形) */
     requestScript: requestScript,
     /* 玩家宗门放置 (帧 5/6) */

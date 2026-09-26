@@ -119,7 +119,8 @@ public sealed class MapWorldService : IDisposable
              但先建好更不容易出错)。 */
         _sects = new PlayerSectStore(
             opt.PersistEnabled ? ZongmenPaths.ResolveDbPath(opt, contentRoot) : null,
-            opt.PlayerSectMaxPerAccount);
+            opt.PlayerSectMaxPerAccount,
+            opt.PlayerTownMaxPerSect);
         /* C1: 传淘汰回调 —— VM 被 LRU 淘汰时清掉「按 seed 前缀」的 roadVer 观测值,
            否则新 VM 的 roadVer 从 0 重新计数会与旧观测值冲突 (tile 缓存判新鲜失准)。
            P: 再传**新建回调** —— VM 重建后必须把本世的玩家宗门重放回引擎 ext 层,
@@ -898,6 +899,8 @@ public sealed class MapWorldService : IDisposable
             ledgerPersisted = _ledger.Persisted,
             /* P: 玩家宗门对账 (验证脚本用) */
             playerSects = _ledger.Count() == 0 ? 0 : _sects.CountRound(_ledger.Current().Round),
+            /* P2-α (城市扩张): 主宗数 / 附属城镇数分开报 —— 验证脚本的「本世是否干净」闸要它 */
+            playerTowns = _ledger.Count() == 0 ? 0 : _sects.CountTownsRound(_ledger.Current().Round),
             placeVer = Volatile.Read(ref _placeVer),
         });
     }
@@ -927,19 +930,53 @@ public sealed class MapWorldService : IDisposable
     private long _lastPlaceCommitMs;
 
     public PlaceCheckResponse PlaceCheck(
-        string seed, string? account, bool authed, int q, int r, string? excludeId, uint seq)
+        string seed, string? account, bool authed, int q, int r, string? excludeId,
+        string? type, uint seq)
     {
         var cur = _ledger.Current();
-        return CheckCore(cur, seed, account, authed, q, r, excludeId, seq);
+        return CheckCore(cur, seed, account, authed, q, r, excludeId, type, seq);
+    }
+
+    /// <summary>归一化聚落类型: null/空 = "sect" (立宗), 其余转小写原样返回。
+    /// ⚠ **不在 C# 里做白名单校验** —— 「town/village 才是合法的扩张类型」这条规则
+    ///   的真源是引擎 mapgen-config.js 的 EXPAND_TYPES (判定只在一处; 同 DOMAIN_R 的规矩)。
+    ///   引擎对非白名单类型回 reason='bad_type'。</summary>
+    private static string NormalizeKind(string? type)
+    {
+        var t = (type ?? "").Trim().ToLowerInvariant();
+        return t.Length == 0 ? "sect" : t;
+    }
+
+    /// <summary>扩张半径 (格; 引擎 CFG.EXPAND_R)。惰性从引擎 meta 读一次并缓存 ——
+    /// C# 侧**不镜像**这个常数, 这里只做搬运 (引擎改了配置, 重启即生效)。
+    /// 0 = 该引擎版本没有这个概念 ⇒ 一切都退化为「立宗档」(不发锚点)。</summary>
+    private int _expandR = -1;
+    private int ExpandR(string seed)
+    {
+        if (_expandR >= 0) return _expandR;
+        int v;
+        using (var lease = World(seed))
+        using (var d = JsonDocument.Parse(lease.Vm.Call("metaJson")))
+            v = d.RootElement.TryGetProperty("expandR", out var el) ? el.GetInt32() : 0;
+        _expandR = v;
+        return v;
     }
 
     /* ⚠ account 必须可空: 未登录会话走的就是 null 这条路 (判据 2 拦它)。
        判据 2 之后编译器已把 account 收窄为非空 (IsNullOrEmpty 带 NotNullWhen(false))。 */
     private PlaceCheckResponse CheckCore(
         WorldEntry cur, string seed, string? account, bool authed,
-        int q, int r, string? excludeId, uint seq)
+        int q, int r, string? excludeId, string? type, uint seq)
     {
-        var resp = new PlaceCheckResponse { Q = q, R = r, Seq = seq, QuotaMax = _sects.MaxPerAccount };
+        var kind = NormalizeKind(type);
+        /* 扩张档 = 不是立宗。锚点 (本宗) 与半径都从**服务端状态**推出来:
+           前端只报"我想建哪种", 不报坐标 —— 否则改一个数字就能把附属城镇甩到天边。 */
+        var expand = !string.Equals(kind, "sect", StringComparison.Ordinal);
+        var resp = new PlaceCheckResponse
+        {
+            Q = q, R = r, Seq = seq, Type = kind,
+            QuotaMax = _sects.MaxPerAccount, TownMax = _sects.TownMaxPerSect,
+        };
 
         /* 判据 1: 必须是**当前世** (世界可按 seed 确定性重建, 但玩家资产按「第几世」记 ——
            在已退场的一世里大兴土木, 记录会永远读不回来) */
@@ -960,22 +997,58 @@ public sealed class MapWorldService : IDisposable
             resp.Reason = "bad_coord";
             return resp;
         }
-        /* 判据 3: 配额 (该账号在该世已立的宗门数 < 上限) */
-        var used = _sects.CountOf(account, cur.Round);
-        resp.Quota = used;
-        resp.QuotaMax = _sects.MaxPerAccount;
-        if (used >= _sects.MaxPerAccount)
+        /* 判据 3: 配额 —— **分两档** (立宗按账号数, 拓土按附属数), 且拓土必须有本宗当锚点 */
+        if (expand)
         {
-            resp.Reason = "quota_exceeded";
-            resp.Err = "此世已立宗门";
-            return resp;
+            var main = _sects.Find(account, cur.Round);
+            resp.Towns = _sects.CountTowns(account, cur.Round);
+            resp.Quota = resp.Towns;
+            resp.QuotaMax = _sects.TownMaxPerSect;
+            if (main == null)
+            {
+                resp.Reason = "no_sect";
+                resp.Err = "尚未立宗, 无处拓土";
+                return resp;
+            }
+            resp.AnchorQ = main.Q;
+            resp.AnchorR = main.R;
+            resp.HasAnchor = true;
+            if (_sects.TownMaxPerSect > 0 && resp.Towns >= _sects.TownMaxPerSect)
+            {
+                resp.Reason = "quota_exceeded";
+                resp.Err = "附属城镇已达上限";
+                return resp;
+            }
         }
-        /* 判据 5/6/7: 引擎 (深海 / 灵脉 / 领地) —— 一次 V8 往返全算完 */
+        else
+        {
+            var used = _sects.CountOf(account, cur.Round);
+            resp.Quota = used;
+            resp.QuotaMax = _sects.MaxPerAccount;
+            resp.Towns = _sects.CountTowns(account, cur.Round);
+            if (used >= _sects.MaxPerAccount)
+            {
+                resp.Reason = "quota_exceeded";
+                resp.Err = "此世已立宗门";
+                return resp;
+            }
+        }
+        /* 判据 5/6/7 + 扩张: 引擎 (深海 / 灵脉 / 领地 / 距本宗太远) —— 一次 V8 往返全算完 */
+        var modeJson = expand
+            ? JsonSerializer.Serialize(new { type = kind, aq = resp.AnchorQ, ar = resp.AnchorR, maxR = ExpandR(seed) })
+            : JsonSerializer.Serialize(new { type = kind });
         string json;
         using (var lease = World(cur.Seed))
-            json = lease.Vm.Call("placeCheckJson", q, r, excludeId ?? "");
+            json = lease.Vm.Call("placeCheckJson", q, r, excludeId ?? "", modeJson);
         using var d = JsonDocument.Parse(json);
         var rt = d.RootElement;
+        if (rt.TryGetProperty("expand", out var exEl))
+        {
+            resp.MaxR = exEl.TryGetProperty("maxR", out var mr) ? mr.GetInt32() : 0;
+            /* 引擎在「不设上限」时回 dist = -1 ⇒ 夹到 0 (哨兵语义见 DTO 注释: 不用 -1) */
+            var dv = exEl.TryGetProperty("dist", out var dd) ? dd.GetInt32() : 0;
+            resp.AnchorDist = dv > 0 ? dv : 0;
+        }
         resp.RegionI = rt.GetProperty("regionI").GetInt32();
         resp.RegionJ = rt.GetProperty("regionJ").GetInt32();
         resp.Deep = rt.GetProperty("deep").GetBoolean();
@@ -1022,10 +1095,13 @@ public sealed class MapWorldService : IDisposable
     }
 
     public PlaceCommitResponse PlaceCommit(
-        string seed, string? account, bool authed, int q, int r, string? name, int tier, string? idemKey, uint seq)
+        string seed, string? account, bool authed, int q, int r, string? name, int tier,
+        string? type, string? idemKey, uint seq)
     {
         var resp = new PlaceCommitResponse { Seq = seq, IdemKey = idemKey ?? "" };
         var cur = _ledger.Current();
+        var kind = NormalizeKind(type);
+        var expand = !string.Equals(kind, "sect", StringComparison.Ordinal);
 
         /* 判据 1: 本世 */
         if (!string.Equals(seed, cur.Seed, StringComparison.Ordinal))
@@ -1034,23 +1110,32 @@ public sealed class MapWorldService : IDisposable
             resp.Err = "该世界已退场, 请刷新后领当前世";
             return resp;
         }
+        /* 本账号在本世的**主宗** —— 扩张档它是锚点, 立宗档它是"原地重建"的豁免对象。 */
+        var main = _sects.Find(account ?? "", cur.Round);
         /* 幂等: 同 IdemKey 直接回放上次响应 —— 同步重算 ~450ms 期间用户狂点确认键的兜底。
-           ⚠ 必须放在**任何写动作之前**: 否则第二次提交会把第一座的配额/落点又算一遍。 */
-        var existing = _sects.Find(account ?? "", cur.Round);
-        if (existing != null && !string.IsNullOrEmpty(idemKey) &&
-            string.Equals(existing.IdemKey, idemKey, StringComparison.Ordinal) &&
-            !string.IsNullOrEmpty(existing.Resp))
+           ⚠ 必须放在**任何写动作之前**: 否则第二次提交会把第一座的配额/落点又算一遍。
+           ⚠ v2 起一个账号有多行 ⇒ 按 (Account,Round,IdemKey) 在**全部行**里找,
+             不能再拿 (Account,Round) 当唯一键 (那会把附属城镇的回放记到主宗头上)。 */
+        if (!string.IsNullOrEmpty(idemKey))
         {
-            try
+            var replayRow = _sects.FindByIdemKey(account ?? "", cur.Round, idemKey);
+            if (replayRow != null && !string.IsNullOrEmpty(replayRow.Resp))
             {
-                var replay = JsonSerializer.Deserialize<PlaceCommitResponse>(existing.Resp);
-                if (replay != null) { replay.Seq = seq; return replay; }
+                try
+                {
+                    var replay = JsonSerializer.Deserialize<PlaceCommitResponse>(replayRow.Resp);
+                    if (replay != null) { replay.Seq = seq; return replay; }
+                }
+                catch { /* 回放失败则照常重做 */ }
             }
-            catch { /* 回放失败则照常重做 */ }
         }
 
-        /* 判据 2~7: 与 check 同一份实现 (不做两套判据!) */
-        var chk = CheckCore(cur, seed, account, authed, q, r, existing?.Id, seq);
+        /* 判据 2~7: 与 check 同一份实现 (不做两套判据!)
+           ⚠ excludeId 只在**立宗档**传 (原地重建时豁免自己那座);
+             扩张档**必须为空** —— 本宗正是那条"领地"约束的来源, 豁免了就等于
+             "可以贴着自己的宗门建", 10 格辖域会退化成"哪都能建"。 */
+        var chk = CheckCore(cur, seed, account, authed, q, r,
+                            expand ? null : main?.Id, kind, seq);
         if (!chk.Ok)
         {
             resp.Reason = chk.Reason;
@@ -1062,7 +1147,7 @@ public sealed class MapWorldService : IDisposable
         if (n2.Length < 1 || n2.Length > PlaceNameMax)
         {
             resp.Reason = "bad_name";
-            resp.Err = $"宗门名需 1~{PlaceNameMax} 字";
+            resp.Err = $"{KindLabel(kind)}名需 1~{PlaceNameMax} 字";
             return resp;
         }
         var t2 = Math.Clamp(tier, 1, 3);
@@ -1085,16 +1170,33 @@ public sealed class MapWorldService : IDisposable
         Interlocked.Exchange(ref _lastPlaceCommitMs, nowMs);
 
         /* 步 1~6: 引擎侧落点 + 清派生状态 + 同步重算受影响区域道路 + roadVer+1
-           (一次 V8 调用, 全程持锁 —— 见 mapgen-server.js commitPlace 的头注释) */
-        var optsJson = JsonSerializer.Serialize(new
-        {
-            type = "sect", tier = t2, name = n2, owner = account ?? "",
-        });
+           (一次 V8 调用, 全程持锁 —— 见 mapgen-server.js commitPlace 的头注释)
+           ⚠ 扩张档的 aq/ar/maxR 由服务端填 (取自上面那份台账), 前端给不了;
+             引擎侧 commitPlace 的步 0 还会**独立复判**一次 (白名单 + 半径)。 */
+        var optsJson = expand
+            ? JsonSerializer.Serialize(new
+            {
+                type = kind, tier = 1, name = n2, owner = account ?? "",
+                aq = main!.Q, ar = main!.R, maxR = ExpandR(seed),
+            })
+            : JsonSerializer.Serialize(new
+            {
+                type = "sect", tier = t2, name = n2, owner = account ?? "", maxR = 0,
+            });
         string json;
         using (var lease = World(seed))
             json = lease.Vm.Call("commitPlace", q, r, optsJson);
         using var d = JsonDocument.Parse(json);
         var rt = d.RootElement;
+        /* 引擎侧的二次校验可能否掉本次 (too_far / bad_type) ⇒ 必须显式处理,
+           否则会把 null 当成功继续往下走 (静默落库一条不存在的聚落)。 */
+        if (!rt.TryGetProperty("ok", out var okEl) || okEl.GetInt32() != 1)
+        {
+            resp.Reason = rt.TryGetProperty("reason", out var rEl)
+                ? (rEl.GetString() ?? "bad_type") : "bad_type";
+            resp.Err = "落点未通过引擎复判";
+            return resp;
+        }
         var stEl = rt.GetProperty("st");
         var st = new SettlementDto
         {
@@ -1118,12 +1220,15 @@ public sealed class MapWorldService : IDisposable
         var ms = rt.GetProperty("ms").GetInt32();
         var nRoad = rt.GetProperty("nRoad").GetInt32();
 
-        /* 步 7: 落库 (独立表 PlayerSect, 见 PlayerSectStore 头注释) */
+        /* 步 7: 落库 (独立表 PlayerSect, 见 PlayerSectStore 头注释)
+           SectId: 主宗自己留空; 附属城镇记住它挂在哪座主宗上 —— 将来「按宗门等级限制
+           附属数量」要用它数, 而这正是**唯一正确**的口径 (per-宗 而不是 per-账号)。 */
         var row = new PlayerSectEntry
         {
             Account = account ?? "", Round = cur.Round, IdemKey = idemKey ?? "",
             Id = st.Id, Type = st.Type, Q = st.Q, R = st.R, Name = st.Name,
             Pop = st.Pop, Owner = st.Owner, Tier = st.Tier, State = st.State, ExpireTs = st.ExpireTs,
+            SectId = expand ? (main?.Id ?? "") : "",
         };
         row.Json = PlayerSectStore.BuildJson(row);
         _sects.Put(row);
@@ -1138,13 +1243,46 @@ public sealed class MapWorldService : IDisposable
         resp.RoadVer = roadVer;
         resp.Ms = ms;
         resp.Roads = nRoad;
+        resp.Towns = _sects.CountTowns(account ?? "", cur.Round);
+        resp.Places = _sects.CountOf(account ?? "", cur.Round) + resp.Towns;
         foreach (var (ca, cb) in blocks) resp.Blocks.Add(new BlockRef { Ca = ca, Cb = cb });
 
-        /* 幂等回放记录 (放最后: 只有真正成功才记) */
-        try { _sects.PutResp(account ?? "", cur.Round, idemKey ?? "",
+        /* 幂等回放记录 (放最后: 只有真正成功才记; 按**这一座**的 id 落, 见 store 注释) */
+        try { _sects.PutResp(account ?? "", cur.Round, st.Id, idemKey ?? "",
                              JsonSerializer.Serialize(resp)); }
         catch (Exception ex) { Console.Error.WriteLine("[MapWorldService] 幂等响应落库失败: " + ex.Message); }
         return resp;
+    }
+
+    /// <summary>类型 → 中文标签 (只用于文案; 白名单校验不在这里)。</summary>
+    private static string KindLabel(string kind) => kind switch
+    {
+        "town" => "城镇",
+        "village" => "村落",
+        "fishing" => "渔村",
+        _ => "宗门",
+    };
+
+    /// <summary>登录时回填「我的聚落」(主宗 + 附属城镇) —— 见 LoginResponse.MyPlaces 的注释。
+    /// 无持久化 / 该账号在本世还没立宗 ⇒ 空列表 (前端照常显示「尚未择地立宗」)。
+    /// ⚠ 只回**当前世**的资产: 退场世的数据绝不能漏出去 (前端会当真)。</summary>
+    public (List<SettlementDto> Places, int TownMax) MyPlaces(string? account)
+    {
+        var outList = new List<SettlementDto>();
+        if (!string.IsNullOrEmpty(account))
+        {
+            var cur = _ledger.Current();
+            foreach (var e in _sects.ByAccount(account, cur.Round))
+            {
+                outList.Add(new SettlementDto
+                {
+                    Id = e.Id, Type = e.Type, Q = e.Q, R = e.R,
+                    Name = e.Name, Pop = e.Pop, Owner = e.Owner, Tier = e.Tier,
+                    State = e.State, ExpireTs = e.ExpireTs,
+                });
+            }
+        }
+        return (outList, _sects.TownMaxPerSect);
     }
 
     /// <summary>一次落点的服务端缓存失效 (方案 §3.4/§3.6 明确要求的那一套)。

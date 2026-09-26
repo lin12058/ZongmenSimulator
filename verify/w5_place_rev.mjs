@@ -19,6 +19,11 @@
  *   D. 单格详情: /api/map/tile 的 place = 新宗门 (证明 ext 层真的进了 settlementsFor)。
  *   E. 幂等: 同 IdemKey 重发 → 同 id 回放, 且配额不被重复扣。
  *   F. 配额: 同账号再提交 (新 IdemKey) → quota_exceeded; 另一账号 PlaceCheck → quota=0。
+ *   G. 服务端状态: stats.playerSects >= 1 且 placeVer 前进。
+ *   H. **城市扩张 (P2-α, 2026-09-23)**: 立宗后在本宗辖域 [need, EXPAND_R] 内拓土 ⇒
+ *      帧 5 判可建 / 帧 6 落成 type=town (锚点由**服务端**从 PlayerSect 台账推, 前端不给);
+ *      半径外 ⇒ too_far; 类型白名单 (扩张档传 city ⇒ bad_type); stats.playerTowns >= 1。
+ *      ⚠ 段 H 的提交须避开服务端提交频率闸 (PlaceCommitMinGapMs=700, 段 B 刚提交过)。
  *
  * 用法: node verify/w5_place_rev.mjs [baseUrl]      (默认 http://127.0.0.1:8140)
  *   ⚠ 需要 Zongmen__PlayerSectMaxPerAccount=1 (默认) 才能验 F。
@@ -115,11 +120,13 @@ class Ws {
       this.frame(type, body);
     });
   }
-  placeCheck(seed, q, r, excludeId) {
-    return this._waitPlace(PB.FRAME.PLACE_CHECK, PB.encodePlaceCheck({ seed, q, r, seq: ++this.seq, excludeId }));
+  placeCheck(seed, q, r, excludeId, type) {
+    return this._waitPlace(PB.FRAME.PLACE_CHECK, PB.encodePlaceCheck(
+      { seed, q, r, seq: ++this.seq, excludeId: excludeId || '', type: type || '' }));
   }
-  placeCommit(seed, q, r, name, tier, idemKey) {
-    return this._waitPlace(PB.FRAME.PLACE_COMMIT, PB.encodePlaceCommit({ seed, q, r, name, tier, seq: ++this.seq, idemKey }));
+  placeCommit(seed, q, r, name, tier, idemKey, type) {
+    return this._waitPlace(PB.FRAME.PLACE_COMMIT, PB.encodePlaceCommit(
+      { seed, q, r, name, tier, seq: ++this.seq, idemKey, type: type || '' }));
   }
   tile(seed, i, j, mask = 0, lastRevs = []) {
     const sseq = ++this.seq;
@@ -332,6 +339,55 @@ console.log('== G. 服务端状态 ==');
 const st1 = await getJson('/api/map/stats');
 check('G1 stats.playerSects >= 1', st1.playerSects >= 1, String(st1.playerSects));
 check('G2 stats.placeVer 前进', st1.placeVer > ver0, `${ver0} → ${st1.placeVer}`);
+
+/* ============================ H. 城市扩张 (立宗后拓土, 端到端) ============================
+   用户原话: 「选完宗门后可以进行城市扩张, 建立附属城镇, 但不能距离超过一个区块的边缘」。
+   服务端此刻已有本世主宗 (spot, tier=2 ⇒ 领地 7)。用**裸引擎 + 注入本宗为 ext**复算候选
+   (与 check_expand_rules.mjs 同法), 再经**真 WS 帧 5/6** 验证整条链 (protobuf type 字段 /
+   服务端从台账推锚点 / 引擎白名单+半径 / 落库 SectId)。 */
+console.log('== H. 城市扩张 (立宗后拓土, 端到端) ==');
+MG.setExternalSettlements([{ type: 'sect', tier: 2, q: spot.q, r: spot.r }]);
+const EXPAND_R = MG.CFG.EXPAND_R | 0;
+const need = MG.domainRadiusOf({ type: 'sect', tier: 2 }) | 0;   // sect2 ⇒ 7
+let annex = null;
+for (let dq = -EXPAND_R; dq <= EXPAND_R && !annex; dq++) {
+  for (let dr = -EXPAND_R; dr <= EXPAND_R && !annex; dr++) {
+    const q = spot.q + dq, r = spot.r + dr;
+    const d = MG.hexDist(q, r, spot.q, spot.r);
+    if (d < need || d > EXPAND_R) continue;
+    const f = MG.fields(q, r);
+    if (f.biome === MG.BIOME.DEEP || f.biome === MG.BIOME.OCEAN || f.vein) continue;
+    if (MG.spiritAt(q, r) < MG.CFG.SEA_SETTLE_MIN_SPIRIT) continue;
+    const vn = MG.veinNear(q, r);
+    if (vn && vn.d < (MG.CFG.SETTLE_VEIN_FOOT_PAD | 0)) continue;
+    if (!MG.domainCheck(q, r, '').ok) continue;
+    annex = { q, r, d };
+  }
+}
+check(`H1 环带 [${need},${EXPAND_R}] 内找到合法拓土点`, !!annex);
+if (annex) {
+  const ec = await ws.placeCheck(seed, annex.q, annex.r, '', 'town');
+  /* ⚠ protobuf 的字段名是 `ok`（不是 JSON 那套 `can`）—— 用错会永远 false。 */
+  check('H2 半径内拓土 placeCheck.ok=true (全判据通过)', ec.ok === true, ec.reason);
+  check(`H3 回传 anchorDist=${annex.d} / maxR=${EXPAND_R} / hasAnchor (锚点由**服务端**从台账推)`,
+    ec.anchorDist === annex.d && ec.maxR === EXPAND_R && ec.hasAnchor === true,
+    JSON.stringify({ dist: ec.anchorDist, maxR: ec.maxR, has: ec.hasAnchor }));
+  /* ⚠ 避开服务端的提交频率闸 (`PlaceCommitMinGapMs=700`): 段 B 刚提交过一次。 */
+  await new Promise((r) => setTimeout(r, 900));
+  const ecm = await ws.placeCommit(seed, annex.q, annex.r, '拓土测试镇', 1,
+    'idemT_' + Date.now().toString(36), 'town');
+  check('H4 拓土落成 ok=1 且 type=town', ecm.ok === true && ecm.sect && ecm.sect.type === 'town',
+    JSON.stringify({ ok: ecm.ok, type: ecm.sect && ecm.sect.type, reason: ecm.reason }));
+  check('H5 实际距本宗 <= EXPAND_R (落库位置不越辖域)',
+    !!ecm.sect && MG.hexDist(ecm.sect.q, ecm.sect.r, spot.q, spot.r) <= EXPAND_R);
+  const far = await ws.placeCheck(seed, spot.q + EXPAND_R + 4, spot.r, '', 'town');
+  check('H6 半径外 ⇒ too_far', far.reason === 'too_far', far.reason);
+  const bad = await ws.placeCheck(seed, spot.q + 3, spot.r + 3, '', 'city');
+  check('H7 扩张档 type=city ⇒ bad_type (白名单兜住「静默得 8 格领地」)', bad.reason === 'bad_type',
+    bad.reason);
+  const stT = await getJson('/api/map/stats');
+  check('H8 stats.playerTowns >= 1 (附属已落库)', stT.playerTowns >= 1, String(stT.playerTowns));
+}
 
 ws.close();
 console.log('\n结果: ' + (failures ? 'FAIL ' + failures : 'ALL PASS'));

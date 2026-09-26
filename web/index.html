@@ -95,6 +95,14 @@
   }
   #titleBox h1 em { font-style: normal; color: var(--seal); }
   #titleBox .sub { margin-top: 2px; font-size: 12px; color: var(--ink-soft); letter-spacing: 2px; }
+  /* ---- 左侧工具列 (2026-09-23 用户: 「右上角的建立按钮, 要放在左边」) ----
+     卜居(立宗) / 拓土(附属城镇) 互斥显示 ⇒ 同一位置只出现一枚, 不会左右跳。
+     回宗按钮不在这里 (用户指定放在本宗面板内, 见 #btnGotoSect)。 */
+  #toolBox { display: flex; gap: 6px; padding: 6px 6px; }
+  #toolBox button { min-width: 72px; letter-spacing: 4px; }
+  /* 通用显隐: 按钮与浮层行按状态切换 (只在带 .hidden 的元素上生效) */
+  button.hidden, .pb-row.hidden { display: none; }
+  #btnGotoSect { padding: 1px 7px; font-size: 11.5px; letter-spacing: 2px; }
   #controls { padding: 6px; }
   /* ---- 齿轮: 右上角只剩这一枚 (用户 2026-09-16: 「右上角改成一个齿轮, 点开后有弹窗」)。
      旧口径是 7 个按钮/输入框平铺 (#seedInput/btnSeed/btnRegen/btnVeins/btnLabels/btnBanners/
@@ -349,10 +357,17 @@
         <h1>宗门模拟器 <em>·</em> 山河图</h1>
         <div class="sub"><span id="era">岁次甲辰 · 春</span><span id="eraRound"></span></div>
       </div>
+      <!-- 工具列: 「卜居」= 择地立宗 (未立宗时显示); 「拓土」= 建附属城镇 (已立宗后显示)。
+           已立宗后隐藏卜居 (一世一宗, 留着只会一直报 quota)。 -->
+      <div id="toolBox" class="panel">
+        <button id="btnPlace" title="卜居 · 择地立宗">卜居</button>
+        <button id="btnExpand" class="hidden" title="拓土 · 在本宗辖域内建附属城镇">拓土</button>
+      </div>
       <div id="sectWrap">
         <div id="sectBox" class="panel">
           <div id="sectHead">
             <span class="cap">本<b>宗</b></span>
+            <button id="btnGotoSect" class="hidden" title="回宗 · 相机移回本宗">回宗</button>
           </div>
           <div class="ink-rule"></div>
           <div id="sectBody"><div class="sec-empty">尚未择地立宗</div></div>
@@ -360,16 +375,15 @@
       </div>
     </div>
     <div id="controls" class="panel">
-      <button id="btnPlace" title="卜居 · 择地立宗">卜居</button>
       <button id="btnGear" title="设置 · 显示项 / 世界" aria-label="设置">⚙</button>
     </div>
   </div>
 
-  <!-- 卜居浮层: 落点校验提示 + 起名/品阶 (方案 §4.4)。
+  <!-- 卜居/拓土浮层: 落点校验提示 + 起名/品阶 (方案 §4.4; 城市扩张 2026-09-23)。
        与 #topbar 同级 —— .panel 的 clip-path 会裁掉子树, 塞进顶栏面板会被切。 -->
   <div id="placeBox" class="panel hidden">
     <div class="pb-head">
-      <span class="pb-title">卜<b>居</b></span>
+      <span class="pb-title" id="placeTitle">卜<b>居</b></span>
       <button id="btnPlaceClose" title="取消 (Esc)">✕</button>
     </div>
     <div class="ink-rule"></div>
@@ -377,7 +391,12 @@
       <span class="k">名号</span>
       <input id="placeName" type="text" maxlength="12" placeholder="1~12 字" autocomplete="off">
     </div>
-    <div class="pb-row">
+    <div class="pb-row" id="placeKindRow">
+      <span class="k">类型</span>
+      <select id="placeKind"></select>
+      <span class="k" id="placeTowns"></span>
+    </div>
+    <div class="pb-row" id="placeTierRow">
       <span class="k">品阶</span>
       <select id="placeTier">
         <option value="1">下品宗门 · 领 6 格</option>
@@ -388,7 +407,7 @@
     </div>
     <div id="placeState"></div>
     <div id="placeMsg"></div>
-    <div class="pb-hint">移动鼠标择地, 单击落定 · Esc 取消<br>朱砂 = 不可立 · 墨绿 = 可立</div>
+    <div class="pb-hint" id="placeHint">移动鼠标择地, 单击落定 · Esc 取消<br>朱砂 = 不可立 · 墨绿 = 可立</div>
   </div>
 
   <div id="info" class="panel hidden">

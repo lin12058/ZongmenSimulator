@@ -70,6 +70,7 @@
     SEA_TERR: -10, SEA_SETTLE_MIN_SPIRIT: 0.20, SEA_SETTLE_NEAR_LAND: 1,
     SETTLE_VEIN_CENTER_PEN: 40, SETTLE_VEIN_CENTER_PEN2: 20, SETTLE_VEIN_FOOT_PAD: 2,
     DOMAIN_R: { city: 8, town: 6, sect3: 8, sect2: 7, sect1: 6, village: 4, fishing: 4, poi: 0 },
+    EXPAND_R: 10, EXPAND_TYPES: { town: 1, village: 1 },
     TRADE_REACH: 40
   };
   /* A10 一致性校验: 若 config 已加载, 兜底表与真源的键集必须一致 (防止只改一处)。
@@ -1356,6 +1357,32 @@
     return best ? { ok: false, blocker: best } : { ok: true, blocker: null };
   }
 
+  /* ---------- 附属城镇 / 城市扩张 (EXPAND_R) ----------
+     用户原话 (2026-09-23): 「选完宗门后可以进行城市扩张, 建立附属城镇, 但不能距离超过
+     一个区块的边缘的大小, 避免跨太多区块」。
+     判据 = 拿新落点量**本宗中心**: dist <= EXPAND_R ⇒ 放行。
+     边界语义与 domainCheck 同口径: dist === EXPAND_R **允许** (判据用 <=)。
+     为什么锚点恒为本宗而不是「上一座附属城镇」: 链式锚点会让一颗接一颗地串出去,
+     总和仍可跨很多块 —— 与「避免跨太多区块」正相反 (见 mapgen-config.js EXPAND_R 注释)。
+     maxR 由调用方传入 (0/负 = 不限): 「立宗」这条路不传, 「拓土」传 CFG.EXPAND_R。
+     不在这里读 CFG: 将来「按宗门等级给不同扩张半径」只改调用方的取值处一处。
+     ⚠ 与 domainCheck 是**两条独立判据**, 不要合并 —— domainCheck 管「离既有聚落
+       的领地够不够远」, expandCheck 管「离自己的本宗够不够近」, 两者一次都跑。 */
+  function expandCheck(q, r, anchorQ, anchorR, maxR) {
+    var lim = maxR | 0;
+    if (!(lim > 0) || anchorQ == null || anchorR == null) return { ok: true, dist: -1, maxR: 0 };
+    var d = hexDist(q | 0, r | 0, anchorQ | 0, anchorR | 0);
+    return { ok: d <= lim, dist: d, maxR: lim };
+  }
+  /* 扩张模式允许建立的聚落类型 (白名单真源 = CFG.EXPAND_TYPES)。
+     为什么必须白名单: placeSettlement **不校验** type —— 前端传 'city' 就静默得到
+     8 格领地 (等于绕开间距规则)、传 'poi' 得 0 格 (等于可以贴脸建)。 */
+  function isExpandType(type) {
+    var T = CFG.EXPAND_TYPES || {};
+    return !!T[String(type)];
+  }
+  function expandTypes() { return CFG.EXPAND_TYPES || {}; }
+
   function extAddTo(st, i, j) {
     var key = i + ',' + j;
     var arr = extByRegion.get(key);
@@ -2152,6 +2179,10 @@
     archetypeOf: archetypeOf,
     domainRadiusOf: domainRadiusOf,
     domainCheck: domainCheck,
+    /* 扩张 (附属城镇) 判据与类型白名单 —— 同上, 判定只在引擎里, 表经 meta 下发给前端 */
+    expandCheck: expandCheck,
+    isExpandType: isExpandType,
+    expandTypes: expandTypes,
     /* 落点/拆除的派生状态失效 (需求/骨架/道路/足迹) + 道路版本号强制前进 */
     clearRoadSideFor: clearRoadSideFor,
     bumpRoadVer: bumpRoadVer,
