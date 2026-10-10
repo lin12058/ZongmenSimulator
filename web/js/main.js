@@ -1596,6 +1596,7 @@
       var bridge = onWater && !isFish && (WATER_OLD || !WATER_KIND[b.kind]);
       var rec = BI.spriteOf({
         kind: bridge ? '栈桥' : b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
+        lv: b.lv || 1,                            // v4: 演化等级 (人口/紧缺度派生) → 楼/规模
         face: fi.face, water: fi.water, R: R, detail: detail,
         plate: false,                            // R6: 地盘改由城镇色**现画** (见下), 精灵内不再烘地皮色
         onWater: onWater,                        // R5b: 水上格 → 垫干栏木台 (水上人家)
@@ -2350,6 +2351,84 @@
     els.era.textContent = '岁次' + gan + zhi + ' · ' + season;
   }
 
+  /* ============================================================
+   * Tick 框架: 世界时钟显示 (帧 7)
+   *   服务端权威 tick ⇒ 干支 / 季节 / 第几年 全部**由 tick 推导**。
+   *   ⚠ 本地插值用单调墙钟 (performance.now), 绝不用 Date.now()
+   *     (系统时间跳变会让「第 1 年」瞬间跳成「第 40 年」)。
+   *   ⚠ 校准每 CLOCK_SYNC_EVERY_TICKS 个本地 tick 一次, **不是每 tick** ——
+   *     每 tick 一问等于把服务端的懒调度白做了。
+   * ============================================================ */
+  var CLOCK_SYNC_EVERY_TICKS = 10;      // 每 10 游戏日 (≈10s) 校一次绝对 tick
+  var clockBase = null;                 // {tick, monoMs, rate} 最后一次权威校准
+
+  var _GAN = '甲乙丙丁戊己庚辛壬癸', _ZHI = '子丑寅卯辰巳午未申酉戌亥';
+  var _SEASON = '春夏秋冬';
+
+  /* tick → 干支纪年 / 季节 / 第几年 (纯整数, 与服务端 GameClock 同口径) */
+  function eraOfTick(tick) {
+    var ty = Math.floor(tick / 360) + 1;             // 第几年 (1-based)
+    var doy = ((tick % 360) + 360) % 360;            // 年内第几天 (防负)
+    var season = Math.floor(doy / 90);               // 0春 1夏 2秋 3冬
+    var idx = (ty - 1) % 60;                         // 第 1 年 = 甲子 (纯显示约定)
+    return {
+      year: ty,
+      ganZhi: _GAN.charAt(idx % 10) + _ZHI.charAt(idx % 12),
+      season: _SEASON.charAt(season)
+    };
+  }
+
+  /* 用校准基准 + 单调墙钟外推「现在」的 tick (null = 还没校准过) */
+  function clockNowTick() {
+    if (!clockBase) return null;
+    var now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    var rate = clockBase.rate > 0 ? clockBase.rate : 1;
+    return clockBase.tick + Math.floor((now - clockBase.monoMs) / 1000 * rate);
+  }
+
+  function paintClock(tick) {
+    if (!els.era || tick == null) return;
+    var e = eraOfTick(tick);
+    els.era.textContent = '岁次' + e.ganZhi + ' · ' + e.season + ' · 第' + e.year + '年';
+  }
+
+  /* 校准一次: 拉服务端绝对 tick, 记下单调基准 */
+  function clockSync() {
+    if (typeof MC.clock !== 'function') return Promise.resolve(null);
+    return MC.clock().then(function (c) {
+      if (!c || c.err) return null;
+      clockBase = {
+        tick: c.tick,
+        monoMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+        rate: c.ratePerSecond > 0 ? c.ratePerSecond : 1
+      };
+      paintClock(c.tick);
+      return c;
+    }, function (err) {
+      /* ⚠ 失败**只停更**, 不清零 —— 显示旧值远好于显示「0 年」/空白 */
+      console.warn('[clock] 校准失败 (保留上次显示):', err && err.message);
+      return null;
+    });
+  }
+
+  /* 常驻循环: 1s 一次。到了校准点重校, 否则只按本地时钟外推重绘。
+     ⚠ 与 rAF 正交 —— 时钟是低频校准 + 本地插值, 不该进每帧热路径。
+     ⚠ 后台标签页的 `setInterval` 会被浏览器降到 ≥1 次/分钟 ⇒ 回到前台时基准可能已很旧。
+       故 `visibilitychange` 回前台时**立刻重校** (这才是「切回来看到正确时间」的关键)。 */
+  function clockSyncLoop() {
+    clockSync();
+    setInterval(function () {
+      var now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      if (!clockBase || now - clockBase.monoMs > CLOCK_SYNC_EVERY_TICKS * 1000) clockSync();
+      else paintClock(clockNowTick());
+    }, 1000);
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) clockSync();          // 回前台: 基准已旧, 立刻重校
+      });
+    }
+  }
+
   function regenerate(seedString) {
     worldSeed = String(seedString);
     chunkData.forEach(function (_info, key) { renderer.dropChunk(key); });
@@ -2385,7 +2464,15 @@
     cam.tzoom = cam.zoom = 2.2;
     /* ⚠ 这里不再回填任何"种子输入框" —— 手输种子的 UI 已删 (2026-09-16 用户:
        「seed 由服务器统一产生, 不能通过前端产生」)。世界事实由 setWorldInfo 落 UI。 */
-    seedEra(worldSeed);
+    /* Tick 框架: 时间显示改由**服务端时钟**驱动 (帧 7)。
+       ⚠ 换世后必须先**清掉旧世界的校准基准** —— 否则新世界的头几秒会继续显示
+         旧世界的年份 (基准未刷新), 是典型的「换了世界时间却没换」静默错。
+       之后 clockSync() 拉到新基准即自然覆盖。 */
+    clockBase = null;
+    clockSync();
+    /* 未拿到服务端时钟前的兜底 (老服务端无帧 7 / 离线): 保留 seed 派生的装饰性干支,
+       **绝不**用前端自造的时间冒充权威 —— 它只是"还没同步"的占位。 */
+    if (!clockBase) seedEra(worldSeed);
     /* 世界重铸: 旧世界的宗门 id 全部失效 ⇒ 本宗面板回到未立宗态, 点选标记清空。
        卜居一并退出 (落点/校验全作废 —— 在途响应由 placeSeq++ 与世界守卫双重作废)。 */
     enterPlace(false);
@@ -3411,6 +3498,15 @@
          ⚠ fireLogin 传的是**整个 lr**, 这里拆包成 applyMyPlaces(places, townMax)。
          ⚠ 首次登录与换世重登都会走这条钩子 (见 mapclient.fireLogin)。 */
       MC.onLogin(function (lr) { if (lr) applyMyPlaces(lr.myPlaces, lr.townMax); });
+
+      /* ---- Tick 框架: 世界时钟 (帧 7) ----
+         纪律 (设计 §6): **绝不每 tick 一问** —— 那等于把服务端的懒调度白做了。
+         做法 = 每 CLOCK_SYNC_EVERY_TICKS 个本地 tick 校一次**绝对 tick**, 之间用
+         `ratePerSecond` 本地插值 (rAF 里按墙钟外推)。时钟只用**单调**墙钟外推,
+         绝不用 Date.now() 回落 (系统时间跳变会让世界瞬移)。
+         ⚠ 失败只停更, 不清零显示 —— 显示旧值 << 显示「0年」或空白。 */
+      clockSyncLoop();
+
       /* 调试: ?set=1 开局即展开设置弹窗 (headless 无法点齿轮 —— 与 plaqdbg/sel 同类)。
          仅 DEBUG 生效, 不进产品路径。 */
       if (DEBUG && urlParams.get('set') === '1') openSettings(true);

@@ -264,6 +264,21 @@
       }, function (err) { failScript(new Error('引擎脚本解压失败: ' + err.message)); });
       return;
     }
+    /* 帧 7: 世界时钟 (Tick 框架 §10 接线点 #6)。
+       ⚠ 载荷恒**明文** protobuf, 绝不 gunzip (与 Login/Pong/Place 同口径)。
+       ⚠ 解码失败必须 reject 在途请求 —— 否则时钟 Promise 永久悬挂。 */
+    if (type === PB.FRAME.CLOCK_PUSH) {
+      var cr;
+      try { cr = PB.decodeClockQueryResponse(payload); }
+      catch (e) {
+        console.error('时钟响应解码失败', e);
+        failAllClockWaiters(new Error('时钟响应解码失败: ' + e.message));
+        return;
+      }
+      var cw = clockWaiters; clockWaiters = [];
+      for (var k = 0; k < cw.length; k++) { clearTimeout(cw[k].timer); cw[k].resolve(cr); }
+      return;
+    }
     /* 帧 5/6: 落点校验 / 落定 (方案 §4.1)。
        ⚠ 载荷恒**明文** protobuf —— 服务端 SendPlaceAsync 固定 `gzip: false`
        (与 Login/Pong 同口径), 这里绝不能再套 gunzip: 解出来的是明文, 套了必炸。 */
@@ -381,6 +396,47 @@
         if (!wsSend(frame)) {
           var j = scriptWaiters.indexOf(w);
           if (j >= 0) scriptWaiters.splice(j, 1);
+          clearTimeout(w.timer);
+          reject(new Error('WS 发送失败'));
+        }
+      });
+    });
+  }
+
+  /* ============================================================
+   * 帧 7: 世界时钟 (Tick 框架 §10 接线点 #6)
+   *   —— 服务端权威 tick; 客户端纪律 (设计 §6): **别每 tick 一问**,
+   *      每 ~10 tick 校一次绝对 tick, 之间靠 `ratePerSecond` 本地插值。
+   *   —— 未登录也能查 (时钟是世界公开事实, 不含实体数据)。
+   * ============================================================ */
+  var clockWaiters = [];           // [{resolve, timer}]  (查询是「取最新值」, 无需 reject)
+  var CLOCK_TIMEOUT = 5000;
+
+  function failAllClockWaiters(err) {
+    var w = clockWaiters; clockWaiters = [];
+    for (var i = 0; i < w.length; i++) { clearTimeout(w[i].timer); if (w[i].reject) w[i].reject(err); }
+  }
+
+  function clock() {
+    return connect().then(function () {
+      return new Promise(function (resolve, reject) {
+        if (!sock || sock.readyState !== 1) { reject(new Error('WS 未就绪')); return; }
+        var body = PB.encodeClockQuery({ seq: ++seq });
+        var frame = new Uint8Array(1 + body.length);
+        frame[0] = PB.FRAME.CLOCK_QUERY;
+        frame.set(body, 1);
+        var w = {
+          resolve: resolve, reject: reject,
+          timer: setTimeout(function () {
+            var i = clockWaiters.indexOf(w);
+            if (i >= 0) clockWaiters.splice(i, 1);
+            reject(new Error('时钟查询超时'));
+          }, CLOCK_TIMEOUT)
+        };
+        clockWaiters.push(w);
+        if (!wsSend(frame)) {
+          var j = clockWaiters.indexOf(w);
+          if (j >= 0) clockWaiters.splice(j, 1);
           clearTimeout(w.timer);
           reject(new Error('WS 发送失败'));
         }
@@ -524,6 +580,8 @@
     loginAgain: loginAgain,
     /* R11: 引擎脚本 (WS 下发, 前端按 seed 自算地形) */
     requestScript: requestScript,
+    /* Tick 框架: 世界时钟 (帧 7) */
+    clock: clock,
     /* 玩家宗门放置 (帧 5/6) */
     placeCheck: placeCheck,
     placeCommit: placeCommit,

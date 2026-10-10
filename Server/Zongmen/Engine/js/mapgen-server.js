@@ -522,6 +522,16 @@
     },
     /* 道路版本号强制前进 (拆除/外部改动后手工推进时用) */
     bumpRoadVer: function () { return MG.bumpRoadVer(); },
+    /* ---- P2 城市迭代演化器 (city-evo.js · global.CityEvo) ----
+       ⚠ 同上铁律: 每个出口都要在 JsEngineHost.Call 加 case。
+       ⚠ 这里**不能**在赋值时就读 global.CityEvo —— bundle 序是
+         `… mapgen-server.js, city-evo.js`, 本文件求值那一刻 CityEvo 还不存在。
+         用 getter 延迟到**首次取用**再校验 (缺文件时给清晰错误, 而不是 C# 侧 NullReference)。 */
+    get CityEvo() {
+      var CE = global.CityEvo;
+      if (!CE) throw new Error('city-evo.js 未加载 (bundle 序应为 noise, mapgen-config, mapgen, mapgen-server, city-evo)');
+      return CE;
+    },
     /* 统计/自检钩子 */
     _countVeins: function () { return JSON.stringify({ n: MG.countVeins() }); }
   };

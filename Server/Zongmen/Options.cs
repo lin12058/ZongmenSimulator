@@ -29,6 +29,13 @@ public sealed class ZongmenOptions
 
     /// <summary>js 沙箱脚本目录 (noise.js/mapgen.js/mapgen-server.js)。</summary>
     public string? EngineJsDir { get; set; }
+
+    /// <summary>
+    /// 世界时钟与 Tick 演化框架配置 (appsettings.json "Zongmen:Tick" 节)。
+    /// 详见 <see cref="Time.TickOptions"/> 与 docs/游戏时钟与Tick演化框架方案.md。
+    /// ⚠ 总开关默认 true, 但**只有绑定世界后才真正开始推进** —— 未绑定时泵只空转。
+    /// </summary>
+    public Time.TickOptions Tick { get; set; } = new();
 }
 
 /// <summary>静态解析器: 定位工程根 / web / 引擎脚本 / 数据库。</summary>

@@ -25,7 +25,7 @@ public static class MapWsHandler
        适配层 (落库/JSON 出口), 浏览器侧不需要, 故不下发。 */
     private static readonly string[] EngineScriptOrder = ["noise.js", "mapgen-config.js", "mapgen.js"];
 
-    public static void Map(WebApplication app, MapWorldService svc, string engineJsDir)
+    public static void Map(WebApplication app, MapWorldService svc, string engineJsDir, Zongmen.Time.TickPump? pump = null)
     {
         app.MapGet("/ws/map", async (HttpContext ctx) =>
         {
@@ -75,6 +75,11 @@ public static class MapWsHandler
 
                         case WsFrame.PlaceCommit:
                             await HandlePlaceCommitAsync(ws, svc, session, recvBuf, count, ctx.RequestAborted);
+                            break;
+
+                        /* ---- Tick 框架: 世界时钟 (方案 §10 接线点 #6) ---- */
+                        case WsFrame.ClockQuery:
+                            await HandleClockAsync(ws, pump, recvBuf, count, ctx.RequestAborted);
                             break;
 
                         default:
@@ -356,6 +361,48 @@ public static class MapWsHandler
     /// <summary>放置帧的发送口 (恒明文; 与 Tile 的 gzip 约定区分开 = 客户端按帧类型判别)。</summary>
     private static Task SendPlaceAsync<T>(WebSocket ws, byte type, T msg, CancellationToken ct)
         => SendFrameAsync(ws, type, ProtoCodec.SerToByte(msg), ct, gzip: false);
+
+    /* ============================================================
+     * Tick 框架: 世界时钟 (2026-09-26 方案 §10 接线点 #6)
+     * ------------------------------------------------------------
+     * 帧 7 = ClockQuery (请求) / ClockPush (响应同号)。
+     * ⚠ **恒明文, 不 gzip**: 包 < 64 B, 压缩净亏; 且帧类型即压缩约定不可混用。
+     * ⚠ **不鉴权**: 时钟是「世界公开事实」(没登录也该能看到现在是第几年),
+     *   而且它不泄露任何实体数据。未绑定世界时回 tick=0 + Err, 不抛。
+     * ⚠ 读 Snapshot() 是**无锁只读** (读一个 volatile long), 高频轮询也不碰 V8 门闩。
+     * ============================================================ */
+    private static async Task HandleClockAsync(
+        WebSocket ws, Zongmen.Time.TickPump? pump, byte[] buf, int count, CancellationToken ct)
+    {
+        uint seq = 0;
+        try
+        {
+            if (count > 1)
+                seq = ProtoCodec.DesFromByte<ClockQueryRequest>(buf.AsSpan(1, count - 1).ToArray()).Seq;
+        }
+        catch { /* 载荷损坏/为空: 照样回当前时钟, seq=0 */ }
+
+        ClockQueryResponse resp;
+        if (pump is null)
+        {
+            resp = new ClockQueryResponse { Seq = seq, Err = "时钟未启用" };
+        }
+        else
+        {
+            var s = pump.Snapshot();
+            resp = new ClockQueryResponse
+            {
+                Seq = seq,
+                Tick = s.Tick,
+                Year = s.Year, Month = s.Month, Day = s.Day, Season = s.Season,
+                SeasonName = s.SeasonName, MonthName = s.MonthName, Desc = s.Desc,
+                RatePerSecond = s.RatePerSecond,
+                MonoMs = Zongmen.Time.GameClock.NowMonoMs(),
+                Pending = s.Pending,
+            };
+        }
+        await SendFrameAsync(ws, WsFrame.ClockPush, ProtoCodec.SerToByte(resp), ct, gzip: false);
+    }
 
     /* ---- 帧收发 ---- */
     private static async Task SendFrameAsync(

@@ -238,11 +238,38 @@ async function checkMinimap() {
   check('pb.js 有 SCRIPT 帧 + ScriptPack 编解码',
     /FRAME\s*=\s*\{[^}]*SCRIPT:\s*4/.test(pbSrc) &&
     pbSrc.includes('encodeScriptRequest') && pbSrc.includes('decodeScriptPack'));
+  /* 帧 7 = 世界时钟 (Tick 框架 §10 接线点 #6)。三个契约点:
+       ① 帧号 7, 请求/响应同号 (CLOCK_QUERY / CLOCK_PUSH);
+       ② 编解码器存在 (encodeClockQuery / decodeClockQueryResponse);
+       ③ Tick 字段是 **ZigZag** —— 与其余 int 不同, 混用会读出「看着像数字但全错」的值。 */
+  check('pb.js 有 CLOCK 帧 7 且 Tick 走 ZigZag',
+    /CLOCK_QUERY:\s*7/.test(pbSrc) && /CLOCK_PUSH:\s*7/.test(pbSrc) &&
+    pbSrc.includes('encodeClockQuery') && pbSrc.includes('decodeClockQueryResponse') &&
+    /m\.tick\s*=\s*\(t\.wire\s*===\s*0\)\s*\?\s*r\.zz\(\)/.test(pbSrc));
+  const mcSrc = strip(read('web/js/mapclient.js'));
+  check('mapclient.js 帧 7 解码 + 公开 clock() 出口',
+    /FRAME\.CLOCK_PUSH/.test(mcSrc) && /function clock\s*\(/.test(mcSrc) &&
+    /clock:\s*clock/.test(mcSrc));
+  const mainSrc = strip(read('web/js/main.js'));
+  /* ⚠ 「本地插值不用 Date.now」的真实契约是: **主基准必须是单调时钟**
+     (performance.now), `Date.now()` 只能作为 performance 不可用时的兜底。
+     故断言分两步: ①体里必须有 performance.now ②`Date.now()` 若出现,
+     必须落在 `: Date.now()` 这种三元兜底位 (即前面是冒号)。 */
+  const clockNowBody = (mainSrc.match(/function clockNowTick[\s\S]{0,400}?\n  \}/) || [''])[0];
+  const dateUsageOk = !/Date\.now\(\)/.test(clockNowBody) ||
+                      /:\s*Date\.now\(\)/.test(clockNowBody);
+  check('main.js 时钟走服务端 (帧 7) 且主基准是单调时钟',
+    /clockSyncLoop\s*\(/.test(mainSrc) && /clockBase/.test(mainSrc) &&
+    /eraOfTick/.test(mainSrc) &&
+    clockNowBody.includes('performance.now') && dateUsageOk);
   const cs = read('Server/Zongmen/Domain/MapMessages.cs');
   const ws = read('Server/Zongmen/Web/MapWsHandler.cs');
   check('服务端帧类型 Script=4 与处理器齐备',
     /Script = 4;/.test(cs) && ws.includes('HandleScriptAsync') &&
     ws.includes('EngineScriptOrder'));
+  check('服务端帧类型 ClockQuery=7 与处理器齐备',
+    /ClockQuery\s*=\s*7;/.test(cs) && /ClockPush\s*=\s*7;/.test(cs) &&
+    ws.includes('HandleClockAsync') && /ClockQueryResponse/.test(cs));
 
   /* 地形复算: 用 Engine/js 原算法 (与前端同一份), 按模块真实的抽样规则复算。
      ⚠ R12 起抽样格是「世界对齐」的 { q%m==0 && r%m==0 } (m 由 SAMPLE_CELLS_MAX 反推),

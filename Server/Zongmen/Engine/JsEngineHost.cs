@@ -97,6 +97,21 @@ public sealed class JsWorldVm : IDisposable
                 "domainCheckJson" => (string)_svc.domainCheckJson(args[0], args[1], args[2]),
                 "expandCheckJson" => (string)_svc.expandCheckJson(args[0], args[1], args[2], args[3], args[4]),
                 "_countVeins" => (string)_svc._countVeins(),
+                /* ---- P2 城市迭代演化器 (Engine/js/city-evo.js · global.CityEvo) ----
+                   ⚠ 无状态纯函数: CityState 台账真源在 C# (Storage/CityStateStore.cs),
+                   VM 只做「入参 state → 出参 state」的转换 (见 city-evo.js 文件头契约)。 */
+                "cityNewStateJson" => (string)_svc.CityEvo.newStateJson(args[0], args[1], args[2], args[3], args[4], args[5], args[6]),
+                "cityMetaJson" => (string)_svc.CityEvo.metaJson(args[0], args[1], args[2], args[3]),
+                "cityEvolveJson" => (string)_svc.CityEvo.evolveCityJson(args[0], args[1], args[2], args[3]),
+                "cityPriceLayerJson" => (string)_svc.CityEvo.priceLayerJson(args[0], args[1]),
+                "cityTradeEdgesJson" => (string)_svc.CityEvo.tradeEdgesJson(args[0], args[1]),
+                "cityMigrateEdgesJson" => (string)_svc.CityEvo.migrateEdgesJson(args[0], args[1]),
+                "cityHarvestBuildJson" => (string)_svc.CityEvo.harvestAndBuildJson(args[0], args[1]),
+                "citySettlementsJson" => (string)_svc.CityEvo.settlementsJson(args[0], args[1]),
+                /* ★ v4 建筑计划 (b 方案): 渲染权威 = 骨架 ⊕ 计划 (人口驱动)。
+                   overlay 为空串时逐字节等同 settleJson。 */
+                "citySettlePlanJson" => (string)_svc.CityEvo.settlePlanJson(args[0], args[1], args[2]),
+                "cityConstantsJson" => (string)_svc.CityEvo.constantsJson(),
                 _ => throw new InvalidOperationException($"未知 JS 函数: {fn}")
             };
         }
@@ -140,7 +155,10 @@ public sealed class JsEngineHost : IDisposable
         var sb = new StringBuilder();
         sb.AppendLine("'use strict';");
         sb.AppendLine("var window = globalThis; var global = window; var self = window;");
-        foreach (var f in new[] { "noise.js", "mapgen-config.js", "mapgen.js", "mapgen-server.js" })
+        /* ⚠ bundle 序即加载序, 不得重排: mapgen.js 在**加载时**捕获 global.NoiseLib 与
+           global.MapGenConfig(`var NL = global.NoiseLib;`), 排错序 = 静默跑旧参数。
+           city-evo.js 依赖 global.MapGen ⇒ 必须排在 mapgen.js 之后。 */
+        foreach (var f in new[] { "noise.js", "mapgen-config.js", "mapgen.js", "mapgen-server.js", "city-evo.js" })
         {
             var p = Path.Combine(jsDir, f);
             if (!File.Exists(p)) throw new FileNotFoundException($"缺少世界脚本: {p}");

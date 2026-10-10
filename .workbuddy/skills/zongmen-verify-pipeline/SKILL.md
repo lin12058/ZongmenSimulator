@@ -1,85 +1,134 @@
----
-name: zongmen-verify-pipeline
-description: 宗门模拟器 demo3 的构建→启动后端→三层回归验证→headless 截图→清理停服完整管线。任何涉及 Server/Zongmen (C#) 或 web/ (前端 JS) 的代码改动后，按本流程验证。
+
 ---
 
-# 宗门模拟器 · 验证管线
+## 43. Tick 框架（世界时钟 / 定时演化调度）的验证姿势 + 七条新坑（2026-09-26~27）
 
-> ✅ **地图生成重构已完成（2026-09-12）**：`Engine/js/mapgen*` 的「道路 A\* → 带权重 BFS」与
-> 「聚落随机落点 → 勘测/选址/生长三段式 + 建筑足迹落库 + 贸易网络」已全部落地并通过回归。
-> A\* 时代产物（`astar`/`Heap`/`roadCost`、`w3_astar_budget.mjs`、`bench_guard_frontier.mjs`）**已删除**，
-> `guard=12000` 的说法作废；道路剪枝现为 **120 权重 / 40 步**（`ROAD_COST_MAX`/`ROAD_STEPS_MAX`）。
-> 相关参数唯一真源 = `Engine/js/mapgen-config.js`（见 §11 第 1 条，**漏加载它会静默跑错口径**）。
-> 已记录的事实/戒条（如「改了世界内容就要清 `db/zongmen.sqlite`」）继续复用。
+> 全文设计 → `docs/游戏时钟与Tick演化框架方案.md`（v2.1）；**进度真源** → `待办事项/Tick框架开发进度.md`。
+> 本节只讲**怎么验**与**踩过的坑**。
 
-## 1. 编译
-```bash
-dotnet build Server/Zongmen/Zongmen.csproj -v q
+### A. ★ 别起服务端验调度器 —— 用一个「引用生产工程」的控制台宿主
+
+调度器/时钟/相位/落库这些**不依赖 V8、不依赖 Web**，起服务端验是最慢最脆的路。
+
+**做法**：`verify/tickprobe/`（一个 `csproj` 控制台，`ProjectReference` 指向
+`..\..\Server\Zongmen\Zongmen.csproj`），从 stdin 读**多行 JSON**（一行一个 op），逐行回 JSON。
+判据脚本（`.mjs`）`spawn` 它一次，喂几百个 op 走完所有断言 —— **不必 fork 几百次**。
+
+```js
+// check_tick_lazy.mjs 里的宿主桥（一次进程跑完全部断言）
+class Probe {
+  constructor() {
+    this.child = spawn('dotnet', ['run', '--no-build', '-v', 'q', '--project', PROJ],
+      { cwd: ROOT, stdio: ['pipe','pipe','inherit'] });
+    // stdout 按 \n 切行 → 顺序配给 waiters（判据是串行的，够用）
+  }
+  send(obj) { return new Promise(res => { this.waiters.push(res);
+    this.child.stdin.write(JSON.stringify(obj) + '\n'); }); }
+}
 ```
-- 必须指到 `.csproj`（给目录会报 MSB1009）。
 
-## 2. 启动后端（仓库根执行）
-```bash
-./Server/Zongmen/bin/Debug/net8.0/Zongmen.exe > verify/server_run.log 2>&1   # run_in_background
-```
-- 端口 8140（appsettings.json "Zongmen.Port"）。
-- 探活：`curl -s --noproxy "*" http://127.0.0.1:8140/api/map/stats`
-- **本机 curl 必须 `--noproxy "*"`**，否则环境代理报 upstream connect failed 误判服务死。
-- 改过 `Server/Zongmen/Engine/js/*.js` 后必须重启后端才生效（bundle 在 VM 构造时读取）。
+⚠ **必须 `--no-build`** —— 否则每次 `dotnet run` 都重新编译（十几秒），判据会慢到没法用。
+先 `dotnet build verify/tickprobe/tickprobe.csproj` 再跑。
 
-## 3. 三层验证
-```bash
-node verify/verify_map.mjs        # 944 项契约: Node 加载同份 Engine/js 作参考 + HTTP/WS 走真实 protobuf+gzip 链路
-node verify/w1_client_revs.mjs    # 客户端 revs 记账: 真实服务端取帧 + 驱动真实 mapclient.js
-node verify/w2_concurrency.mjs    # 新 seed 冷启 24 路并发 + liveSeeds 有界 + 配置生效
-node verify/w3_bfs_road.mjs       # 道路 BFS 契约: 权重表 / 双预算上界 / 权重累加自洽 / 邻域剪枝全量 null / 下界剪枝不改路径 / 确定性(重复+跨实例) / 建路率+耗时 (离线, 不需起服务)
-node verify/w4_revs_at_scale.mjs  # revs 契约 + 毒块恢复 (纯 Node 120 块, 替代跑不动的 CDP 竞态回归)
-node verify/w5_sprite_range.mjs   # 立体精灵索引契约 (与图集/着色器分段一致, 离线)
-node verify/frontend_smoke.mjs    # meta 常量 + HTTP meta/tile + 几何往返 ±1000 格 + DOM id/静态置脏/小地图(R12)/色板 契约
-node verify/scan_poison.mjs       # 广域抓毒块 (1681 块 bad=0); 例: node ... 42 '[-20,20,-20,20]'
-node --check web/js/*.js          # 前端语法
+⚠ **参照系不能是被测规则自己**（§32 的老教训）：`simulate` op 里推进 job 必须调**生产代码**
+`sched.CommitSuccess(j, t)`，**别在判据里自己重写一遍「下一跳怎么算」** —— 正是这条让
+`check_tick_lazy` 抓到了哨兵溢出 bug（见 D1）。
+
+### B. ⚠ 源码守卫**先剥注释**（比 §36 更狠的一次）
+
+`check_tick_job_persist.mjs` F5 要断言「相位钥匙用线上名，绝不用 `kind.ToString()`」，
+而 `TickJobRegistry.cs` 的**注释**里正好写着「绝不能用 `kind.ToString()`（枚举名）」——
+扫描器直接把注释也算命中 ⇒ **假阳性**。修法：
+
+```js
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
 ```
-- **全套基线（一次跑全，2026-09-12 重测）**：`verify_map 1206 项` + `w3_bfs_road 7 项断言` +
-  `w1/w2/w4/w5 + frontend_smoke` 全绿；另 `scan_poison 1681 块 bad=0`。
-  （verify_map 由旧基线 944 涨到 1206，是新增 settle 层——城镇足迹/建筑/产出的三方对照断言。
-  **数字变了不是回归**，比对时认「结果: 全部通过 ✔ + 退出码 0」，别拿旧数字当判据。）
-- `frontend_smoke.mjs` 里有几条**静态契约检查**（改前端 UI 状态 / 色板 / 协议字段时最有用，且不依赖浏览器）：
-  - **DOM id 契约**：JS 里 `$('x')`/`getElementById('x')` 引用的 id 必须在 `index.html` 定义；
-  - **静态层置脏契约**：`showVeins`/`showLabels` 的运行时改写、以及每个 `classList.toggle('off')`
-    开关，都必须伴随 `forceStaticDirty()`/`markStaticDirty()`（否则相机静止时点了没反应 —— N12 的真实 bug）；
-  - **小地图契约（R12 起已换口径）**：旧实现每 1.5s 轮询 HTTP `/api/map/fields`（132×88 后端采样）
-    直接撞请求速率上限 ⇒ **整体退役**，`mapclient.fieldGrid` 已删，前端零 HTTP。现检查 = 源码守卫
-    （不得出现 `/api/map/fields`、不得残留旧符号 `mmData/mmCam/requestMinimap…`、`main.js` 只经
-    `MiniMapVein` 单点注入）+ 用 `Engine/js` 复算「前端自算地形」抽样上色（0 越界 + ≥3 种地貌色）。
-    历史 N11「客户端读 `mmData.q1/r1` 恒 undefined ⇒ 小地图自上线起一直是空框」的教训保留在 §9；
-  - **色板契约**：五行/异灵根配色由 `metaJson` 的 `elementRGB`/`variantRGB` 单点下发，
-    断言与 `Engine/js/mapgen.js` 的 `ELEMENT_RGB`/`VARIANT_RGB` 逐值相同，并守卫 `main.js`
-    优先读 `geo.elementRGB`/`geo.variantRGB`。**改色板只改 `mapgen.js` 一处。**
-  - **解码字段契约**：从 `pb.js` 抽出 `resp/cm/st/lr` 的产出字段集，扫描前端全部属性读取并断言命中
-    —— 自动抓 N11 那一类「读了服务端从未下发的字段」。报 `main.js:resp.xxx` 时先确认服务端是否真下发，
-    再决定补解码还是改白名单（白名单仅用于「客户端本地 memo 字段」，如 `cm.elementRGB`）。
-- ⚠️ **改了 `Engine/js/mapgen.js` 的「地形/精灵/群系」产出后，必须清掉 `db/zongmen.sqlite`**：
-  chunk 载荷里含精灵索引与格底数据，旧代码落盘的行会与新参照不符（`verify_map` 会红）。
-  region/road 不受影响（region 不落库，且 chunk 不含道路）—— 这是当初 A* guard 改动「无需清库」的原因。
-  清理方式：停服 → 把 `db/zongmen.sqlite*` 移到仓库外（可复原）→ 重启，服务会按需重建。
-- **CDP 类脚本在本机跑不动**（`cdp_pan_race.mjs` / `cdp_probe.mjs` / `cdp_screenshot.mjs` 的长驻 spawn 会被 SIGTERM）：
-  别在它们身上耗时间。毒块/竞态链路的回归已由 **w4_revs_at_scale.mjs**（纯 Node，阶段3 断言「丢弃 revs 后必然全量重发且逐字节一致」）替代。
-- **大范围回归（不复制代码，直接复用 verify_map）**：
-  `node verify/verify_map.mjs http://127.0.0.1:8140 '["42"]' '[[-16,3],[50,-51],...]'`
-  seeds/blocks/tiles 三个参数可覆盖（默认仍是 2 seed × 6 块）。实测 100 块 ±80 = 6259 项 10.9s；
-  换全新 seed 跑 60 块 ±70 强制冷生成 = 3921 项 3.5s —— 用来校验「大坐标 qrel/rrel 偏移 + 五图层编码」，
-  比默认 6 块强得多，改坐标/编码相关代码后建议跑一轮。
-- **验前先确认服务已起**（除 w3 是纯离线）。
-- **源码覆盖（已完成，勿重复扫）**：C# 13 源文件 + 前端 5 JS（`main`/`renderer`/`textures`/`mapclient`/`pb`）
-  + 引擎 3 JS（`noise`/`mapgen`/`mapgen-server`）+ `noiselib.js` + `web/server.js` + `index.html` 均逐文件复核过。
-  两个易被误判为问题的文件：`web/js/noiselib.js` 是**有意复制**的贴图专用噪声（与 `Engine/js/noise.js`
-  位级一致，纯视觉、不需同步，非隐患）；`web/server.js` 是已标注的「旧版预览备用」静态服务（8137），无害。
-- 全绿标准：`结果: 全部通过 ✔`，退出码 0。
-- 改 `web/js/mapclient.js`（revs/连接状态机）务必跑 `w1_client_revs.mjs` —— `verify_map.mjs` 只覆盖服务端契约，**覆盖不到客户端记账**。
-- ⚠ **`w3_bfs_road.mjs` ⑦ 的两条「墙钟阈值」是机器绝对速度门槛，跨机必红，别当回归**：第 3 慢单 region < 400ms / 最慢 < 500ms。实测接手机 i7-6700HQ（2.6GHz 移动四核 / 15.8G / Win10 1903）第 3 慢 **550ms** / 最慢 **936ms** ⇒ 2 项失败，而**功能类 8 项 + 建路率 95.6% 全过**。换机器复验时先看「功能断言是否全过」，再按本机基线解释 ⑦；要让它真能跨机，应改成「先跑一段固定 CPU 基准，再按倍率缩放阈值」的相对校准。
-- 改缓存/并发（`blockLayersJson`/`roadVer`/`BuildOnce`/VM 池）跑 `w2_concurrency.mjs`。
-- 改 `Engine/js/mapgen.js`（尤其 road/城镇/贸易）必须跑 `w3_bfs_road.mjs` + `check_preview_settle_road.mjs`。
-- 大范围排查空白块/毒块用 `scan_poison.mjs`（注意耗时：1681 块 ≈ 65s）。
+
+⚠ `verify/frontend_smoke.mjs` 的 `strip` 是 `.replace(/\/\*[\s\S]*?\*\//g, ' ')` —— 换成了
+**空格**不是空串。写正则时要考虑到（`\n  }` 这类「行尾 + 缩进」的模式会被影响）。
+
+### C. ⚠ 判据自己的**数值断言**会错：桶分布用**卡方**，不用 `max/min`
+
+`check_tick_phase` 要验「相位在 `% PeriodTicks` 上均匀」。第一版写
+`max(桶).min(桶) < 2.0` —— **N=2000 落 90 桶时实测 2.615，属正常采样方差**，直接假红。
+
+**正解 = 卡方检验**：`χ² = Σ (O-E)²/E`，`E = N/桶数`，`df = 桶数-1`，
+与临界值比（df=89 时 χ²≈86.4 完全正常）。**任何「分布均匀」的断言都别用极值比** ——
+它随样本量剧烈波动，样本越大越容易假红。
+
+### D. ★★ 两个判据抓出的**真实生产 bug**（都是「不报错」的那种）
+
+**D1. 吊销哨兵溢出 ⇒ 相位错乱**
+`ConcurrentTickQueue.AdvanceTo` 收集后把 `job.NextTick` 置为**吊销哨兵**
+`long.MaxValue`（防并行重排时同一 job 被收集两次）。而 `CommitSuccess` 原本调
+`_registry.NextDue(job, nowTick)` 算下一跳 ⇒ `long.MaxValue + Period` **整数溢出成负数**
+⇒ 命中「兜底：`next <= nowTick`」分支 ⇒ 下一次到期是个随机负数 ⇒ job 立刻被再收集。
+**症状**：`check_tick_lazy.mjs` B5 断言「相邻命中间隔严格 == period」失败，
+实测间隔出现 **8 / 12 / 46 / 342** 这种不规则值。**不报错**，只是演化节奏乱掉。
+**正解**：`job.NextTick = nowTick + job.PeriodTicks`（复位哨兵 + 严格 `+=Period`，
+**不读旧值** —— 命中点恒为 `firstDue + k*Period`，此刻 `nowTick` 本身就是命中点）。
+另在 `NextDue` 加防御：`if (NextTick >= RevokedTick - PeriodTicks) return nowTick + PeriodTicks;`。
+
+**D2. 相位钥匙用**枚举名**而不是**线上名** ⇒ 改个枚举成员名就让全世界相位漂移**
+`PhaseHash.PhaseOf(seed, entityId, kind, period)` 的 `kind` 参数，原本传
+`kind.ToString()`（`DemoHeartbeat`），而 `TickJobStore` 落库存的是 **`KindNames.Of(kind)`**
+（`demoHeartbeat`）。两者派生的相位**不同** ⇒ 重启后对账/重建按线上名复现出**另一个**相位。
+**症状**：`check_tick_lazy` B4 期望值算错（258 vs 257），一路追到源码才发现。
+**正解**：一律 `KindNames.Of(kind)` —— **持久化契约的键必须与派生键同源**。
+守卫：`check_tick_job_persist` F5 + `check_tick_queue_threadsafe` F15。
+
+⚠ **这两条的共同教训**：判据要断言「**恒等式**」（间隔严格 == period；两条路径派生的相位必须相等），
+而不是「大概对」—— 极值/近似断言会放过这类**静默错乱**。
+
+### E. ⚠ 并发不变量要在**真 OS 线程**上打
+
+`check_tick_queue_threadsafe.mjs` 的 `queueThreads` op 用 `System.Threading.Thread`
+（**不是** `Task.Run`）并行 `Push` + 并行 `AdvanceTo`，用 `ConcurrentDictionary`
+记 `collected` 与 `duplicates`，断言：**无重复收集 / 无丢失 / 计数恒等 / 堆序自检**。
+规模：8 线程 × 2000 job = 16000，duplicates=0。`Validate()`（索引表 ↔ 堆一一对应 + 堆序自检）
+在每次操作后都可调 —— 这是「R11 线程安全」的**唯一**硬证据。
+
+### F. ⚠ 「服务端进程随 shell 会话退出」——用 `run_in_background` 别用 `&`
+
+用 `./Zongmen.exe > log 2>&1 &` 起，**tool call 一返回进程就没了**（表现为
+「刚启动就 connection refused」，日志却写着 `Application started`）。
+正解：Bash 工具 `run_in_background=true`。
+
+### G. ⚠ `TickJobStore.Load` 只取 `Enabled=1` 是**正确行为**，别当缺陷
+
+「停用的 job（连续失败 `MaxFails` 次）不该在重启后复活」⇒ SQL 里有
+`WHERE Seed=$s AND Round=$r AND Enabled=1`。
+写判据时若把一个 `Enabled=false` 的 job 也算进「应该被载入」，就会假红
+（第一版 `check_tick_job_persist` A9 就是这么错的）。**单列一条断言**（`disabledFiltered`）
+验它被正确过滤，而不是把它当漏行。
+
+### H. ⚠ 前端「服务端权威量」的三条纪律
+
+帧 7 世界时钟（`ClockQuery`/`ClockPush`，**明文不 gzip**，**不鉴权** —— 时钟是世界公开事实）：
+
+1. **别每 tick 一问**：每 ~10 tick 校一次**绝对 tick**，之间用 `performance.now()` **本地插值**
+   （`Date.now()` 只作 `performance` 不可用时的兜底）。每 tick 一问 = 把服务端懒调度白做了。
+2. **校准失败只停更、不清零**：显示旧值远好于显示「0 年」/空白。
+3. **换世必须先清基准**：`regenerate()` 里 `clockBase = null` —— 否则新世界头几秒
+   继续显示**旧世界**的年份（「换了世界时间却没换」，典型静默错）。
+
+### I. ⚠ 帧 7 的 `Tick` 字段是 **ZigZag**（与同消息其余 int 不同）
+
+`ClockQueryResponse`：`Seq/Year/Month/Day/Season/RatePerSecond/MonoMs/Pending` 是普通 varint，
+**只有 `Tick` 是 `sint64`（ZigZag）**（因为 tick 理论可为负 —— 见 `GameClock` 的负 tick 防御）。
+前端 `pb.js` 里 `case 2: m.tick = (t.wire === 0) ? r.zz() : 0;`
+⚠ 混用会读出「看着像数字但全错」的值（同 §B 那段注释的警告）。
+`frontend_smoke.mjs` 已加源码守卫钉死这一处。
+
+### J. 判据注册与跑法
+
+五条离线 `check_clock` / `check_tick_phase` / `check_tick_lazy` /
+`check_tick_queue_threadsafe` / `check_tick_job_persist`（每条 ~2s，全绿）；
+一条在线 `ws_clock_probe`（只读不登录，等 2.5s 采第二点验「时钟在走」）。
+⚠ `run_regression.mjs` 的 `--only=` / `--skip=` 是**子串匹配**，**逗号分隔无效** ⇒ 一次一个。
+1681 块 ≈ 65s）。
   ⚠️ **它的 BASE 默认写死 8140**；对着非 8140 的实例跑必须显式传 baseUrl，否则每块都 timeout
   并打印 `BAD ... timeout(可能解码失败)` —— 那是「连错端口」的假 BAD，不是毒块（本次踩过）。
 - `w1` 依赖 Node 原生 `WebSocket`/`DecompressionStream`/`CompressionStream`/`Blob`（Node ≥ 22 自带），无需浏览器。
@@ -1306,3 +1355,81 @@ C# **不镜像**，前端经 `meta.expandR/expandTypes` 读）。验证同 §41.
 来自**不注入 ext 的裸引擎**。段 H 必须把本宗用 `MG.setExternalSettlements([...])` 补进去，
 才能与服务端口径一致（否则 `domainCheck` 少算本宗 ⇒ 候选点被服务端判 `too_close`）。
 
+
+---
+
+## 44. Δ 拆分不变性 (f(state,dt)) 的**判决实验**姿势 —— 抓「不报错但结果错」的四步法（2026-09-27）
+
+> 适用场景：任何「按 dt 积分」的演化公式（Verhulst 人口、资源库存、成熟度累积……），
+> 且**设计意图**是「dt 拆分不改变演化速度」（L0 摊批的前提）。
+> 交付物实例 → `verify/evo/city_evo_sim.mjs`；判决证据 → `verify/evo/evidence/`（含 README）。
+
+### A. ★ 先纠正判据形式，否则会去追一个**不存在**的 bug
+
+方案文档写 `step(s,90) ≡ 9×step(s,10)`，**字面**读像「每子步都从 s 重新出发」。
+那是**跑 90 天 vs 跑 10 天**，数学上**必不相等** —— 实测重喂口径 Δ=37，与子步数同阶。
+
+**正确形式 = 连续累加**：`s` 被上一次的结果替换。
+
+```js
+const one = evolve(s0, A);
+let acc = s0;
+for (let k = 0; k < A / B; k++) acc = evolve(acc, B);   // ← acc 喂回去, 不是 s0
+```
+
+⇒ **验证姿势**：先写一个**对照实验**把「重喂」和「连续累加」并排打出来。
+若两者都「不等」，说明判据形式错了；只有连续累加才是要断言的那个量。
+
+### B. ★ 残差归因必须做**消融实验**，不要靠猜
+
+对同一段真实代码，造 3~4 个**只差一个变量**的口径，一次跑出表来：
+
+| 口径 | 手段 | 结论 |
+|---|---|---|
+| `freeze` | 把 K 从「每步重算」改成「首算后冻结」 | Δ 是否归零 ⇒ 判定 K 是不是根因 |
+| `freeze + age 仍累加` | 只冻结 K, 保留 age 累加 | Δ 是否归零 ⇒ 判定 age 累加是否独立贡献 |
+| `roll −maturity` | 保留滚动, 去掉成熟度项 | 排除 maturity 是根因 (实测**不降反升** ⇒ 排除) |
+| `floatbase` | popBase 不取整 | 排除取整台阶是根因 (实测**完全无差** ⇒ 排除) |
+
+**判据: 只有消融后 Δ 归零的那个变量, 才是根因。** 我这次靠它一次锁定了
+「K 在批间重算」, 同时**排除了** maturity 和取整两个看起来很像的候选。
+
+### C. ★ 两个极易漏的坑（都是「不报错但结果错」）
+
+1. **漂移源可能有两个, 冻结必须一起钉**。
+   `K = f(basePop, age)` 里 `basePop` 和 `age` **都会随批变**。
+   只冻 `basePop` 时 Δ 仍 =21（与完全滚动几乎一样）—— 因为 `maturity(age)` 继续读累计 age。
+2. **`dt=0` 必须严格 no-op**。
+   tier 升级/状态迁移若没有 `dt>0` 门控, 「pop 已越阈值但 tier 落后」的城会在**零长步**被追升。
+   实测 seed=alpha 的 `-1_-1_0`（sect pop=5390 tier=1 ⇒ 被追升到 2）。
+
+### D. ★ 用 `--diag` 把「取整后仍差多少」逐城打出来, 而不是只看聚合值
+
+聚合的最大值会骗人。逐城打 `id / type / pop0 / Δ / K单步 / Kmin / Kmax / K漂移` 后，
+相关性一眼可见（Δ=20 的城 K漂移 1.196；Δ=0 的城 K漂移 ≈1.000）。
+**做法**：给主脚本加 `--diag-b1` 开关，诊断代码留在交付物里（不是一次性脚本）。
+
+### E. ★ 多种子扫描是**必须**的, 单种子全绿会骗你
+
+`dt=0` 那个 bug **只有 seed=alpha 触发**；city-evo-sim-1 等 5 个种子全绿。
+**姿势**：`for s in a b c d e f; do node sim.mjs "$s" 1 | grep 结果; done` —— 一秒钟的事。
+
+### F. ★ 断言别写成**空真**（vacuous pass）
+
+原 E1：随机挑 30 座城的 `粮` 库存做搬运 ⇒ 但一年后粮库存普遍为 0 ⇒ `settleTrade` 全被跳过
+⇒ `moved.length=0` ⇒ 守恒循环**空转** ⇒ PASS 但**什么都没测**。
+**姿势**：用**自造夹具**（两座带足量库存的城），并**先断言「确实搬了」**，再断言守恒。
+凡「循环体依赖某个非空集合」的断言，都要额外断言那个集合非空。
+
+### G. ★ 取舍要被**量化**后交给用户, 不要替他决定
+
+判据 (Δ≡0) 与设计意图 (承载力自适应) 数学互斥时, 不要二选一地硬拍。
+**做法**: 做 `--k=` 开关, 把三档的**世界结果**跑出来 (总人口/增长/tier 分布/Δ上界) 并列成表,
+再指出「生产主循环恒以 dt=90 调一次 ⇒ 拆分运行期从不发生 ⇒ 取舍代价 ≈0」。
+用户看到数据后自己能拍 —— 而且往往真正的答案是「这个取舍根本不重要」。
+
+### H. 收尾: 证据要留, 临时脚本要清
+
+- **留**: 4 个判决实验脚本 + README (结论链可复现) ⇒ 放 `evidence/` 子目录, 改名成能自述的名字。
+- **清**: 一次性的 `_probe_*.mjs` 全删 (本项目 `_*` 被 `.gitignore` 覆盖 ⇒ 删后不可恢复, 但正因如此更该清)。
+- ⚠ 移入子目录后, 脚本里 `path.resolve(__dirname, '..', '..')` 会**指错目录** ⇒ 层级要跟着改, 并逐个跑一遍验证。

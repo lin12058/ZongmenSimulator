@@ -119,6 +119,36 @@ const JOBS = [
      · E 端到端「立宗后拓土」: 注入本宗为 ext ⇒ 环带内可建 / 半径外 too_far。
      实测: 拓土点距本宗 10 格 · 道路 2 条 / 413ms。 */
   ['check_expand_rules.mjs', [], 'off'],
+  /* ── Tick 框架 (2026-09-26~27, 设计稿 v2.1) ──
+     五条纯离线判据, 全部驱动 `verify/tickprobe` (一个**引用生产工程**的控制台宿主,
+     不是 JS 侧重写 —— 参照系不能是被测规则自己):
+     · check_clock: tick ↔ 年/月/季/日 纯整数推导 (360 值穷举 + 边界 + 前 5 年 + 负 tick 防御);
+     · check_tick_phase: 相位可复现 + **卡方**均匀 (⚠ 不能用 max/min 桶比, 随样本量波动)
+       + 周期不被抖动改变 (间隔严格 == period) + 源码守卫 (无 Random/DateTime.Now);
+     · check_tick_lazy: 空转 O(1) 恒等 —— 无 job 的 tick 里 Peek 次数 == 1,
+       **与 job 数无关** (1 / 1000 / 10000 三个规模对照);
+     · check_tick_queue_threadsafe: **真 OS 线程** (8 × 2000 job) 压测并发不变量
+       (无重复收集 / 无丢失 / 计数恒等 / 堆序自检) —— 这是「R11 线程安全」的证明;
+     · check_tick_job_persist: TickJob 落库 → **全新实例**载入 逐字段一致 + 幂等
+       + 一次性事件插入即落库 + 7 条源码守卫 (哨兵/相位钥匙/Enabled 过滤)。
+     ⚠ 上面这两条曾**抓出真实生产 bug** (哨兵溢出、相位钥匙用枚举名) —— 别把它们当选修。 */
+  ['check_clock.mjs', [], 'off'],
+  ['check_tick_phase.mjs', [], 'off'],
+  ['check_tick_lazy.mjs', [], 'off'],
+  ['check_tick_queue_threadsafe.mjs', [], 'off'],
+  ['check_tick_job_persist.mjs', [], 'off'],
+  /* ── P2 城市演化「融入正确性」判据 (2026-09-27) ──
+     ⚠ 这是唯一能证明「融入正确」的判据, 不需要开浏览器:
+     · G 同源一致性: 引擎侧 `Engine/js/city-evo.js` 与仿真器 `city_evo_sim.mjs` 逐位相同 (60 次比对);
+     · H 生产路径一致性: 走**真** `JsEngineHost` + **真** `CityStateStore` 的 `tickprobe evo`
+       与仿真器 (只演化层, 关贸易/迁移) 端到端对拍 pop/popF/tier;
+     · I 融入边界红线: 生产 bundle 上 `settleCache`/`settlementsFor`/`roadVer` 逐字节不变
+       (红线 R1: 演化不写 seed 纯函数层) + `MapGenServer.CityEvo` 出口可达 + 8 个出口齐备。
+     ⚠ 它驱动 `verify/tickprobe` (引用生产 csproj) ⇒ 首次跑要 `dotnet build`; 本脚本会自动 --no-build 回退。
+     ⚠⚠ 它**抓到过一个真生产静默 bug**: `settleJson.towns[]` 无 type ⇒ 引擎侧 type="" ⇒
+       `growTownFootprint(id,"")` 使 R_CITY 退化成 R0 ⇒ K 塌到 K_MIN=30 ⇒ 满城人口恒为 30 且不报错。
+       修法是新增 `city-evo.js` 的 `citySettlementsJson` 出口 (带 type/q/r)。别把它当选修。 */
+  ['evo/check_city_evo_integration.mjs', [], 'off'],
   /* ext 叠加层「不污染自动层」契约 (2026-09-23, A~D 四段):
      · A 零拷贝: settlementsFor 返回的数组**不得**是 settleCache 里那份 (append 会原地改缓存);
      · B 指纹: 加 ext 前后 rawSettlementsFor/settleCache **逐格逐字节不变** (自动世界一个像素都不许动);
@@ -150,6 +180,10 @@ const JOBS = [
      放在 live 组最前: 后面那几个开浏览器/多 seed 的判据都要靠"领到种子"才能起页面。 */
   ['check_world_ledger.mjs', [BASE_URL], 'live'],
   ['frontend_smoke.mjs', [BASE_URL], 'live'],
+  /* Tick 框架帧 7 = 世界时钟 (ClockQuery/ClockPush) 端到端: 只读、**不登录**、不写状态。
+     验: 回帧 7 / 载荷**明文非 gzip** / (year,month,day,season) 与 tick 自洽 / 1 tick 每秒。
+     ⚠ 等 2.5s 采第二点 (验「时钟真在走」) ⇒ 比别的 live 判据慢一点, 但不碰任何世界状态。 */
+  ['ws_clock_probe.mjs', [BASE_URL], 'live'],
   /* 小地图面板响应式几何 (窄屏铺满窗体宽度): 起 headless Chrome 量 iframe 布局盒。
      无 Chrome 或服务端不通时自己 rc=2 跳过 —— 见脚本头部注释。 */
   ['check_mm_layout.mjs', [BASE_URL], 'live'],
@@ -187,7 +221,11 @@ const plan = JOBS
   .concat(WITH_SERVER ? SERVER_JOBS : [])
   .concat(WITH_PLACE ? PLACE_JOBS : [])
   .map(([f, args, grp, note]) => ({ f, args, grp, note }))
-  .filter((j) => want(j.f) && !(OFFLINE_ONLY && j.grp === 'live') && !(LIVE_ONLY && j.grp === 'off'));
+  .filter((j) => want(j.f) && !(OFFLINE_ONLY && j.grp === 'live') && !(LIVE_ONLY && j.grp === 'off'))
+  /* ⚠ JOBS 里少数条目是**子目录**脚本 (当前只有 `evo/check_city_evo_integration.mjs`):
+     留空备注位 (数组长度 3) ⇒ note=undefined ⇒ 下面打印 `(undefined)` 的丑输出。
+     顺手在计划态补一刀, 免得每条都手写第四个元素。 */
+  .map((j) => (j.note === undefined ? { ...j, note: '' } : j));
 
 if (LIST_ONLY) {
   console.log('基址 = ' + BASE_URL + (OFFLINE_ONLY ? '  (offline-only)' : '') + (LIVE_ONLY ? '  (live-only)' : '') + (WITH_SERVER ? '  (with-server)' : '') + (WITH_PLACE ? '  (with-place)' : ''));

@@ -338,7 +338,8 @@
    *   服务端契约: Server/Zongmen/Domain/MapMessages.cs (WsFrame 起始)。
    * ============================================================ */
 
-  var FRAME = { LOGIN: 1, TILE: 2, PING: 3, SCRIPT: 4, PLACE_CHECK: 5, PLACE_COMMIT: 6 };
+  var FRAME = { LOGIN: 1, TILE: 2, PING: 3, SCRIPT: 4, PLACE_CHECK: 5, PLACE_COMMIT: 6,
+                CLOCK_QUERY: 7, CLOCK_PUSH: 7 };   // 7 同号: 方向由上下文区分 (同其余)
   var MASK = { CHUNK: 1, REGION: 2, SETTLE: 4, POI: 8, COMM: 16, ALL: 31 };
 
   /* ---------------- 微型编码器 (仅覆盖本协议所需) ---------------- */
@@ -458,6 +459,44 @@
   function rdSInt32(r, t) { return (t.wire === 0) ? r.zz() : 0; }
   function rdBool(r, t) { return (t.wire === 0) ? r.vi() === 1 : false; }
   function rdF32(r, t) { return (t.wire === 5) ? r.f32() : 0; }
+
+  /* ---------------- 帧 7: 世界时钟 (Tick 框架 §10 接线点 #6) ----------------
+     契约: Server/Zongmen/Domain/MapMessages.cs → ClockQueryRequest / ClockQueryResponse
+     ⚠ 载荷**恒明文**, 不 gzip (包 < 64B, 压缩净亏; 且帧类型即压缩约定不可混用)。
+     ⚠ 客户端纪律 (设计 §6): 每 ~10 tick 校一次**绝对 tick**, 之间靠 RatePerSecond
+       本地插值 —— 别每 tick 一次往返, 那是把懒调度白做了。 */
+  function encodeClockQuery(o) {
+    var w = new Writer();
+    if (o && o.seq) { wtag(w, 1, 0); wvi(w, o.seq); }
+    return w.done();
+  }
+  function decodeClockQueryResponse(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = {
+      seq: 0, tick: 0, year: 0, month: 0, day: 0, season: 0,
+      seasonName: '', monthName: '', desc: '', ratePerSecond: 0, monoMs: 0, pending: 0, err: ''
+    };
+    while (r.p < r.end) {
+      var t = r.tag();
+      switch (t.field) {
+        case 1: m.seq = rdInt32(r, t); break;
+        case 2: m.tick = (t.wire === 0) ? r.zz() : 0; break;   // ⚠ Tick 是 ZigZag (sint64)
+        case 3: m.year = rdInt32(r, t); break;
+        case 4: m.month = rdInt32(r, t); break;
+        case 5: m.day = rdInt32(r, t); break;
+        case 6: m.season = rdInt32(r, t); break;
+        case 7: m.seasonName = rdStr(r, t); break;
+        case 8: m.monthName = rdStr(r, t); break;
+        case 9: m.desc = rdStr(r, t); break;
+        case 10: m.ratePerSecond = rdInt32(r, t); break;
+        case 11: m.monoMs = rdInt32(r, t); break;
+        case 12: m.pending = rdInt32(r, t); break;
+        case 13: m.err = rdStr(r, t); break;
+        default: r.skip(t.wire);
+      }
+    }
+    return m;
+  }
   /* ⚠ 契约里 **只有 Q/R/RegionI/RegionJ/Ca/Cb 是 ZigZag** (sint32), 其余 int 都是
      普通 varint。混用会静默读出「看着像数字但全错」的值 (tier 3 → -2, need 8 → 4,
      ms 450 → -225) —— 这类错不会抛异常, 只会让前端画错颜色/前端判断全反。 */
@@ -683,9 +722,9 @@
      「单个元素」, 由调用方 push。切勿写成「容器套 field1 条目」:
      ResourceQuantDto 的 field1 恰是 string, 会被误判为条目而把 UTF-8
      字节当子消息解 → wire=7 之类 desync。 */
-  function parseBuilding(u8) {                 // BuildingDto: 1q 2r zz | 3kind | 4terrain | 5tier
+  function parseBuilding(u8) {                 // BuildingDto: 1q 2r zz | 3kind | 4terrain | 5tier | 6lv(演化等级)
     var br = new Reader(u8);
-    var o = { q: 0, r: 0, kind: '', terrain: '', tier: 0 };
+    var o = { q: 0, r: 0, kind: '', terrain: '', tier: 0, lv: 0 };
     while (br.p < br.end) {
       var tb = br.tag();
       if (tb.field === 1) o.q = rdSInt(br, tb);
@@ -693,6 +732,7 @@
       else if (tb.field === 3) o.kind = rdStr(br, tb);
       else if (tb.field === 4) o.terrain = rdStr(br, tb);
       else if (tb.field === 5) o.tier = rdInt(br, tb);
+      else if (tb.field === 6) o.lv = rdInt(br, tb);
       else br.skip(tb.wire);
     }
     return o;
@@ -761,6 +801,9 @@
     decodePlaceCheckResponse: decodePlaceCheckResponse,
     decodePlaceCommitResponse: decodePlaceCommitResponse,
     decodePlaceBlock: decodePlaceBlock,
-    decodeBlockRef: decodeBlockRef
+    decodeBlockRef: decodeBlockRef,
+    /* Tick 框架: 世界时钟 (帧 7; 载荷明文 protobuf, 不 gzip) */
+    encodeClockQuery: encodeClockQuery,
+    decodeClockQueryResponse: decodeClockQueryResponse
   };
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));

@@ -1,9 +1,13 @@
 # 游戏时钟与 Tick 演化框架 —— 设计方案
 
-> 状态：**设计稿 v2（未开工）**
+> 状态：**设计稿 v2.1（P1 已完成并验收）**
 > 日期：2026-09-27
 > 目标：给 C# 后端引入一套「1 秒 1 tick = 游戏内 1 日」的**实时世界时钟 + 定时演化调度**框架。
 > 核心形状：**nextTick 落库（重启不重算）→ 相位抖动摊批（不挤同一 tick）→ 解耦分批 → 消费队列 → 无状态 VM 并行执行 → 定序合流**。
+>
+> ⚠ **进度与落地形态的唯一真源 → `待办事项/Tick框架开发进度.md`**。
+>   本文档说「应该怎样」，那份说「实际做成了怎样」；两者冲突以那份为准。
+>   P1 已落地并全绿（7 条判据）；P2/P3 未开工。设计 vs 落地的差异见那份 §四。
 >
 > 阅读前置：
 > - `docs/方案.md`（总体架构）、`docs/设定.md`（灵气复苏 / 气运 / 灵脉）
@@ -28,6 +32,7 @@
 | R8 | 未提 gzip 边界 | ★ 明确：**压缩属「存储/传输」层；V8 边界恒为未压缩裸 proto** | 存储/下发已是 gzip，绝不让 V8 处理压缩流 |
 | R9 | 未提 V8 运行期成本统计 | ★ 新增分段计时（解压/反序列化/JS/序列化/压缩/apply）+ `TickPerf` 独立表 | 「方便后续优化」必须先知道时间花在哪一段 |
 | R10 | `TimedEvent` 独立表 | 合并：一张 `TickJob`，`PeriodTicks = 0` 即一次性 | 同一套载入/回写/对账，少维护一张表 |
+| R11 | 调度器必须**单线程独占**（因 .NET `PriorityQueue` 非线程安全 / 无 decrease-key） | ❌ **推翻**：自实现 **`ConcurrentTickQueue`**（`lock` + 二叉堆 + 键索引），**调度器可被任意线程投递** | ① tick 泵不是唯一生产者 —— `commitPlace` / 对账 / 一次性事件都从 Kestrel 请求线程来；② 临界区只是 O(log n) 指针交换，不做 I/O、不做 proto，`lock` 代价纳秒级，热点在 V8（十毫秒级）；③ 免掉「业务线程 → 泵线程」的中转 Channel。**`decrease-key` 的缺失与线程安全无关**，仍走「弹出改键再入堆」 |
 
 ---
 
@@ -43,7 +48,7 @@
 | 演化内容 | 城镇足迹生长 / 建筑升降级 / 贸易边重估 / 势力声望扩散 —— 四项均归 L1（季度为主），明细见 §1.3 |
 | 「并行」 | ⚠ 单 VM 不可并行（`_gate` 是事实），但**同 seed 可开 N 个 VM**。形态 = **无状态 tick VM 池**：输入快照(proto) + job 批，输出 patch(proto)，世界权威态在 C#/SQLite |
 | 跨界 | **堆外 + protobuf**：`ArrayBuffer`（V8 堆外 backing store）直传裸 proto 字节，**不过 string、不 base64、不 gzip**。每 VM 一对**复用缓冲**，零分配 |
-| 消费队列 | **两条**，按**资源**而非业务划：`v8Queue`（每 VM 串行）+ `cpuQueue`（并发 = 核数-1）。独立 VM 池 ⇒ **与人类请求零门闩争用** |
+| 消费队列 | **两条**，按**资源**而非业务划：`v8Queue`（每 VM 串行）+ `cpuQueue`（并发 = 核数-1）。独立 VM 池 ⇒ **与人类请求零门闩争用**。⚠ 调度器队列（`ConcurrentTickQueue`）**不是**这两条之一：它是**生产者侧**（业务线程可任意投递），消费队列是**执行侧** |
 | 使能技术 | **双缓冲快照 + 定序合并**：job 只读快照、只写私有 Patch，单线程合流器按 `(Layer, SortKey, Id)` 全序 apply |
 | ⚠ 红线 1 | tick **只许改「可变派生层」**（实体属性 / `townCache` / `tradeCache`），**绝不许改「seed 纯函数层」**（`chunk` / `settleCache` / `siteScoreCache` / `regionCache`） |
 | ⚠ 红线 2 | **道路重算不进 tick VM 池** —— `roadCache` 依赖建路顺序，不可从 seed 重建。走既有 `Lease(seed) + commitPlace` 同款串行序列 |
@@ -247,12 +252,35 @@ function tickPopGrowth(job, dtTicks) { st.pop += growthRate(st) * dtTicks; }
 
 | 方案 | 插入 | 取到期 | 适用 |
 |------|------|--------|------|
-| **小顶堆**（`PriorityQueue<TickJob,long>`） | O(log n) | O(log n) | ★ **MVP 选它**：支持任意 `NextTick`，语义最直白 |
+| **线程安全小顶堆**（`ConcurrentTickQueue`，自实现） | O(log n) | O(log n) | ★ **MVP 选它**：支持任意 `NextTick`，语义最直白 |
 | 分层时间轮（日轮 360 / 月轮 12 / 年轮） | O(1) | O(1) | job 数 > 1e5 时的 P3 升级 |
 
-⚠ 两条实现注意：
-- .NET 的 `PriorityQueue` **不是线程安全**、**没有 decrease-key**。调度器必须**单线程独占**（= tick 泵线程）；重排一律「弹出后改 `NextTick` 再重新 `Enqueue`」。
-- 不用「优先级打洞 + 惰性删除」那一套：job 自带 `NextTick`，弹出时**校验版本**即可（`job.NextTick != 队列键` ⇒ 丢弃重排后的旧副本）。
+⚠ 关于线程安全（v2.1 修订，**推翻 v2 原文的「必须单线程独占」**）：
+
+- .NET 内置 `PriorityQueue<T,P>` **确实不是线程安全**、**也没有 decrease-key** —— 但这**不构成**「调度器必须单线程独占」的约束，只是说明**不能直接裸用它**。
+- ✅ **正确做法：自实现 `ConcurrentTickQueue`**（`Server/Zongmen/Time/ConcurrentTickQueue.cs`），内部 = 一个 `lock` 保护的二叉小顶堆 + `SortedSet`/`HashSet` 索引。理由：
+  1. **tick 泵不是唯一的生产者**。`commitPlace`（玩家立宗/拓土）、聚落类型变更、一次性事件插入、对账 reconcile 全都会**从 Kestrel 请求线程**投递新 job。若队列非线程安全，就得给「所有业务线程 → 泵线程」再造一条 `Channel` 中转账 —— 多一层、多一次分配，却只为了绕开一个 `lock`。
+  2. **`lock` 的代价可忽略**。队列操作是 O(log n) 的指针交换（n = job 数，量级 1e3~1e4），临界区里**绝不做任何 I/O、不做 proto 编解码**。真热点是 V8 运算（十毫秒级），不是 `lock`（纳秒级）。
+  3. 泵线程的 `Peek`（空转路径）同样走 `lock` —— 但那**就是全部成本**，仍然是「一次比较」，lazy 语义不受损。
+- ⚠ **仍然保留的纪律**：**`AdvanceTo` 的「弹出 — 校验 — 组批」三步必须整体持锁**（或等价做法：弹出后立刻校验版本并吊销，避免另一线程在两者之间重排同一 job）。job 自带 `NextTick`，弹出时**校验版本**即可（`job.NextTick != 队列键` ⇒ 丢弃重排后的旧副本），**不用**「优先级打洞 + 惰性删除」那一套。
+- ⚠ **重排仍走「弹出后改 `NextTick` 再 `Enqueue`」**：`decrease-key` 的缺失与线程安全无关，是堆结构的固有性质。自实现里可以顺手加 `Reprioritize`（内部 `Remove` + `Push`），但**不要**为此复杂化 —— `Remove` 需要索引表，收益仅一次 `sift`。
+
+```csharp
+// 形状（细节见实现文件）
+public sealed class ConcurrentTickQueue
+{
+    private readonly object _lock = new();
+    private readonly List<TickJob> _heap = new();                       // 二叉堆
+    private readonly Dictionary<JobKey, int> _index = new();            // 键 → 堆位置（支持 Remove/Reprioritize）
+
+    public void Push(TickJob job);                                       // lock 内 sift-up
+    public bool TryPeek(out TickJob job);                                // 空转热路径：lock 内取堆顶，O(1)
+    public List<TickJob> AdvanceTo(long nowTick);                        // ★ 收集全部到期 job（含版本校验与吊销），单次持锁完成
+    public bool TryRemove(JobKey key, out TickJob job);
+    public void Reprioritize(JobKey key, long newNextTick);
+    public int Count { get; }
+}
+```
 
 ### 4.2 `AdvanceTo(nowTick)` —— lazy 的全部魔法
 
@@ -786,8 +814,9 @@ Server/Zongmen/Time/
 ├─ TickPerfStore.cs         ★ 独立表 TickPerf（环形缓冲 + 聚合落库）
 ├─ PhaseHash.cs             ★ 相位派生（fnv1a + mix32），纯函数可单测
 ├─ TickJob.cs               Job / Layer / Resource / JobSpec
+├─ ConcurrentTickQueue.cs   ★ **线程安全**小顶堆（lock + 键索引）+ Peek/AdvanceTo/Reprioritize
 ├─ TickJobRegistry.cs       Kind → JobSpec（读写集 + 引擎缓存声明）★ 解耦的唯一真源
-├─ TickScheduler.cs         小顶堆 + AdvanceTo + 空转 Peek + 重排
+├─ TickScheduler.cs         调度器门面 = ConcurrentTickQueue + 载入/回灌 + 空转 Peek + 重排
 ├─ TickPartitioner.cs       第一步：独立性判定 → 批
 ├─ TickBatch.cs             批（Layer / 规范序 / Jobs / 快照句柄）
 ├─ TickPipeline.cs          第二步：两条 Channel + 合流器
@@ -824,7 +853,7 @@ Server/Zongmen/Engine/js/mapgen-server.js    ← 追加 tickBatch / invalidate* 
 - WS 帧 7 下发时钟；前端面板显示「第 N 年 春 一月 三日」
 - **不做**：双缓冲（L0 写集天然不相交）、`TickVmPool`（P1 先用读路径 VM 串行跑）、L1/L2
 
-判据：`check_clock.mjs`、`check_tick_lazy.mjs`、`check_tick_phase.mjs`、`check_tick_pb_roundtrip.mjs`、`check_tick_job_persist.mjs`。
+判据：`check_clock.mjs`、`check_tick_lazy.mjs`、`check_tick_phase.mjs`、`check_tick_queue_threadsafe.mjs`、`check_tick_pb_roundtrip.mjs`、`check_tick_job_persist.mjs`。
 
 ### P2 —— 无状态 VM 池 + L1 四项 + rev/失效接线
 
@@ -854,6 +883,7 @@ Server/Zongmen/Engine/js/mapgen-server.js    ← 追加 tickBatch / invalidate* 
 | `check_clock.mjs` | **恒等** | `tick=359` → 第 1 年 冬 十二月 三十日；`tick=360` → 第 2 年 春 一月 一日。全 360 值穷举自洽 |
 | `check_tick_lazy.mjs` | **恒等**（不是阈值） | `调用次数 == floor(总 tick / PeriodTicks) + 首次相位命中 ?1:0`；**无 job 的 tick 里 `Peek` 次数 == 1** |
 | `check_tick_phase.mjs` | **统计 + 恒等** | ① 相位不改周期：360 tick 内每 job 计数严格相等；② 分布：N 个 job 的 `Phase` 分 `Period` 个桶，`max/min` 桶比 < 阈值（测哈希质量，非性能；⚠ 固定 seed 保证可复现）；③ 同输入两次派生结果恒等 |
+| `check_tick_queue_threadsafe.mjs` | **并发不变量** | ① N 个线程并行 `Push` 后 `Count` 恒等；② 并行 `AdvanceTo` 下**任何 job 不被收集两次**（吊销哨兵生效）；③ 泵线程 `TryPeek` 与业务线程 `Reprioritize` 交错时无重复、无丢失 |
 | `check_tick_job_persist.mjs` | 恒等 + 幂等 | 落库→载入→堆内容逐字节一致；载入后再 flush 不产生变更（幂等）；一次性事件**立即**落库（不等 flush 窗口） |
 | `check_tick_pb_roundtrip.mjs` | **交叉源** | `pben.js` 编码 → `pb.js` 解码 → 字段逐值一致；同一份字节 C# 反序列化一致（三处实现对齐） |
 | `spike_v8_abuffer.mjs` / `.cs` | **可行性**（P0 前置） | 7.4.5 上：宿主取 `IArrayBuffer` 句柄 → `WriteBytes` → JS 侧 `new Uint8Array(buf)` 读到 → JS 写 → 宿主 `ReadBytes` 读回。失败则降级为 7.5+ 升级或「base64+proto」 |
@@ -887,16 +917,23 @@ Server/Zongmen/Engine/js/mapgen-server.js    ← 追加 tickBatch / invalidate* 
 ## 十四、一页伪代码（把全链路串起来）
 
 ```csharp
-// TickPump（每秒一次，单调时基）
+// TickPump（每秒一次，单调时基）—— ★ 队列线程安全 ⇒ 泵不是唯一生产者
 while (!ct.IsCancellationRequested) {
     await WaitToNextSecondBoundary();
     for (int i = 0; i < MaxCatchUp; i++) {
-        var due = _sched.AdvanceTo(_clock.Tick);        // 空则 O(1) 返回（一次 Peek）
+        var due = _sched.AdvanceTo(_clock.Tick);        // 空则 O(1) 返回（一次 Peek + 一次 lock）
         if (due.Count == 0) break;
         foreach (var batch in _partitioner.Partition(due))   // ★ 第一步：解耦
             _queueFor(batch.Resource).Writer.TryWrite(batch); // 第二步：投递
         _clock.Tick++;
     }
+}
+
+// 业务线程（Kestrel 请求）：直接投递，无需中转 Channel（这是 R11 的收益）
+void OnCommitPlace(...) {
+    var job = _registry.NewJob(seed, round, stId, TickJobKind.TownEvolve);
+    _sched.Enqueue(job);          // ★ 内部 lock，线程安全
+    _jobs.Upsert(job);            // 落库
 }
 
 // V8 worker（S 个无状态 VM，每个 VM 内部仍串行）

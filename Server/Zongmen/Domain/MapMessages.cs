@@ -57,6 +57,10 @@ public sealed class BuildingDto
     [ProtoMember(3)] public string Kind { get; set; } = "";      // 码头/农田/矿山/民房…
     [ProtoMember(4)] public string Terrain { get; set; } = "";   // 地皮: 灵枢/水岸/良田/矿脉/林地/灼壤/村落/core
     [ProtoMember(5)] public int Tier { get; set; }
+    /* ★ v4 建筑等级 (2026-10-10 · b 方案): 由 (人口 / 资源紧缺度) 派生的 **演化等级** (1..3)。
+       ⚠ 与 Tier 语义不同, 不可混用: Tier = 骨架建筑自身的档 (seed 派生, 旧口径);
+         Lv = 演化等级 (前端据此画「楼/规模」)。仅 settle 包带 (区域包不带 ⇒ 默认 1)。 */
+    [ProtoMember(6)] public int Lv { get; set; }
 }
 
 [ProtoContract]
@@ -220,6 +224,54 @@ public static class WsFrame
        ⚠ 7 号 (CityQuery) 是 P2「城市迭代」的预留位, 本轮**不实现** —— 别占。 */
     public const byte PlaceCheck = 5;
     public const byte PlaceCommit = 6;
+
+    /* ---- Tick 框架 (2026-09-26 方案 §10 接线点 #6) ----
+       帧 7 = 世界时钟。请求 = ClockQueryRequest (空载荷即可, 载荷仅带 Seq),
+       响应 = ClockQueryResponse (服务端当前 tick + 年月日季节 + 描述)。
+
+       ⚠ **恒明文, 不 gzip**: 时钟包 < 64 字节, gzip 头尾开销净亏; 更重要的是
+         「按帧类型判压缩」这条既有纪律 —— 混用会让客户端解错。与 Login/Pong/Place 同口径。
+
+       客户端用法 (设计 §6): 每 ~10 tick 校一次绝对 tick, 之间靠 `RatePerSecond`
+       本地插值 (1 tick/秒), 避免每 tick 一次往返。 */
+    public const byte ClockQuery = 7;
+    public const byte ClockPush = 7;   // 同号: 方向由上下文区分 (同 Login/Tile/Place)
+}
+
+/// <summary>Tick 框架: 时钟查询 (帧 7, C→S)。空载荷亦可, Seq 仅用于回显配对。</summary>
+[ProtoContract]
+public sealed class ClockQueryRequest
+{
+    [ProtoMember(1)] public uint Seq { get; set; }
+}
+
+/// <summary>
+/// Tick 框架: 时钟响应 (帧 7, S→C)。
+/// ⚠ 字段与 <c>Zongmen.Time.ClockSnapshot</c> 一一对应, 但**故意不复用那个类型** ——
+///   协议 DTO 与运行时快照解耦, 免得给快照加个内部字段就悄悄改了线格式。
+/// </summary>
+[ProtoContract]
+public sealed class ClockQueryResponse
+{
+    [ProtoMember(1)] public uint Seq { get; set; }
+    /// <summary>服务端权威 tick (1 tick = 1 游戏日)。</summary>
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public long Tick { get; set; }
+    [ProtoMember(3)] public int Year { get; set; }
+    [ProtoMember(4)] public int Month { get; set; }
+    [ProtoMember(5)] public int Day { get; set; }
+    /// <summary>0=春 1=夏 2=秋 3=冬。</summary>
+    [ProtoMember(6)] public int Season { get; set; }
+    [ProtoMember(7)] public string SeasonName { get; set; } = "";
+    [ProtoMember(8)] public string MonthName { get; set; } = "";
+    /// <summary>人读描述, 如「第1年 春 二月 一日」。</summary>
+    [ProtoMember(9)] public string Desc { get; set; } = "";
+    /// <summary>每秒推进多少 tick (demo 恒 1); 客户端本地插值用。</summary>
+    [ProtoMember(10)] public int RatePerSecond { get; set; }
+    /// <summary>服务端单调毫秒 (客户端可据此校准时钟偏移; 0 = 未提供)。</summary>
+    [ProtoMember(11)] public long MonoMs { get; set; }
+    /// <summary>队列中待执行 job 数 (诊断/可选展示)。</summary>
+    [ProtoMember(12)] public long Pending { get; set; }
+    [ProtoMember(13)] public string Err { get; set; } = "";
 }
 
 [ProtoContract]
