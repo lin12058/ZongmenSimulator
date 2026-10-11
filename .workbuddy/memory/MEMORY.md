@@ -60,6 +60,6 @@
 
 ## ⚠ 构建 / 验证 / 本机坑（跑法唯一真源 → skill；长文 → `DETAILS`）
 - ⚠ 清理文件**已 3 次误删**：一律 Node `fs.unlinkSync` 绝对路径+basename/数量断言，先 `git ls-files` 过滤被跟踪名单；禁 shell 通配与 `git rm`。恢复 `git restore --source=HEAD --worktree -- verify/`。
-- ⚠ 本机坑：`PowerShell 输出被吞`／`Bash shim 缺 ls/cd/dirname/wc/head`／`WMIC 黑名单`／`/tmp→D:\tmp`／`>log 吞输出` ⇒ 诊断走 Node 或 `python -c`，临时脚本一律写 `Temp/`。
+- ⚠ 本机坑：`PowerShell 输出被吞`／`Bash shim 缺 ls/cd/dirname/wc/head`／`WMIC 黑名单`／`/tmp→D:\tmp`／`>log 吞输出` ⇒ 诊断走 Node 或 `python -c`，临时脚本一律写 `Temp/`。⚠★ **`git push` 撞死代理**：`http(s).proxy=127.0.0.1:7897`（global+local 都配）而本机**无代理在跑** ⇒ `Connection refused`；解法 `git -c http.proxy= -c https.proxy= push origin main`（`ls-remote` 同）。
 - ⚠ 判据四防：①绝对值阈值必假红 ⇒ 改 **A/B 归因** ②参照系不能是被测规则自己的目标函数 ③复算须与实现**同容差语义** ④源码守卫判「赋值点所在**整个函数体**」且必须先剥注释。⚠ 几何对齐优先**数值探针**+离线复算；**判据自己的断言也会错**（已 2 次）。
 - ⚠ 后台实例**活不过一个回合**（起实例+跑实机判据必须同回合）；基线默认**离线 30 + 在线 6**；`--only=`/`--skip=` 是**子串匹配**；**rc=2=跳过**；⚠ **别 kill 用户 8140**。
