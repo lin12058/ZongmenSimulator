@@ -38,6 +38,11 @@ public interface ITickExecutor
 
     /// <summary>人类可读名（/stats 与日志用）。</summary>
     string Name { get; }
+
+    /// <summary>本执行器认领的 job 种类。多执行器路由 (TickExecutorHub) 据此把每批
+    /// job 按 Kind 分派给唯一认领者; ⚠ 认领集**不得重叠**, 否则同一 job 被两个执行器
+    /// 处理 (重复写世界)。</summary>
+    IReadOnlyList<TickJobKind> Claims { get; }
 }
 
 /// <summary>
@@ -61,6 +66,16 @@ public sealed class DemoTickExecutor : ITickExecutor
 
     public string Name => "demo";
     public IReadOnlyDictionary<string, long> Heartbeats => _heartbeats;
+
+    /// <summary>P1 演示执行器认领的种类 = 它在 switch 里真正处理的那几类。
+    /// ⚠ L1/L2 不认领 —— 它们不该在 P1 到期(没人投递), 真到了就该显式暴露。</summary>
+    public IReadOnlyList<TickJobKind> Claims { get; } = new[]
+    {
+        TickJobKind.DemoHeartbeat,
+        TickJobKind.PopGrowth,
+        TickJobKind.SectCultivation,
+        TickJobKind.Lifespan,
+    };
 
     public DemoTickExecutor(TickOptions opt, int seed = 12345)
     {

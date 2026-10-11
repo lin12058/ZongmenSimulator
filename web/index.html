@@ -316,6 +316,112 @@
   }
   #mmRestore.show { display: block; }
 
+  /* ---- 众生录 · 角色窗口 (roster.js) ----
+     「在这个世界里看一个个修士」的只读窗口: 左列名册 (境界筛选 + 姓名搜索),
+     右侧详情 (六维条 / 灵根 / 功法 / 储物袋 / 特质 / 出身)。
+     ⚠ 必须与 #topbar **同级**放在 <body> 下: `.panel` 的 clip-path 会裁掉整棵子树
+       (设置弹窗 / 卜居浮层 / 全屏小地图都踩过同一条)。
+     数据源是**服务端实时生成** GET /api/characters (C# CharactersSubsystem → V8 characters
+     scope → js/chargen-core.js), 前端不再有任何预生成的静态表。 */
+  #rosterWrap {
+    position: fixed; inset: 0; z-index: 74;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #rosterWrap.hidden { display: none; }
+  .ro-mask { position: absolute; inset: 0; background: rgba(30,24,15,0.32); }
+  #rosterBox {
+    position: relative; width: 748px; max-width: calc(100vw - 28px);
+    height: min(600px, calc(100vh - 52px));
+    display: flex; flex-direction: column; padding: 11px 15px 12px;
+  }
+  .ro-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .ro-title { font-size: 14px; letter-spacing: 5px; color: var(--ink); }
+  .ro-title b { font-weight: 400; color: var(--seal); }
+  .ro-meta { flex: 1; text-align: right; font-size: 11.5px; letter-spacing: 1px; color: var(--ink-faint); }
+  #rosterBox [data-ro="close"] {
+    padding: 1px 6px; font-size: 12px; letter-spacing: 0;
+    border: none; background: none; color: var(--ink-soft);
+  }
+  #rosterBox [data-ro="close"]:hover { color: var(--seal); }
+  .ro-tools { display: flex; align-items: flex-start; gap: 10px; margin: 2px 0 5px; }
+  .ro-filters { flex: 1; display: flex; flex-wrap: wrap; gap: 4px; }
+  .ro-fchip {
+    padding: 0 7px; font-size: 11.5px; line-height: 19px; letter-spacing: 1px;
+    border: 1px solid rgba(150,128,96,0.45); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.8), rgba(236,227,205,0.7));
+    color: var(--ink-soft);
+  }
+  .ro-fchip b { font-weight: 400; margin-left: 4px; color: var(--ink-faint); }
+  .ro-fchip.on { border-color: var(--seal); color: var(--seal); }
+  .ro-fchip.on b { color: var(--seal); }
+  .ro-search {
+    flex: 0 0 158px; padding: 3px 7px; font-family: inherit; font-size: 12.5px;
+    color: var(--ink); letter-spacing: 1px;
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.95), rgba(238,229,208,0.9));
+  }
+  .ro-search:focus { outline: none; border-color: var(--seal); }
+  .ro-body { flex: 1; min-height: 0; display: flex; gap: 12px; }
+  .ro-list {
+    flex: 0 0 232px; min-height: 0; overflow-y: auto; padding-right: 5px;
+    border-right: 1px solid rgba(150,128,96,0.28);
+  }
+  .ro-item { padding: 4px 7px; margin-bottom: 2px; cursor: pointer; border: 1px solid transparent; border-radius: 2px; }
+  .ro-item:hover { background: rgba(166,58,44,0.06); }
+  .ro-item.on { border-color: rgba(166,58,44,0.5); background: rgba(166,58,44,0.07); }
+  .ro-item .nm { font-size: 13px; letter-spacing: 1px; color: var(--ink); }
+  .ro-item .nm .dh { margin-left: 6px; font-size: 11px; color: var(--ink-faint); }
+  .ro-item .sub { font-size: 11px; letter-spacing: 1px; color: var(--ink-faint); }
+  .ro-detail { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding-right: 3px; }
+  .ro-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .ro-name { font-size: 19px; line-height: 1.3; letter-spacing: 3px; color: var(--ink); }
+  .ro-name .ro-dh { margin-left: 8px; font-size: 11.5px; letter-spacing: 1px; color: var(--seal); }
+  .ro-seal {
+    flex: 0 0 auto; width: 32px; height: 32px; border-radius: 2px;
+    display: flex; align-items: center; justify-content: center;
+    writing-mode: vertical-rl; text-orientation: upright;
+    font-size: 12.5px; letter-spacing: 1px; color: rgba(250,241,228,0.95);
+    background: var(--seal); opacity: 0.92;
+    box-shadow: inset 0 0 0 1px rgba(252,242,228,0.42), inset 0 0 7px rgba(58,10,4,0.4);
+  }
+  .ro-sub { margin-top: 3px; font-size: 12px; letter-spacing: 1px; color: var(--ink-soft); }
+  .ro-sub .ro-realm { color: var(--seal); letter-spacing: 2px; }
+  .ro-sub .ro-prog { margin-left: 8px; color: var(--ink-faint); }
+  .ro-sec { margin: 9px 0 3px; font-size: 11.5px; letter-spacing: 4px; color: var(--ink-faint); }
+  .ro-kv { display: flex; justify-content: space-between; gap: 10px; margin: 2px 0; font-size: 12.5px; }
+  .ro-kv .k { flex: 0 0 auto; letter-spacing: 2px; color: var(--ink-soft); }
+  .ro-kv .v { text-align: right; color: var(--ink); }
+  .ro-bars { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 14px; }
+  .ro-bar { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+  .ro-bar .bn { flex: 0 0 28px; color: var(--ink-soft); letter-spacing: 1px; }
+  .ro-bar .bt { flex: 1; height: 6px; border-radius: 3px; background: rgba(120,98,66,0.16); overflow: hidden; }
+  .ro-bar .bf { display: block; height: 100%; background: linear-gradient(90deg, rgba(166,58,44,0.5), var(--seal)); }
+  .ro-bar .bv { flex: 0 0 26px; text-align: right; color: var(--ink); }
+  .ro-traits { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .ro-chip-s {
+    display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px;
+    font-size: 11.5px; letter-spacing: 1px; color: rgba(70,58,44,0.92);
+    border: 1px solid rgba(150,128,96,0.45); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.8), rgba(236,227,205,0.7));
+  }
+  .ro-chip-s i { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+  .ro-chip-s b { font-weight: 400; color: var(--seal); }
+  .ro-items { margin-top: 3px; }
+  .ro-item-row { display: flex; align-items: baseline; gap: 6px; padding: 1px 0; font-size: 12px; }
+  .ro-item-row i { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+  .ro-item-row .inm { color: var(--ink); letter-spacing: 1px; }
+  .ro-item-row .icat { color: var(--ink-faint); font-size: 11px; }
+  .ro-item-row .ict { margin-left: auto; color: var(--ink-soft); }
+  .ro-none { padding: 6px 0; font-size: 12px; letter-spacing: 1px; color: var(--ink-faint); }
+  .ro-msg { min-height: 15px; margin-top: 5px; font-size: 11.5px; line-height: 1.6; letter-spacing: 1px; color: var(--ink-faint); }
+  .ro-msg.bad { color: var(--seal); }
+
+  @media (max-width: 760px) {
+    .ro-list { flex-basis: 150px; }
+    .ro-search { flex-basis: 110px; }
+    .ro-bars { grid-template-columns: 1fr; }
+  }
+
   /* ---- 致命错误 ---- */
   #fatal {
     display: none; position: fixed; inset: 0; z-index: 99;
@@ -362,6 +468,7 @@
       <div id="toolBox" class="panel">
         <button id="btnPlace" title="卜居 · 择地立宗">卜居</button>
         <button id="btnExpand" class="hidden" title="拓土 · 在本宗辖域内建附属城镇">拓土</button>
+        <button id="btnRoster" title="众生录 · 查看已生成的角色">名录</button>
       </div>
       <div id="sectWrap">
         <div id="sectBox" class="panel">
@@ -453,6 +560,31 @@
     </div>
   </div>
 
+  <!-- 众生录 (角色窗口) —— 与 #topbar / #settingsWrap 同级: 面板的 clip-path 会裁掉子树。
+       只读窗口: 左名册 (境界筛选 + 姓名搜索) / 右详情 (六维·功法·储物袋…)。
+       数据源 = 服务端 GET /api/characters (角色按当前世 seed 现算); 由 web/js/roster.js 独占管理。 -->
+  <div id="rosterWrap" class="hidden">
+    <div class="ro-mask" data-ro="mask"></div>
+    <div id="rosterBox" class="panel" role="dialog" aria-modal="true" aria-label="众生录">
+      <div class="ro-head">
+        <span class="ro-title">众<b>生</b>录</span>
+        <span class="ro-meta" data-ro="meta">-</span>
+        <button data-ro="close" title="关闭 (Esc)">✕</button>
+      </div>
+      <div class="ink-rule"></div>
+      <div class="ro-tools">
+        <div class="ro-filters" data-ro="filters"></div>
+        <input class="ro-search" data-ro="search" type="text" maxlength="16"
+               placeholder="姓名 / 道号" autocomplete="off">
+      </div>
+      <div class="ro-body">
+        <div class="ro-list" data-ro="list"></div>
+        <div class="ro-detail" data-ro="detail"></div>
+      </div>
+      <div class="ro-msg" data-ro="msg"></div>
+    </div>
+  </div>
+
   <div id="minimapBox" class="panel">
     <div class="mm-head">
       <span class="mm-title">山河小图</span>
@@ -500,6 +632,9 @@
   <script src="js/engine-local.js"></script>
   <script src="js/minimap-vein.js"></script>
   <script src="js/infocard.js"></script>
+  <!-- 众生录 (角色窗口): 独立模块, 数据源 = 服务端 /api/characters。
+       在 main.js 之前 —— main.js 的 boot 里只调一次 initRoster() 注入根节点。 -->
+  <script src="js/roster.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>

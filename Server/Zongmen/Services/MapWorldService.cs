@@ -6,6 +6,7 @@ using Zongmen.Domain;
 using Zongmen.Engine;
 using Zongmen.Protocol;
 using Zongmen.Storage;
+using Zongmen.Subsystems;
 
 namespace Zongmen.Services;
 
@@ -35,7 +36,10 @@ namespace Zongmen.Services;
 public sealed class MapWorldService : IDisposable
 {
     private readonly ZongmenOptions _opt;
-    private readonly JsEngineHost _host;
+    private readonly JsVmPool _host;
+    /* ★ 子系统注册表 (2026-10-11): Core 通过它回调子系统 (换世清空 / 渲染叠加),
+       **不引用任何具体子系统类型** —— 加第二个子系统时这里一个字都不用改。 */
+    private readonly SubsystemRegistry _subsystems;
     private readonly MemoryVirtualContext _mem;
     private readonly SqliteVirtualContext? _sql;
     /* W (2026-09-16): 世界种子台账 —— 种子的唯一来源。前端不再自造 seed
@@ -44,8 +48,6 @@ public sealed class MapWorldService : IDisposable
     /* P (2026-09-23, 玩家宗门放置): 玩家宗门台账 —— 独立表 PlayerSect (见其头注释:
        塞进 Data(Key,Value) 会被后台 PruneExcept 静默删掉)。 */
     private readonly PlayerSectStore _sects;
-    /* P2: 城市演化台账 (见构造函数注释)。⚠ 与 _sects 并列的第三条独立表。 */
-    private readonly Storage.CityStateStore _cities;
     private string? _metaCache;
     private readonly object _metaLock = new();
     /* S4: 引擎指纹 —— 对**下发给前端的那三个脚本**按拼接顺序取 SHA256 前 16 位。
@@ -127,8 +129,9 @@ public sealed class MapWorldService : IDisposable
         BindCurrentWorldToTick();
     }
 
-    /// <summary>P2: 城市演化台账 (TickVmPoolExecutor 读写它; DI 注册的是同一实例)。</summary>
-    public Storage.CityStateStore Cities => _cities;
+    /// <summary>P2: 城市演化台账 => 已迁到 <see cref="Subsystems.City.CitySubsystem.Store"/>。
+    /// ⚠ Core 不再持有它: 「本子系统状态由本子系统自己管」是这次目录重构的核心约束
+    ///   (原先 Core 直接 new 出 CityStateStore ⇒ Core 编译期就认识 City)。</summary>
 
     /// <summary>P2: 提供「本世应该有哪些 job」= 演化窗口内每座聚落 × {TownEvolve, TradeEdge}。
     /// ⚠ 这是**对账**的输入 ⇒ 必须是全集: 少给一类, 那一类的全部 job 会被判定为「不该有」
@@ -194,14 +197,15 @@ public sealed class MapWorldService : IDisposable
         try
         {
             var cur = _ledger.Current();
-            /* ★ 换世清空演化台账: 清的是「上一世」的城状态 —— 与新世的城 id 可能同名
-               (id 是 `{区域i}_{区域j}_u{n}`, 跨世会重复!) ⇒ 不清就是**跨世串味**:
-               新世第 0 天的一座城带着上一世演化了几十年的人口继续跑。
-               ⚠ 用 `_cities.RemoveRound(cur.Round)` 而不是 Clear() —— 万一将来支持
-               同时保留多世 (回看/回滚), Clear 会误删别的世。 */
-            var removed = _cities.RemoveRound(cur.Round);
+            /* ★ 换世清空各子系统的世态 (依赖倒置: Core 不认识 City, 由注册表遍历)。
+               ⚠ 清的是「上一世」的状态 —— 与新世的实体 id 可能同名
+                 (城 id 是 `{区域i}_{区域j}_u{n}`, 跨世会重复!) ⇒ 不清就是**跨世串味**:
+                 新世第 0 天的一座城带着上一世演化了几十年的人口继续跑。
+               ⚠ 各子系统必须实现「只删该轮次」而不是全清 —— 万一将来支持
+                 同时保留多世 (回看/回滚), 全清会误删别的世。 */
+            var removed = _subsystems.ClearWorld(cur.Round);
             if (removed > 0)
-                Console.WriteLine($"[tick] 换世清空演化台账: 第 {cur.Round} 世 {removed} 座城 (避免跨世串味)");
+                Console.WriteLine($"[tick] 换世清空子系统世态: 第 {cur.Round} 世 {removed} 行 (避免跨世串味)");
             lock (_expectedGate) { _expectedCache = null; _expectedAtMs = 0; }
             pump.BindWorld(cur.Seed, cur.Round);
         }
@@ -213,10 +217,12 @@ public sealed class MapWorldService : IDisposable
         }
     }
 
-    public MapWorldService(ZongmenOptions opt, string contentRoot)
+    public MapWorldService(ZongmenOptions opt, string contentRoot, SubsystemRegistry subsystems)
     {
         _opt = opt;
+        _subsystems = subsystems;
         var jsDir = ZongmenPaths.ResolveEngineJsDir(opt, contentRoot);
+        var cityJsDir = ZongmenPaths.ResolveCityJsDir(opt, contentRoot);
         _engineHash = ComputeEngineHash(jsDir);
         _mem = new MemoryVirtualContext();
         if (opt.PersistEnabled)
@@ -232,25 +238,34 @@ public sealed class MapWorldService : IDisposable
             opt.PersistEnabled ? ZongmenPaths.ResolveDbPath(opt, contentRoot) : null,
             opt.PlayerSectMaxPerAccount,
             opt.PlayerTownMaxPerSect);
-        /* P2: 城市演化台账 —— 第三条独立表 (同因: 塞 Data 表会被换世时的 PruneExcept
-           静默删掉, 世界会「所有城瞬间回到初始人口」而不报错, 见 CityStateStore 头注释)。
-           ⚠ 由本类持有 (而不是让执行器自己 new): 换世时**必须**清空它, 而「换世」这件事
-             只有本类知道 (它拥有 _ledger)。DI 里注册的是**同一个实例** (见 Program.cs)。 */
-        _cities = new CityStateStore(opt.PersistEnabled ? ZongmenPaths.ResolveDbPath(opt, contentRoot) : null);
+        /* ★ P2 城市演化台账**不在这里**了 —— 它归 Subsystems/City 所有 (见 CitySubsystem)。
+           本类只在换世时经注册表回调 ClearWorld, 在渲染时回调 OverlayJson。 */
         /* C1: 传淘汰回调 —— VM 被 LRU 淘汰时清掉「按 seed 前缀」的 roadVer 观测值,
            否则新 VM 的 roadVer 从 0 重新计数会与旧观测值冲突 (tile 缓存判新鲜失准)。
            P: 再传**新建回调** —— VM 重建后必须把本世的玩家宗门重放回引擎 ext 层,
            否则「服务端重启 / 换世 / VM 被 LRU 淘汰」之后玩家的宗门就消失了。 */
-        _host = new JsEngineHost(jsDir, opt.MaxSeeds,
+        /* ★ VM 池: 世界层 + 各子系统各一个**独立 V8 实例** (Scope 为键)。
+           ⚠ 容量 = MaxSeeds × Scope 数 —— 一个 seed 要占 N 个 VM, 按 MaxSeeds 配
+             会把同一 seed 的其它 Scope 立刻淘汰 (「建了又杀」, 100% 拿到已 Dispose 的实例)。 */
+        var worldModule = new WorldModule(jsDir, cityJsDir);
+        var modules = new List<JsvmModule> { worldModule };
+        modules.AddRange(_subsystems.Modules);
+        _host = new JsVmPool(modules, Math.Max(1, opt.MaxSeeds) * modules.Count,
             seed => { _roadVerCache.TryRemove(WorldKeys.SeedPrefix(seed), out _); },
-            vm => InjectPlayerSects(vm, vm.Seed));
+            (vm, _) => InjectPlayerSects(vm, vm.Seed));
         _maintTask = Task.Run(MaintenanceLoopAsync);
     }
 
     /// <summary>P: 把本世的玩家宗门记录重放进引擎 ext 层 (VM 新建时调用一次)。
+    /// ⚠ 每个 **Scope** 各有一份 ext (世界层 / 城市层是两个独立 V8) ⇒ 本回调会被
+    ///   每个 Scope 各调一次 —— 这正是我们要的 (两份必须一致)。
     /// ⚠ 失败必须**抛** —— 宁可这一次请求失败, 也不要一个"丢了玩家资产"的世界悄悄服役。 </summary>
-    private void InjectPlayerSects(JsWorldVm vm, string seed)
+    private void InjectPlayerSects(JsVm vm, string seed)
     {
+        /* ⚠ 只有载了 mapgen-server.js 的世界/城市 VM 才有 setExternalSettlements。
+           纯数据子系统 (如 characters) 没有该出口 ⇒ 若在此无条件调用, 建 VM 即抛
+           「未知 JS 函数」⇒ 该子系统所有请求失败 (且只在首次建 VM 时暴露, 极易漏测)。 */
+        if (!vm.Module.AcceptsExternalSettlements) return;
         var e = _ledger.Find(seed);
         var json = e == null ? "[]" : _sects.JsonArrayForRound(e.Round);
         var r = vm.Call("setExternalSettlements", json);
@@ -258,8 +273,28 @@ public sealed class MapWorldService : IDisposable
         {
             using var d = JsonDocument.Parse(r);
             Console.WriteLine($"[MapWorldService] 世界 {seed} (第 {e.Round} 世) 重放玩家宗门 " +
-                              d.RootElement.GetProperty("n").GetInt32() + " 座");
+                              d.RootElement.GetProperty("n").GetInt32() + $" 座 [{vm.Scope}]");
         }
+    }
+
+    /// <summary>★ ext (玩家宗门) 变了 ⇒ 把新清单推给**所有已存在的 Scope VM**。
+    /// 病根: 世界层 VM 的 ext 由引擎 commitPlace 在内部自更新, 但**子系统 VM 不会**
+    ///   (它们是独立实例) —— 漏了这一步, City VM 的骨架产出 (growTownFootprint) 与
+    ///   渲染层看到的骨架会漂移, 表现为「演化算出的足迹与画出来的不一样」(不报错)。
+    /// ⚠ 不新建 VM: 尚未创建的 Scope 会在创建时经 onCreated 拿到最新 ext。</summary>
+    private void ReinjectExternalSettlements(string seed)
+    {
+        var e = _ledger.Find(seed);
+        var json = e == null ? "[]" : _sects.JsonArrayForRound(e.Round);
+        _host.ForEachExisting(seed, vm =>
+        {
+            try { vm.Call("setExternalSettlements", json); }
+            catch (Exception ex)
+            {
+                /* 期间被淘汰 ⇒ ObjectDisposedException, 无害 (重建时会重新注入)。留痕不静默。 */
+                Console.Error.WriteLine($"[subsys] ext 重注入失败 [{vm.Scope}]: {ex.GetType().Name}: {ex.Message}");
+            }
+        });
     }
 
     /// <summary>C2: 观测到 roadVer 后写入 (单调取大, 不覆盖更新的值)。</summary>
@@ -274,10 +309,10 @@ public sealed class MapWorldService : IDisposable
 
     /// <summary>C1: 借出世界 VM (借出期内在途计数 >0, LRU 不会 Dispose 它)。
     /// ⚠ 调用方必须用 using 包住整个使用期, 否则容量会短暂超标。</summary>
-    private JsEngineHost.VmLease World(string seed)
+    private JsVmPool.VmLease World(string seed)
     {
         _seenSeedPrefixes.TryAdd(WorldKeys.SeedPrefix(seed), 0);   // P3: 登记已用过的世界
-        return _host.Lease(seed);
+        return _host.Lease(WorldModule.WorldScope, seed);
     }
 
     /* ---------------- P2: 城市演化执行器 (TickVmPoolExecutor) 的公开接入面 ----------------
@@ -304,13 +339,21 @@ public sealed class MapWorldService : IDisposable
         catch { return 0; }
     }
 
-    /// <summary>借出某世的世界 VM (借出期内在途计数 &gt;0, LRU 不会 Dispose 它)。
-    /// ⚠ 调用方必须 using 包住整个使用期。见 <see cref="World"/>。</summary>
-    public JsEngineHost.VmLease LeaseWorld(string seed) => World(seed);
+    /// <summary>借出某 Scope 的 VM。**世界层之外的调用者一律走这里** ——
+    /// 子系统执行器要的就是「自己那一个独立 V8」, 而不是世界层那把被人类请求占着的门闩。
+    /// ⚠ 与 <see cref="World"/> 同样登记 seed 前缀 (PruneExcept 按它判定活跃世界)。</summary>
+    public JsVmPool.VmLease LeaseScope(string scope, string seed)
+    {
+        _seenSeedPrefixes.TryAdd(WorldKeys.SeedPrefix(seed), 0);
+        return _host.Lease(scope, seed);
+    }
+
+    /// <summary>借出世界层 VM (供 TickPump 侧 / 判据宿主用; 新代码优先用 LeaseScope)。</summary>
+    public JsVmPool.VmLease LeaseWorld(string seed) => World(seed);
 
     /// <summary>读某区域格的聚落列表 (演化器遍历世界用)。
-    /// 返回 `[{id,type,q,r,pop,tier,name}, ...]`; poi 由调用方自行过滤。</summary>
-    public string SettlementsForJson(JsWorldVm vm, int i, int j)
+    /// ⚠ 只在**世界层** VM 上可用 (citySettlementsJson 归 WorldModule)。</summary>
+    public string SettlementsForJson(JsVm vm, int i, int j)
         => vm.Call("settleJson", i, j);
 
     /// <summary>演化改动了某区域格的聚落层 ⇒ 作废该区域的**落库** settle/region 包 + 推进脏块 rev。
@@ -341,7 +384,7 @@ public sealed class MapWorldService : IDisposable
         });
     }
 
-    private byte[] BuildChunk(JsWorldVm vm, int ca, int cb)
+    private byte[] BuildChunk(JsVm vm, int ca, int cb)
     {
         var json = vm.Call("chunkJson", ca, cb);
         using var d = JsonDocument.Parse(json);
@@ -404,7 +447,7 @@ public sealed class MapWorldService : IDisposable
         return gz;
     }
 
-    private byte[] BuildRegion(JsWorldVm vm, int i, int j)
+    private byte[] BuildRegion(JsVm vm, int i, int j)
     {
         var json = vm.Call("regionJson", i, j);
         using var d = JsonDocument.Parse(json);
@@ -491,7 +534,7 @@ public sealed class MapWorldService : IDisposable
         });
     }
 
-    private byte[] BuildComm(JsWorldVm vm, int ci, int cj)
+    private byte[] BuildComm(JsVm vm, int ci, int cj)
     {
         var json = vm.Call("commJson", ci, cj);
         using var d = JsonDocument.Parse(json);
@@ -547,7 +590,7 @@ public sealed class MapWorldService : IDisposable
         });
     }
 
-    private byte[] BuildSettle(JsWorldVm vm, string seed, int i, int j)
+    private byte[] BuildSettle(JsVm vm, string seed, int i, int j)
     {
         /* ★ b 方案 (2026-10-10): 城镇足迹 = **骨架 ⊕ 建筑计划**。
            计划由引擎按 (pop/tier/state) 纯派生 —— 人口涨则建筑增多/升级, 人口跌或
@@ -578,42 +621,16 @@ public sealed class MapWorldService : IDisposable
     }
 
     /// <summary>为某区域格 (i,j) 的聚落构造「建筑计划 overlay」: `{"&lt;id&gt;":{pop,tier,state}}`。
-    /// ⚠ 只取**本区域格**的城 (按 id 前两段 = 区域格索引筛) —— 台账是全世界的,
-    ///   整份塞进去会让每个区域包多传几百条无关记录 (且 VM 侧白解析)。
-    /// ⚠ 无当前世 / 无演化台账 ⇒ 返回空串 ⇒ 引擎原样吐骨架 (零变化路径)。</summary>
+    /// ★ 实现已**下移到子系统** (CitySubsystem.RenderOverlayJson): 台账归 City 所有,
+    ///   让 Core 直接读它就是「Core 编译期认识 City」—— 那正是这次重构要拆掉的耦合。
+    /// ⚠ 无当前世 / 无子系统贡献 ⇒ 返回空串 ⇒ 引擎原样吐骨架 (零变化路径)。</summary>
     private string SettleOverlayJson(int i, int j)
     {
         int round;
         try { round = _ledger.Count() == 0 ? 0 : _ledger.Current().Round; }
         catch { return ""; }
         if (round <= 0) return "";
-        var rows = _cities.ByRound(round);
-        if (rows.Count == 0) return "";
-        var sb = new StringBuilder(64);
-        sb.Append('{');
-        var first = true;
-        foreach (var r in rows)
-        {
-            var (ri, rj) = RegionOfId(r.Id);
-            if (ri != i || rj != j) continue;
-            if (r.Pop <= 0) continue;
-            if (!first) sb.Append(',');
-            first = false;
-            sb.Append(JsonSerializer.Serialize(r.Id)).Append(":{\"pop\":").Append(r.Pop)
-              .Append(",\"tier\":").Append(r.Tier)
-              .Append(",\"state\":").Append(r.State).Append('}');
-        }
-        if (first) return "";
-        return sb.Append('}').ToString();
-    }
-
-    /// <summary>从聚落 id `{区域i}_{区域j}_u{n}` 反解区域格; 形态不合法返回 (int.MinValue,int.MinValue)。</summary>
-    private static (int I, int J) RegionOfId(string id)
-    {
-        var p = id.Split('_');
-        if (p.Length < 2) return (int.MinValue, int.MinValue);
-        return (int.TryParse(p[0], out var i) ? i : int.MinValue,
-                int.TryParse(p[1], out var j) ? j : int.MinValue);
+        return _subsystems.OverlayJson(round, i, j);
     }
 
     private static List<BuildingDto> ReadBuildings(JsonElement e, string name)
@@ -837,7 +854,7 @@ public sealed class MapWorldService : IDisposable
     /* 块归属映射: (regions[], comms[]) — JS 权威 (blockLayersJson)
        结果仅依赖 (seed,i,j) 且内容确定 (region/comm 归属映射与事件无关),
        故按 seedprefix:i:j 加 LRU, 免每次块请求重跑 V8 + JSON 解析。 */
-    private ((int, int)[] regions, (int, int)[] comms) GetBlockLayers(JsWorldVm vm, string seed, int i, int j)
+    private ((int, int)[] regions, (int, int)[] comms) GetBlockLayers(JsVm vm, string seed, int i, int j)
     {
         var key = WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j;
         var cached = _blockLayersCache.Get(key);
@@ -1096,7 +1113,7 @@ public sealed class MapWorldService : IDisposable
         _sql?.Flush();
         return System.Text.Json.JsonSerializer.Serialize(new
         {
-            liveSeeds = _host.LiveSeeds,
+            liveSeeds = _host.Count,
             maxSeeds = _opt.MaxSeeds,      // 便于验证 appsettings.json 是否真的生效
             dbRows = _sql?.Count() ?? 0,
             memRows = _mem.Count(),
@@ -1560,7 +1577,7 @@ public sealed class MapWorldService : IDisposable
                 try
                 {
                     _sql?.Flush();
-                    if (_sql != null && _host.LiveSeeds > 0)
+                    if (_sql != null && _host.Count > 0)
                     {
                         var prefixes = new List<string>();
                         foreach (var seed in _host.Seeds)
@@ -1582,7 +1599,7 @@ public sealed class MapWorldService : IDisposable
                     /* C5: _blockRev 无别的淘汰路径 (每块一条 key), 长期漫游不同 seed 会线性增长
                        → 按活跃 seed 前缀裁剪。被裁掉的只是「脏标记」, 通知客户端下一次
                        全量拉取即可自愈, 不影响正确性。 */
-                    if (_host.LiveSeeds > 0)
+                    if (_host.Count > 0)
                     {
                         var live = new List<string>();
                         foreach (var seed in _host.Seeds) live.Add("blk:" + WorldKeys.SeedPrefix(seed) + ":");
@@ -1633,7 +1650,10 @@ public sealed class MapWorldService : IDisposable
         _sql?.Dispose();
         _ledger.Dispose();
         _sects.Dispose();
-        _cities.Dispose();
+        /* ★ 子系统台账的释放交给注册表 —— Core 不认识具体子系统类型。
+           ⚠ 必须在 _sql.Dispose() **之前**: 各子系统用的是独立的连接串 (同库不同表),
+             但它们自己 flush; 这里只保证「先关子系统, 再关地图缓存」。 */
+        _subsystems.Dispose();
         _mem.Dispose();
         _maintCts.Dispose();
     }

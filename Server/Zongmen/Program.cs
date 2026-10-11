@@ -1,5 +1,8 @@
 using Zongmen;
 using Zongmen.Services;
+using Zongmen.Subsystems;
+using Zongmen.Subsystems.Characters;
+using Zongmen.Subsystems.City;
 using Zongmen.Storage;
 using Zongmen.Time;
 using Zongmen.Web;
@@ -30,10 +33,29 @@ if (!File.Exists(Path.Combine(webDir, "index.html")))
 
 builder.WebHost.UseUrls($"http://0.0.0.0:{options.Port}");
 builder.Services.AddSingleton(options);
-/* ⚠ MapWorldService 持有城市演化台账 (_cities) ⇒ 必须先把实例建出来,
-   再把它身上那个 CityStateStore **同一个**注册进 DI (执行器要用它)。 */
-var worldService = new MapWorldService(options, contentRoot);
+
+/* ★ 子系统装配 (2026-10-11 目录重构) ─────────────────────────────────────────
+   一个子系统 = `Subsystems/<Name>/` 一个自包含文件夹 (模块 + 台账 + 执行器 + js)。
+   ⚠ 必须在 MapWorldService **之前**建好: Core 要用它们的 JsvmModule 建 VM 池
+     (每个 scope 一个独立 V8 实例), 并在换世 / 渲染叠加时回调它们。
+   ⚠ 加子系统 = 这里多一行; Core 一行都不用改 (Core 不认识任何具体子系统类型)。 */
+var engineJsDir = ZongmenPaths.ResolveEngineJsDir(options, contentRoot);
+var cityJsDir = ZongmenPaths.ResolveCityJsDir(options, contentRoot);
+var persistDb = options.PersistEnabled ? ZongmenPaths.ResolveDbPath(options, contentRoot) : null;
+
+var city = new CitySubsystem(persistDb, engineJsDir, cityJsDir);
+/* ★ 角色子系统 (Subsystems/Characters): 独立 V8 (scope="characters"), 无台账 ——
+   角色是 (seed,index) 的纯函数派生, 每次请求确定性重算 ⇒ 不需要 1MB 落库表。
+   数据端点 /api/characters 由它自己声明 (见 CharactersSubsystem.MapEndpoints)。 */
+var characters = new CharactersSubsystem(ZongmenPaths.ResolveCharactersDir(options, contentRoot));
+var subsystems = new SubsystemRegistry(new ISubsystem[] { city, characters });
+
+var worldService = new MapWorldService(options, contentRoot, subsystems);
 builder.Services.AddSingleton(worldService);
+builder.Services.AddSingleton(subsystems);
+builder.Services.AddSingleton(city);
+builder.Services.AddSingleton(city.Store);
+builder.Services.AddSingleton(characters);
 
 /* ── 世界时钟与 Tick 演化框架 (docs/游戏时钟与Tick演化框架方案.md v2.1) ──────
    形状: nextTick 落库 → 相位抖动摊批 → 解耦分批 → 消费队列 → 无状态 VM → 定序合流。
@@ -55,19 +77,25 @@ builder.Services.AddSingleton<TickScheduler>();
 builder.Services.AddSingleton<TickPartitioner>();
 builder.Services.AddSingleton(sp => new TickMetrics(
     tickOptions, sp.GetRequiredService<TickPerfStore>()));
-/* ★ P2 城市演化台账 (第三条独立表) —— 用的是 MapWorldService 持有的**同一个实例**
-   (换世清空由它负责; 执行器直接读写它)。⚠ 必须是同一实例: 建两个连接池会各行其是。 */
-builder.Services.AddSingleton(worldService.Cities);
+/* ★ 城市演化台账由 CitySubsystem 持有 (第三条独立表) —— 换世清空 / 渲染叠加都在它那里,
+   Core 不再认识这个类型。⚠ 必须是**同一实例**: 建两个连接池会各行其是 (已由
+   `AddSingleton(city.Store)` 保证)。 */
 /* ⚠⚠ 这里**不能**把 TickPump 注入执行器 —— TickPump 依赖 ITickExecutor,
    构造本对象时再解析 TickPump 即成环。⚠ 因走 factory lambda ⇒ **绕过容器的循环检测**,
    结果是**永久静默挂死** (进程活着/不监听端口/零日志), 而不是抛异常。
    2026-09-27 实测: 后端卡在启动, 前端一直「正在生成」—— 就是这个环。
-   ⇒ 执行器不需要 pump (pump 才是那个需要 executor 的一方)。 */
-builder.Services.AddSingleton<ITickExecutor>(sp => new TickVmPoolExecutor(
-    sp.GetRequiredService<MapWorldService>(),
-    sp.GetRequiredService<CityStateStore>(),
-    tickOptions,
-    sp.GetRequiredService<ILogger<TickVmPoolExecutor>>()));
+   ⇒ 执行器不需要 pump (pump 才是那个需要 executor 的一方)。
+   ★ 多执行器由 TickExecutorHub 按 job.Kind 派发: 每个子系统一个执行器。
+      ⚠ 不能直接注册多个 ITickExecutor —— 同名服务只取最后一个, 前一个认领的
+        job 会永远 not-claimed 而静默停摆。 */
+builder.Services.AddSingleton<ITickExecutor>(sp => new TickExecutorHub(new ITickExecutor[]
+{
+    new CityTickExecutor(
+        sp.GetRequiredService<MapWorldService>(),
+        sp.GetRequiredService<CityStateStore>(),
+        tickOptions,
+        sp.GetRequiredService<ILogger<CityTickExecutor>>()),
+}));
 builder.Services.AddSingleton<TickPump>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TickPump>());
 
@@ -91,6 +119,10 @@ MapWsHandler.Map(app, app.Services.GetRequiredService<MapWorldService>(),
     ZongmenPaths.ResolveEngineJsDir(options, contentRoot),
     app.Services.GetRequiredService<TickPump>());   // 帧 7 = 世界时钟 (ClockQuery/ClockPush)
 MapEndpoints.MapDebug(app, Path.Combine(ZongmenPaths.FindRoot(contentRoot), "verify", "capture.png"));
+/* ★ 角色数据端点 (/api/characters) —— 由 Characters 子系统**自己声明**。
+   ⚠ 放在这里而不是 MapEndpoints.cs: Web 层(Core)不该引用具体子系统类型;
+     Program.cs 是组合根, 由它接线是允许的 (Core 一行未改)。 */
+characters.MapEndpoints(app, worldService);
 
 app.Lifetime.ApplicationStarted.Register(() =>
 {
@@ -102,6 +134,8 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine($"  数据库:   {(options.PersistEnabled ? ZongmenPaths.ResolveDbPath(options, contentRoot) : "(仅内存, 持久化关闭)")}");
     Console.WriteLine($"  配置根:   {contentRoot}  (MaxSeeds={options.MaxSeeds})");
     Console.WriteLine($"  世界时钟: {(tickOptions.TickEnabled ? $"已启用 (1 tick = 1 日, L0 摊批 M={tickOptions.L0SpreadTicks}, 执行器={app.Services.GetRequiredService<ITickExecutor>().Name})" : "已禁用")}");
+    Console.WriteLine($"  子系统:   {subsystems.Describe()}");
+    Console.WriteLine($"  VM:       每个子系统一个独立 V8 实例 = {string.Join(" + ", subsystems.Modules.Select(m => m.Scope))}");
     Console.WriteLine($"  访问地址: http://127.0.0.1:{options.Port}");
     Console.WriteLine("======================================================");
 });

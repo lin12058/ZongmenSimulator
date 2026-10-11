@@ -1,0 +1,438 @@
+{
+  "meta": {
+    "name": "宗门模拟器 · 修仙基础数据",
+    "schema": "cultivation-base/v1",
+    "version": "1.0.0",
+    "desc": "角色生成子系统(CultivatorGen)的基础数据表。全部数据驱动，生成器不硬编码任何词条。新增内容只需往对应 list 里追加一行(见 ext 槽)。",
+    "ext": {
+      "_note": "扩展位：预留给 mod / 后续版本往此对象挂新数据集，生成器会按 section 名自动发现。",
+      "sections": []
+    }
+  },
+
+  "elements": {
+    "order": ["金", "木", "水", "火", "土"],
+    "attrs": {
+      "金": { "name": "金", "nature": "锐", "color": "#cfd8dc", "tags": ["刚", "锐", "杀伐"], "desc": "主杀伐、锋锐；利剑修、炼器。", "affinityBonus": { "剑诀": 0.15, "炼器术": 0.1 } },
+      "木": { "name": "木", "nature": "生", "color": "#66bb6a", "tags": ["生", "韧", "久"], "desc": "主生机、恢复；利炼丹、疗伤、御兽。", "affinityBonus": { "炼丹术": 0.15, "疗伤": 0.15 } },
+      "水": { "name": "水", "nature": "柔", "color": "#42a5f5", "tags": ["柔", "润", "变"], "desc": "主变化、洞察；利身法、幻术、神识。", "affinityBonus": { "身法": 0.15, "幻术": 0.15 } },
+      "火": { "name": "火", "nature": "烈", "color": "#ef5350", "tags": ["烈", "焚", "爆"], "desc": "主攻伐、炼化；利火力、炼器、爆裂。", "affinityBonus": { "攻击法术": 0.15, "炼器术": 0.1 } },
+      "土": { "name": "土", "nature": "厚", "color": "#c9a227", "tags": ["厚", "稳", "御"], "desc": "主防御、厚重；利体修、阵法、防御。", "affinityBonus": { "防御法术": 0.15, "阵法": 0.15 } }
+    },
+    "mutations": {
+      "_note": "变异灵根：只能由异灵根/天灵根携带。",
+      "雷": { "name": "雷", "base": ["金", "火"], "color": "#7e57c2", "tags": ["灭", "速", "罚"], "desc": "天罚之力；攻速兼备，克制阴煞。" },
+      "冰": { "name": "冰", "base": ["水"], "color": "#81d4fa", "tags": ["封", "寒"], "desc": "极寒冻结；控场强。" },
+      "风": { "name": "风", "base": ["木", "水"], "color": "#b2dfdb", "tags": ["疾", "散"], "desc": "极速轻灵；利身法与范围术。" },
+      "暗": { "name": "暗", "base": ["水", "土"], "color": "#5c6bc0", "tags": ["蚀", "隐", "鬼"], "desc": "蚀骨隐匿；魔道多修。" },
+      "光": { "name": "光", "base": ["火", "金"], "color": "#ffe082", "tags": ["净", "愈"], "desc": "净化治愈；克制邪祟。" },
+      "空": { "name": "空间", "base": ["金", "水"], "color": "#8e24aa", "tags": ["挪", "遁", "裂"], "desc": "空间挪移；稀世罕有。" }
+    }
+  },
+
+  "spiritRoots": {
+    "grades": [
+      { "id": "tian", "name": "天灵根", "rank": 7, "speedMul": 3.0, "weight": 1, "color": "#e53935", "desc": "单属性圆满无瑕，万中无一，天生道种。", "elementCount": 1, "mutChance": 0.45, "attrBonus": { "wuxing": 8, "gengu": 5 } },
+      { "id": "yi", "name": "异灵根", "rank": 6, "speedMul": 2.6, "weight": 3, "color": "#fb8c00", "desc": "携变异属性(雷/冰/风/暗/光/空间)，威能诡谲。", "elementCount": 1, "mutChance": 1.0, "attrBonus": { "wuxing": 5, "shenshi": 4 } },
+      { "id": "dan", "name": "单灵根", "rank": 5, "speedMul": 2.2, "weight": 8, "color": "#ab47bc", "desc": "单属性纯灵根，修炼迅捷，宗门争抢之才。", "elementCount": 1, "mutChance": 0.06, "attrBonus": { "wuxing": 4 } },
+      { "id": "shuang", "name": "双灵根", "rank": 4, "speedMul": 1.6, "weight": 20, "color": "#42a5f5", "desc": "双属性灵根，可修两系功法，均衡。", "elementCount": 2, "mutChance": 0, "attrBonus": { "wuxing": 2 } },
+      { "id": "san", "name": "三灵根", "rank": 3, "speedMul": 1.25, "weight": 30, "color": "#4caf50", "desc": "三属性灵根，资质中庸，最是常见。", "elementCount": 3, "mutChance": 0, "attrBonus": {} },
+      { "id": "si", "name": "四灵根", "rank": 2, "speedMul": 1.0, "weight": 22, "color": "#9e9e9e", "desc": "四属性灵根，泛而不精，修行艰难。", "elementCount": 4, "mutChance": 0, "attrBonus": { "wuxing": -3 } },
+      { "id": "wu", "name": "五行杂灵根", "rank": 1, "speedMul": 0.75, "weight": 12, "color": "#795548", "desc": "五行俱全却驳杂，俗称伪灵根，难成大器。", "elementCount": 5, "mutChance": 0, "attrBonus": { "wuxing": -6, "gengu": -2 } },
+      { "id": "fei", "name": "废灵根", "rank": 0, "speedMul": 0.5, "weight": 4, "color": "#616161", "desc": "灵根闭塞近乎无，唯逆天机缘方可入道。", "elementCount": 1, "mutChance": 0, "attrBonus": { "wuxing": -10, "qiyun": 3 } }
+    ],
+    "purity": { "mean": 55, "sd": 16, "min": 1, "max": 100, "desc": "灵根纯度(正态)：影响修炼速度与法力亲和，非品质本身。" },
+    "purityTiers": [
+      { "min": 95, "name": "通玄", "mul": 1.35 },
+      { "min": 85, "name": "无瑕", "mul": 1.2 },
+      { "min": 70, "name": "上品", "mul": 1.1 },
+      { "min": 45, "name": "中品", "mul": 1.0 },
+      { "min": 20, "name": "下品", "mul": 0.9 },
+      { "min": 0, "name": "驳杂", "mul": 0.78 }
+    ]
+  },
+
+  "realms": {
+    "list": [
+      { "id": "fanren", "name": "凡人", "seq": 0, "layers": ["凡体"], "lifespan": 80, "qiBase": 0, "breakNeed": 0, "cultExpBase": 1, "desc": "未入道者。" },
+      { "id": "lianqi", "name": "炼气期", "seq": 1, "layers": ["一层", "二层", "三层", "四层", "五层", "六层", "七层", "八层", "九层"], "lifespan": 120, "qiBase": 100, "breakNeed": 100, "cultExpBase": 100, "desc": "引气入体，九层圆满方可筑基。" },
+      { "id": "zhuji", "name": "筑基期", "seq": 2, "layers": ["初期", "中期", "后期"], "lifespan": 200, "qiBase": 500, "breakNeed": 500, "cultExpBase": 800, "desc": "灵气化液，筑就道基。" },
+      { "id": "jindan", "name": "金丹期", "seq": 3, "layers": ["初期", "中期", "后期"], "lifespan": 500, "qiBase": 2000, "breakNeed": 2000, "cultExpBase": 5000, "desc": "结成金丹，寿元大增。" },
+      { "id": "yuanying", "name": "元婴期", "seq": 4, "layers": ["初期", "中期", "后期"], "lifespan": 1000, "qiBase": 8000, "breakNeed": 8000, "cultExpBase": 30000, "desc": "婴成出窍，一念千里。" },
+      { "id": "huashen", "name": "化神期", "seq": 5, "layers": ["初期", "中期", "后期"], "lifespan": 2000, "qiBase": 30000, "breakNeed": 30000, "cultExpBase": 200000, "desc": "神念化形，天地元气为我所用。" },
+      { "id": "lianxu", "name": "炼虚期", "seq": 6, "layers": ["初期", "中期", "后期"], "lifespan": 5000, "qiBase": 100000, "breakNeed": 100000, "cultExpBase": 1500000, "desc": "炼化虚空，举手投足引动空间。" },
+      { "id": "heti", "name": "合体期", "seq": 7, "layers": ["初期", "中期", "后期"], "lifespan": 10000, "qiBase": 400000, "breakNeed": 400000, "cultExpBase": 10000000, "desc": "元神与肉身合一，几近不灭。" },
+      { "id": "dacheng", "name": "大乘期", "seq": 8, "layers": ["圆满"], "lifespan": 20000, "qiBase": 2000000, "breakNeed": 2000000, "cultExpBase": 80000000, "desc": "人间之巅，只待飞升。" },
+      { "id": "dujie", "name": "渡劫期", "seq": 9, "layers": ["待劫", "渡劫中"], "lifespan": 30000, "qiBase": 10000000, "breakNeed": 10000000, "cultExpBase": 500000000, "desc": "引动天劫，成则登仙，败则道消。" }
+    ],
+    "breakDifficulty": { "_note": "突破概率 = base - 境界难度 + (心境+根骨)/k。", "base": 0.72, "perRealm": 0.06, "attrDivisor": 320 },
+    "tribulation": { "_note": "天劫：筑基以上突破每阶触发。", "startRealm": "zhuji", "damageBase": 0.25, "perRealm": 0.08, "luckMitigation": 0.002 }
+  },
+
+  "attributes": {
+    "core": [
+      { "key": "gengu", "name": "根骨", "abbr": "骨", "mean": 50, "sd": 15, "min": 1, "max": 100, "desc": "体魄与先天根基：决定气血、炼体上限、寿元微调。", "effect": "气血/炼体/寿元" },
+      { "key": "wuxing", "name": "悟性", "abbr": "悟", "mean": 50, "sd": 15, "min": 1, "max": 100, "desc": "领悟力：决定修炼速度、功法参悟、法术掌握。", "effect": "修炼速度/功法领悟" },
+      { "key": "shenshi", "name": "神识", "abbr": "识", "mean": 50, "sd": 15, "min": 1, "max": 100, "desc": "神魂之力：决定感知、探查、法术威能与御物。", "effect": "感知/法术/御物" },
+      { "key": "qiyun", "name": "气运", "abbr": "运", "mean": 50, "sd": 18, "min": 1, "max": 100, "desc": "机缘厚薄：决定奇遇、暴击式好运与逢凶化吉。方差最大。", "effect": "机缘/事件/奇遇" },
+      { "key": "xinjing", "name": "心境", "abbr": "心", "mean": 50, "sd": 14, "min": 1, "max": 100, "desc": "道心稳固：决定突破成功率、抗心魔、走火入魔风险。", "effect": "突破/抗心魔" },
+      { "key": "meili", "name": "魅力", "abbr": "魅", "mean": 50, "sd": 16, "min": 1, "max": 100, "desc": "风仪气度：决定社交好感、结缘、招募与议价。", "effect": "社交/结缘/招募" }
+    ],
+    "derived": [
+      { "key": "zizhi", "name": "资质", "expr": "round((spiritRootSpeedMul*40) + (wuxing*0.4) + (shenshi*0.2))", "desc": "综合灵根与悟性的修行天分(0~100+)。" },
+      { "key": "qianli", "name": "潜力", "expr": "round((gengu+wuxing+shenshi+xinjing)/4 * (0.6 + spiritRootPurity/250))", "desc": "上限估值：越高越可能问鼎高境。" },
+      { "key": "shengwang", "name": "声望", "expr": "0", "desc": "江湖名望，初始为 0，随经历增长。" }
+    ],
+    "resourceBars": [
+      { "key": "qi", "name": "灵力", "desc": "施法消耗，随修炼增长。", "unit": "点" },
+      { "key": "qixue", "name": "气血", "desc": "肉身根本，受伤扣除。", "unit": "点" },
+      { "key": "jingshen", "name": "精神", "desc": "神魂额度，耗神则亏。", "unit": "点" }
+    ]
+  },
+
+  "lifespan": {
+    "_note": "基础寿元取 realm.lifespan；实际寿元 = base * (1 + (gengu-50)/500) * traitMul。",
+    "genguDivisor": 500,
+    "minLifespan": 30
+  },
+
+  "techniques": {
+    "categories": [
+      { "id": "xinfa", "name": "心法", "slot": "主修", "desc": "决定修行根本速度与法力性质，一人一部。" },
+      { "id": "shenfa", "name": "身法", "slot": "辅修", "desc": "移动、闪避、遁走。" },
+      { "id": "jianjue", "name": "剑诀", "slot": "辅修", "desc": "御剑杀伐。" },
+      { "id": "daofa", "name": "刀法", "slot": "辅修", "desc": "重刀刚猛。" },
+      { "id": "quanzhang", "name": "拳掌", "slot": "辅修", "desc": "近身搏杀。" },
+      { "id": "zhifa", "name": "指法", "slot": "辅修", "desc": "点穴、破罡。" },
+      { "id": "gongfa_shu", "name": "攻击法术", "slot": "辅修", "desc": "五行攻伐之术。" },
+      { "id": "fangfa_shu", "name": "防御法术", "slot": "辅修", "desc": "护体、结盾。" },
+      { "id": "fuzhu_shu", "name": "辅助法术", "slot": "辅修", "desc": "增益、净化、疗伤。" },
+      { "id": "dunfa", "name": "遁法", "slot": "辅修", "desc": "土遁、水遁、空间遁。" },
+      { "id": "zhenfa", "name": "阵法", "slot": "技艺", "desc": "布阵困敌、聚灵。" },
+      { "id": "liandan", "name": "炼丹术", "slot": "技艺", "desc": "炼丹火候之法。" },
+      { "id": "lianqi_shu", "name": "炼器术", "slot": "技艺", "desc": "锻造法器法宝。" },
+      { "id": "fufa", "name": "符法", "slot": "技艺", "desc": "绘制灵符。" },
+      { "id": "yushou", "name": "御兽", "slot": "技艺", "desc": "驯养驱使妖兽。" }
+    ],
+    "grades": [
+      { "id": "fan", "name": "凡阶", "rank": 0, "color": "#9aa0a6", "weight": 26 },
+      { "id": "huang", "name": "黄阶", "rank": 1, "color": "#7cb342", "weight": 34 },
+      { "id": "xuan", "name": "玄阶", "rank": 2, "color": "#42a5f5", "weight": 22 },
+      { "id": "di", "name": "地阶", "rank": 3, "color": "#ab47bc", "weight": 12 },
+      { "id": "tian", "name": "天阶", "rank": 4, "color": "#fb8c00", "weight": 5 },
+      { "id": "xian", "name": "仙阶", "rank": 5, "color": "#e53935", "weight": 1 }
+    ],
+    "list": [
+      { "id": "yinqi_jue", "name": "引气诀", "cat": "xinfa", "grade": "fan", "element": "无", "minRealm": "fanren", "minRoot": "fei", "effects": { "speedMul": 1.0 }, "desc": "最粗浅的入门吐纳法。" },
+      { "id": "hunyuan_jing", "name": "混元一气诀", "cat": "xinfa", "grade": "tian", "element": "无", "minRealm": "lianqi", "minRoot": "san", "effects": { "speedMul": 1.6, "allAttr": 3 }, "desc": "大道至简，混元归一，至高心法之一。" },
+      { "id": "taixu_zhen_jing", "name": "太虚真经", "cat": "xinfa", "grade": "xian", "element": "空", "minRealm": "zhuji", "minRoot": "yi", "effects": { "speedMul": 2.0, "shenshi": 15 }, "desc": "传说中的仙阶心法，直指空间大道。" },
+      { "id": "wuxing_guiyuan", "name": "五行归元诀", "cat": "xinfa", "grade": "di", "element": "全", "minRealm": "lianqi", "minRoot": "wu", "effects": { "speedMul": 1.3 }, "desc": "五行杂灵根者的翻身之法，化驳杂为浑厚。" },
+      { "id": "jinguang_zhou", "name": "金光咒", "cat": "xinfa", "grade": "xuan", "element": "金", "minRealm": "lianqi", "minRoot": "si", "effects": { "speedMul": 1.2, "gengu": 5 }, "desc": "佛道双修的金身法门。" },
+      { "id": "xuanbing_taiyin", "name": "玄冰太阴功", "cat": "xinfa", "grade": "di", "element": "冰", "minRealm": "zhuji", "minRoot": "dan", "effects": { "speedMul": 1.45, "shenshi": 8 }, "desc": "至阴至寒，修成冰肌玉骨。" },
+      { "id": "liehuo_fentian", "name": "烈火焚天诀", "cat": "xinfa", "grade": "di", "element": "火", "minRealm": "zhuji", "minRoot": "dan", "effects": { "speedMul": 1.4, "attack": 12 }, "desc": "焚尽万物，攻伐第一。" },
+      { "id": "qiangmu_changsheng", "name": "青木长生诀", "cat": "xinfa", "grade": "di", "element": "木", "minRealm": "zhuji", "minRoot": "dan", "effects": { "speedMul": 1.35, "lifespan": 50 }, "desc": "生生不息，延寿疗伤。" },
+      { "id": "houtu_mingwang", "name": "厚土明王经", "cat": "xinfa", "grade": "di", "element": "土", "minRealm": "zhuji", "minRoot": "dan", "effects": { "speedMul": 1.35, "defense": 15 }, "desc": "不动如山，肉身坚逾金石。" },
+      { "id": "leiting_wanjun", "name": "雷霆万钧真法", "cat": "xinfa", "grade": "tian", "element": "雷", "minRealm": "jindan", "minRoot": "yi", "effects": { "speedMul": 1.7, "attack": 20 }, "desc": "引天雷淬体，攻速兼备。" },
+      { "id": "xuedun_mogong", "name": "血遁魔功", "cat": "xinfa", "grade": "xuan", "element": "暗", "minRealm": "lianqi", "minRoot": "san", "effects": { "speedMul": 1.5, "xinjing": -8, "attack": 10 }, "desc": "魔道速成之法，损道心而进境飞快。" },
+      { "id": "qinglian_daozhen", "name": "青莲剑道真解", "cat": "xinfa", "grade": "tian", "element": "木", "minRealm": "zhuji", "minRoot": "dan", "effects": { "speedMul": 1.55, "swordBonus": 18 }, "desc": "剑修至高心法，一剑生莲。" },
+
+      { "id": "yufeng_jue", "name": "御风诀", "cat": "shenfa", "grade": "huang", "element": "风", "minRealm": "lianqi", "minRoot": "si", "effects": { "speed": 8 }, "desc": "踏风而行，轻身迅捷。" },
+      { "id": "lingbo_weibu", "name": "凌波微步", "cat": "shenfa", "grade": "xuan", "element": "水", "minRealm": "lianqi", "minRoot": "san", "effects": { "speed": 12, "dodge": 10 }, "desc": "身似流水，飘忽难测。" },
+      { "id": "tiyun_zong", "name": "梯云纵", "cat": "shenfa", "grade": "huang", "element": "无", "minRealm": "fanren", "minRoot": "fei", "effects": { "speed": 6 }, "desc": "纵跃之术，可至数十丈。" },
+      { "id": "qiankun_nuoyi", "name": "乾坤挪移", "cat": "shenfa", "grade": "tian", "element": "空", "minRealm": "yuanying", "minRoot": "yi", "effects": { "speed": 30, "dodge": 25 }, "desc": "咫尺天涯，转瞬挪移百丈。" },
+      { "id": "wuxing_dunfa", "name": "五行遁法", "cat": "dunfa", "grade": "xuan", "element": "全", "minRealm": "zhuji", "minRoot": "si", "effects": { "escape": 15 }, "desc": "借五行之便遁走，保命首选。" },
+
+      { "id": "yujian_shu", "name": "御剑术", "cat": "jianjue", "grade": "huang", "element": "金", "minRealm": "lianqi", "minRoot": "si", "effects": { "attack": 8 }, "desc": "初阶御剑，剑随心动。" },
+      { "id": "wanjian_guizong", "name": "万剑归宗", "cat": "jianjue", "grade": "tian", "element": "金", "minRealm": "jindan", "minRoot": "dan", "effects": { "attack": 28 }, "desc": "剑化万千，遮天蔽日。" },
+      { "id": "qinglian_jianjue", "name": "青莲剑诀", "cat": "jianjue", "grade": "di", "element": "木", "minRealm": "zhuji", "minRoot": "dan", "effects": { "attack": 18 }, "desc": "剑意化莲，生生不灭。" },
+      { "id": "xiuluo_jian", "name": "修罗剑法", "cat": "jianjue", "grade": "xuan", "element": "暗", "minRealm": "lianqi", "minRoot": "san", "effects": { "attack": 14 }, "desc": "嗜血之剑，以杀养剑。" },
+      { "id": "sancai_jian", "name": "三才剑", "cat": "jianjue", "grade": "xuan", "element": "无", "minRealm": "lianqi", "minRoot": "si", "effects": { "attack": 10 }, "desc": "天地人三才合一的基础剑阵。" },
+
+      { "id": "bahuang_daofa", "name": "八荒刀法", "cat": "daofa", "grade": "xuan", "element": "土", "minRealm": "lianqi", "minRoot": "san", "effects": { "attack": 12 }, "desc": "大开大合，力压八荒。" },
+      { "id": "taixu_shenzhang", "name": "太虚神掌", "cat": "quanzhang", "grade": "di", "element": "无", "minRealm": "zhuji", "minRoot": "san", "effects": { "attack": 16 }, "desc": "掌出一片太虚，无形无相。" },
+      { "id": "wuxing_quan", "name": "五行拳", "cat": "quanzhang", "grade": "huang", "element": "全", "minRealm": "fanren", "minRoot": "fei", "effects": { "attack": 6, "gengu": 3 }, "desc": "炼体拳法，五行轮转。" },
+      { "id": "yiyang_zhi", "name": "一阳指", "cat": "zhifa", "grade": "xuan", "element": "火", "minRealm": "lianqi", "minRoot": "san", "effects": { "attack": 11 }, "desc": "指劲如阳，破罡点穴。" },
+
+      { "id": "huoqiu_shu", "name": "火球术", "cat": "gongfa_shu", "grade": "huang", "element": "火", "minRealm": "fanren", "minRoot": "fei", "effects": { "attack": 5 }, "desc": "最基础的攻伐火法。" },
+      { "id": "hanbing_zhen", "name": "寒冰阵", "cat": "gongfa_shu", "grade": "xuan", "element": "冰", "minRealm": "lianqi", "minRoot": "san", "effects": { "attack": 12, "control": 8 }, "desc": "凝冰成刺，兼有冻结。" },
+      { "id": "leiting_shu", "name": "雷霆术", "cat": "gongfa_shu", "grade": "xuan", "element": "雷", "minRealm": "zhuji", "minRoot": "san", "effects": { "attack": 16 }, "desc": "引落天雷，克制阴煞。" },
+      { "id": "yinsha_shu", "name": "阴煞术", "cat": "gongfa_shu", "grade": "huang", "element": "暗", "minRealm": "lianqi", "minRoot": "fei", "effects": { "attack": 7 }, "desc": "阴气侵体，防不胜防。" },
+      { "id": "qiankun_shu", "name": "乾坤术", "cat": "gongfa_shu", "grade": "di", "element": "空", "minRealm": "jindan", "minRoot": "yi", "effects": { "attack": 22 }, "desc": "扭曲空间撕扯敌身。" },
+
+      { "id": "jingang_zhao", "name": "金刚罩", "cat": "fangfa_shu", "grade": "huang", "element": "金", "minRealm": "lianqi", "minRoot": "si", "effects": { "defense": 8 }, "desc": "护体金光，刀枪难入。" },
+      { "id": "houtu_dun", "name": "厚土盾", "cat": "fangfa_shu", "grade": "huang", "element": "土", "minRealm": "fanren", "minRoot": "fei", "effects": { "defense": 6 }, "desc": "聚土成盾，稳如磐石。" },
+      { "id": "wuxing_huti", "name": "五行护体术", "cat": "fangfa_shu", "grade": "di", "element": "全", "minRealm": "zhuji", "minRoot": "wu", "effects": { "defense": 18 }, "desc": "五行相生护体，杂灵根之福。" },
+
+      { "id": "huichun_shu", "name": "回春术", "cat": "fuzhu_shu", "grade": "huang", "element": "木", "minRealm": "lianqi", "minRoot": "san", "effects": { "heal": 15 }, "desc": "生发之气，疗愈伤势。" },
+      { "id": "jingxin_zhou", "name": "静心咒", "cat": "fuzhu_shu", "grade": "huang", "element": "无", "minRealm": "fanren", "minRoot": "fei", "effects": { "xinjing": 5 }, "desc": "安抚心神，抗心魔。" },
+      { "id": "juji_lingzhen", "name": "聚灵阵", "cat": "zhenfa", "grade": "xuan", "element": "无", "minRealm": "lianqi", "minRoot": "san", "effects": { "cultBonus": 0.15 }, "desc": "聚拢灵气，助益修炼。" },
+      { "id": "kunxian_zhen", "name": "困仙阵", "cat": "zhenfa", "grade": "tian", "element": "全", "minRealm": "jindan", "minRoot": "shuang", "effects": { "control": 30 }, "desc": "仙亦可困，阵法大家手笔。" },
+      { "id": "danhuo_zhenjue", "name": "丹火真诀", "cat": "liandan", "grade": "xuan", "element": "火", "minRealm": "lianqi", "minRoot": "san", "effects": { "alchemy": 0.2 }, "desc": "淬炼丹火的根本法门。" },
+      { "id": "duanzao_jingyao", "name": "锻造精要", "cat": "lianqi_shu", "grade": "xuan", "element": "金", "minRealm": "lianqi", "minRoot": "san", "effects": { "forge": 0.2 }, "desc": "百炼成钢，器物生辉。" },
+      { "id": "fubi_zhifa", "name": "符笔指法", "cat": "fufa", "grade": "huang", "element": "无", "minRealm": "fanren", "minRoot": "fei", "effects": { "talisman": 0.2 }, "desc": "运笔如飞，符成有灵。" },
+      { "id": "yushou_jue", "name": "御兽诀", "cat": "yushou", "grade": "huang", "element": "木", "minRealm": "fanren", "minRoot": "fei", "effects": { "beast": 0.2 }, "desc": "与灵兽心意相通。" }
+    ]
+  },
+
+  "items": {
+    "categories": [
+      { "id": "danyao", "name": "丹药", "stack": 99, "desc": "服食增进修为或疗伤。" },
+      { "id": "lingyao", "name": "灵药灵草", "stack": 99, "desc": "炼丹主料。" },
+      { "id": "faqi", "name": "法器", "stack": 1, "desc": "低阶攻防器物。" },
+      { "id": "fabao", "name": "法宝", "stack": 1, "desc": "高阶通灵之器。" },
+      { "id": "fulu", "name": "符箓", "stack": 50, "desc": "一次性的封存法术。" },
+      { "id": "lingshi", "name": "灵石", "stack": 999999, "desc": "修行界通货。" },
+      { "id": "cailiao", "name": "炼器材料", "stack": 99, "desc": "锻造所需。" },
+      { "id": "yaoshou", "name": "妖兽材料", "stack": 99, "desc": "取自妖兽的部件。" },
+      { "id": "yujian", "name": "功法玉简", "stack": 20, "desc": "记载功法传承。" },
+      { "id": "fushi", "name": "服饰", "stack": 1, "desc": "法衣道袍，或有护体之效。" },
+      { "id": "zawu", "name": "杂物", "stack": 99, "desc": "行走江湖的零碎物件。" }
+    ],
+    "grades": [
+      { "id": "fan", "name": "凡品", "rank": 0, "color": "#9aa0a6" },
+      { "id": "huang", "name": "黄品", "rank": 1, "color": "#7cb342" },
+      { "id": "xuan", "name": "玄品", "rank": 2, "color": "#42a5f5" },
+      { "id": "di", "name": "地品", "rank": 3, "color": "#ab47bc" },
+      { "id": "tian", "name": "天品", "rank": 4, "color": "#fb8c00" },
+      { "id": "xian", "name": "仙品", "rank": 5, "color": "#e53935" }
+    ],
+    "list": [
+      { "id": "juqi_dan", "name": "聚气丹", "cat": "danyao", "grade": "huang", "value": 5, "minRealm": "lianqi", "use": "服后可增数日苦修之功。", "effect": { "cultExp": 30 } },
+      { "id": "peiyuan_dan", "name": "培元丹", "cat": "danyao", "grade": "huang", "value": 8, "minRealm": "lianqi", "use": "固本培元，滋养根基。", "effect": { "gengu": 3 } },
+      { "id": "liaoshang_dan", "name": "疗伤丹", "cat": "danyao", "grade": "huang", "value": 10, "minRealm": "fanren", "use": "疗愈外伤内伤。", "effect": { "heal": 40 } },
+      { "id": "jiedu_dan", "name": "解毒丹", "cat": "danyao", "grade": "huang", "value": 6, "minRealm": "fanren", "use": "化解寻常毒物。", "effect": { "detox": 1 } },
+      { "id": "xishui_dan", "name": "洗髓丹", "cat": "danyao", "grade": "xuan", "value": 60, "minRealm": "zhuji", "use": "洗炼骨髓，提升根骨。", "effect": { "gengu": 8 } },
+      { "id": "zhuji_dan", "name": "筑基丹", "cat": "danyao", "grade": "xuan", "value": 100, "minRealm": "lianqi", "use": "炼气圆满者服用，助益筑基。", "effect": { "breakBonus": 0.15, "target": "zhuji" } },
+      { "id": "jindan_dan", "name": "结丹丹", "cat": "danyao", "grade": "di", "value": 500, "minRealm": "zhuji", "use": "结金丹的关键辅药。", "effect": { "breakBonus": 0.2, "target": "jindan" } },
+      { "id": "huaying_dan", "name": "化婴丹", "cat": "danyao", "grade": "di", "value": 1200, "minRealm": "jindan", "use": "孕育元婴所需。", "effect": { "breakBonus": 0.2, "target": "yuanying" } },
+      { "id": "ningshen_dan", "name": "凝神丹", "cat": "danyao", "grade": "xuan", "value": 40, "minRealm": "lianqi", "use": "凝练神魂，提升神识。", "effect": { "shenshi": 6 } },
+      { "id": "pojing_dan", "name": "破境丹", "cat": "danyao", "grade": "tian", "value": 5000, "minRealm": "huashen", "use": "突破瓶颈的稀世灵丹。", "effect": { "breakBonus": 0.3 } },
+      { "id": "xuming_dan", "name": "续命丹", "cat": "danyao", "grade": "di", "value": 2000, "minRealm": "jindan", "use": "延寿一甲子。", "effect": { "lifespan": 60 } },
+      { "id": "huiLing_dan", "name": "回灵丹", "cat": "danyao", "grade": "huang", "value": 12, "minRealm": "lianqi", "use": "快速恢复灵力。", "effect": { "qi": 200 } },
+
+      { "id": "bainian_lingzhi", "name": "百年灵芝", "cat": "lingyao", "grade": "huang", "value": 20, "use": "炼丹常用主料。" },
+      { "id": "qiannian_shen", "name": "千年人参", "cat": "lingyao", "grade": "xuan", "value": 150, "use": "大补元气。" },
+      { "id": "qiyelian", "name": "七叶莲", "cat": "lingyao", "grade": "xuan", "value": 200, "use": "疗伤解毒圣品。" },
+      { "id": "longxian_cao", "name": "龙涎草", "cat": "lingyao", "grade": "di", "value": 800, "use": "淬炼肉身，通络洗髓。" },
+      { "id": "xuelan_hua", "name": "血兰花", "cat": "lingyao", "grade": "di", "value": 1000, "use": "滋养气血，魔道亦喜。" },
+      { "id": "bingpo_hua", "name": "冰魄花", "cat": "lingyao", "grade": "di", "value": 900, "use": "冰属性炼丹极品。" },
+      { "id": "zizhi_cao", "name": "紫芝", "cat": "lingyao", "grade": "xuan", "value": 180, "use": "延年益寿。" },
+      { "id": "xuanshen", "name": "玄参", "cat": "lingyao", "grade": "huang", "value": 15, "use": "滋补灵根。" },
+
+      { "id": "qingfeng_jian", "name": "青锋剑", "cat": "faqi", "grade": "huang", "value": 50, "minRealm": "lianqi", "use": "入门飞剑。", "effect": { "attack": 6 } },
+      { "id": "xuantie_dao", "name": "玄铁刀", "cat": "faqi", "grade": "huang", "value": 60, "minRealm": "lianqi", "use": "厚重刀器。", "effect": { "attack": 7 } },
+      { "id": "lingyu_fubi", "name": "灵玉符笔", "cat": "faqi", "grade": "xuan", "value": 120, "minRealm": "lianqi", "use": "绘制灵符之笔。", "effect": { "talisman": 0.15 } },
+      { "id": "huti_yufu", "name": "护体玉符", "cat": "faqi", "grade": "xuan", "value": 150, "minRealm": "lianqi", "use": "抵挡一次致命伤害。", "effect": { "shield": 1 } },
+
+      { "id": "liuyun_feiJian", "name": "流云飞剑", "cat": "fabao", "grade": "xuan", "value": 800, "minRealm": "zhuji", "use": "通灵飞剑，可千里取首。", "effect": { "attack": 18 } },
+      { "id": "jingkun_dai", "name": "乾坤袋", "cat": "fabao", "grade": "xuan", "value": 500, "minRealm": "zhuji", "use": "内含洞天，储物容量大增。", "effect": { "bagSlots": 40 } },
+      { "id": "juling_fan", "name": "聚灵幡", "cat": "fabao", "grade": "di", "value": 1500, "minRealm": "jindan", "use": "聚拢天地灵气，助益修炼。", "effect": { "cultBonus": 0.2 } },
+      { "id": "bagua_jing", "name": "八卦镜", "cat": "fabao", "grade": "di", "value": 1600, "minRealm": "jindan", "use": "反射法术，破幻。", "effect": { "reflect": 0.2 } },
+      { "id": "fuxian_suo", "name": "缚仙索", "cat": "fabao", "grade": "di", "value": 2000, "minRealm": "jindan", "use": "束缚强敌。", "effect": { "control": 20 } },
+      { "id": "dinghai_zhu", "name": "定海珠", "cat": "fabao", "grade": "tian", "value": 8000, "minRealm": "yuanying", "use": "镇压一方水土。", "effect": { "defense": 30 } },
+      { "id": "hunyuan_san", "name": "混元伞", "cat": "fabao", "grade": "tian", "value": 9000, "minRealm": "yuanying", "use": "遮天护体，万法不侵。", "effect": { "defense": 40 } },
+
+      { "id": "huo_fu", "name": "火符", "cat": "fulu", "grade": "huang", "value": 3, "use": "激发出火球术。", "effect": { "attack": 5 } },
+      { "id": "bing_fu", "name": "冰符", "cat": "fulu", "grade": "huang", "value": 3, "use": "激发寒冰术。" },
+      { "id": "lei_fu", "name": "雷符", "cat": "fulu", "grade": "xuan", "value": 12, "use": "激发雷霆，威能不凡。", "effect": { "attack": 15 } },
+      { "id": "yinshen_fu", "name": "隐身符", "cat": "fulu", "grade": "xuan", "value": 15, "use": "短时隐匿身形。" },
+      { "id": "chuansong_fu", "name": "传送符", "cat": "fulu", "grade": "di", "value": 200, "use": "瞬间遁走数十里，保命之物。" },
+      { "id": "jingang_fu", "name": "金刚符", "cat": "fulu", "grade": "huang", "value": 5, "use": "短时间内护体。" },
+
+      { "id": "lingshi_xia", "name": "下品灵石", "cat": "lingshi", "grade": "fan", "value": 1, "use": "修行界基础通货。" },
+      { "id": "lingshi_zhong", "name": "中品灵石", "cat": "lingshi", "grade": "huang", "value": 100, "use": "1 枚兑 100 下品。" },
+      { "id": "lingshi_shang", "name": "上品灵石", "cat": "lingshi", "grade": "xuan", "value": 10000, "use": "1 枚兑 100 中品。" },
+      { "id": "lingshi_jipin", "name": "极品灵石", "cat": "lingshi", "grade": "di", "value": 1000000, "use": "极为稀有。" },
+      { "id": "xianjing", "name": "仙晶", "cat": "lingshi", "grade": "tian", "value": 100000000, "use": "传言可通仙界。" },
+
+      { "id": "xuantie", "name": "玄铁", "cat": "cailiao", "grade": "huang", "value": 10, "use": "炼器基础材料。" },
+      { "id": "hantie", "name": "寒铁", "cat": "cailiao", "grade": "xuan", "value": 80, "use": "性寒，宜铸冰系法器。" },
+      { "id": "xingchen_sha", "name": "星辰砂", "cat": "cailiao", "grade": "di", "value": 600, "use": "天外陨铁所炼，极为坚硬。" },
+      { "id": "lingcan_si", "name": "灵蚕丝", "cat": "cailiao", "grade": "xuan", "value": 90, "use": "织造法衣。" },
+      { "id": "taomu", "name": "千年桃木", "cat": "cailiao", "grade": "xuan", "value": 120, "use": "辟邪镇鬼。" },
+
+      { "id": "neidan", "name": "妖兽内丹", "cat": "yaoshou", "grade": "xuan", "value": 150, "use": "妖兽精华所凝。" },
+      { "id": "jiaolong_jin", "name": "蛟龙筋", "cat": "yaoshou", "grade": "di", "value": 900, "use": "坚韧无匹，宜制弓弦。" },
+      { "id": "feng_yu", "name": "凤羽", "cat": "yaoshou", "grade": "tian", "value": 6000, "use": "凤族遗羽，蕴含火精。" },
+      { "id": "shou_pi", "name": "妖兽皮毛", "cat": "yaoshou", "grade": "huang", "value": 8, "use": "寻常皮料。" },
+
+      { "id": "yujian_yujian_shu", "name": "玉简·御剑术", "cat": "yujian", "grade": "huang", "value": 30, "minRealm": "lianqi", "use": "记载御剑术，可直接研习。" },
+      { "id": "yujian_huoqiu", "name": "玉简·火球术", "cat": "yujian", "grade": "fan", "value": 8, "minRealm": "fanren", "use": "记载火球术。" },
+      { "id": "yujian_danhuo", "name": "玉简·丹火真诀", "cat": "yujian", "grade": "xuan", "value": 180, "minRealm": "lianqi", "use": "记载炼丹火诀。" },
+      { "id": "yujian_xuedun", "name": "玉简·血遁魔功", "cat": "yujian", "grade": "xuan", "value": 160, "minRealm": "fanren", "use": "记载魔道速成之法，遗孤随身之物。" },
+
+      { "id": "daopao", "name": "青布道袍", "cat": "fushi", "grade": "fan", "value": 5, "use": "寻常道袍，遮体御寒。" },
+      { "id": "jiaoxiao_shayi", "name": "鲛绡纱衣", "cat": "fushi", "grade": "xuan", "value": 300, "use": "轻若无物，水火不侵。", "effect": { "defense": 5 } },
+      { "id": "yunwen_xue", "name": "云纹靴", "cat": "fushi", "grade": "huang", "value": 40, "use": "踏云而行，略增脚力。", "effect": { "speed": 3 } },
+
+      { "id": "luopan", "name": "罗盘", "cat": "zawu", "grade": "fan", "value": 3, "use": "堪舆寻脉。" },
+      { "id": "huozhe", "name": "火折子", "cat": "zawu", "grade": "fan", "value": 1, "use": "取火之用。" },
+      { "id": "ganliang", "name": "干粮", "cat": "zawu", "grade": "fan", "value": 1, "use": "果腹。" },
+      { "id": "shuinang", "name": "水囊", "cat": "zawu", "grade": "fan", "value": 1, "use": "储水。" },
+      { "id": "yiner_yinliang", "name": "白银十两", "cat": "zawu", "grade": "fan", "value": 1, "use": "凡人市井通货。" }
+    ]
+  },
+
+  "storageBag": {
+    "_note": "储物袋：容量(格) = baseSlots + (realmSeq * slotsPerRealm) + 法宝加成。初始灵石与物品按境界/背景配给。",
+    "baseSlots": 8,
+    "slotsPerRealm": 2,
+    "maxSlots": 200,
+    "startingLingshi": { "fanren": 0, "lianqi": 30, "zhuji": 300, "jindan": 3000, "yuanying": 20000, "huashen": 150000, "lianxu": 1000000, "heti": 8000000, "dacheng": 50000000, "dujie": 300000000 }
+  },
+
+  "names": {
+    "surnames": ["李", "王", "张", "刘", "陈", "杨", "黄", "赵", "周", "吴", "徐", "孙", "马", "朱", "胡", "林", "郭", "何", "高", "罗", "郑", "梁", "谢", "宋", "唐", "许", "韩", "冯", "邓", "曹", "彭", "曾", "萧", "田", "董", "袁", "潘", "于", "蒋", "蔡", "余", "杜", "叶", "程", "苏", "魏", "吕", "丁", "沈", "任", "姚", "卢", "傅", "钟", "姜", "崔", "谭", "廖", "范", "汪", "石", "戴", "贾", "韦", "夏", "邱", "方", "侯", "邹", "熊", "孟", "秦", "白", "江", "阎", "薛", "尹", "段", "雷", "黎", "史", "顾", "龚", "邵", "万", "钱", "严", "莫", "孔", "常", "汤", "凌", "穆", "欧阳", "司徒", "上官", "诸葛", "夏侯", "慕容", "南宫", "东方", "独孤", "尉迟", "轩辕", "公孙", "西门", "百里", "拓跋", "令狐", "司马"],
+    "givenMale": ["青云", "天行", "玄机", "剑尘", "无涯", "惊鸿", "子墨", "长风", "浩然", "玄真", "逸尘", "星河", "承影", "明轩", "君临", "沐风", "承渊", "玄夜", "清和", "修远", "白泽", "寒山", "破军", "星野", "云舒", "书言", "长歌", "飞扬", "天启", "若愚", "守拙", "明镜", "静虚", "常青", "无咎", "观澜", "归一", "太初", "晨风", "望舒", "鸿蒙", "逐鹿", "焚天", "御风", "断岳", "沧溟", "惊雷", "揽星", "归尘", "问道", "斩月", "孤鸿", "听风", "枕星", "负山", "濯尘", "承运", "见山", "临渊", "抱朴"],
+    "givenFemale": ["灵犀", "若冰", "清歌", "婉如", "明月", "素心", "紫嫣", "语嫣", "轻雪", "琉璃", "昭华", "青鸾", "妙音", "灵芸", "挽月", "流苏", "栖霞", "白露", "采薇", "云锦", "疏影", "含烟", "芷若", "晴雪", "素雪", "妙芷", "夕颜", "玉衡", "无双", "初晴", "微雨", "灵薇", "瑟瑟", "弱水", "拾光", "若兰", "清欢", "浣月", "揽月", "燕语", "沉鱼", "落雁", "疏桐", "凌波", "归晚", "听雪", "知微", "语冰", "宛在", "袅袅", "如霜", "惊鸿", "同心", "照影", "静姝", "南枝", "芙蕖", "绛雪", "拾柒", "吟风"],
+    "givenNeutral": ["玄", "尘", "澈", "砚", "笙", "翎", "临", "屿", "时序", "无归", "衍", "舟", "白昼", "栖迟", "一鸣", "见微", "空明", "不言", "长明", "安然"],
+    "courtesyTitle": { "_note": "取自「姓 + 道号」：道号往往独立于名。", "prefixes": ["玄", "清", "太", "无", "紫", "青", "玉", "天", "云", "苍", "赤", "白", "碧", "金", "灵", "静", "幽", "孤"], "suffixes": ["虚", "真", "子", "道人", "真人", "散人", "居士", "上人", "道友", "老祖", "真君", "仙子"] }
+  },
+
+  "traits": {
+    "types": [
+      { "id": "tianfu", "name": "天赋", "desc": "生而具之的才能，正面居多。" },
+      { "id": "tizhi", "name": "体质", "desc": "特殊血脉或体魄，强效但有代价。" },
+      { "id": "guaipi", "name": "怪癖", "desc": "性情癖好，多为负面或中性。" },
+      { "id": "tianming", "name": "天命", "desc": "天定之格，极为稀有，影响深远。" }
+    ],
+    "quality": [
+      { "id": "bai", "name": "白", "rank": 0, "color": "#bdbdbd", "weight": 30 },
+      { "id": "lv", "name": "绿", "rank": 1, "color": "#66bb6a", "weight": 30 },
+      { "id": "lan", "name": "蓝", "rank": 2, "color": "#42a5f5", "weight": 22 },
+      { "id": "zi", "name": "紫", "rank": 3, "color": "#ab47bc", "weight": 12 },
+      { "id": "cheng", "name": "橙", "rank": 4, "color": "#fb8c00", "weight": 5 },
+      { "id": "hong", "name": "红", "rank": 5, "color": "#e53935", "weight": 1 }
+    ],
+    "list": [
+      { "id": "guomu_buwang", "name": "过目不忘", "type": "tianfu", "quality": "lan", "weight": 20, "effects": { "wuxing": 8 }, "desc": "典籍一阅即记，参悟功法事半功倍。" },
+      { "id": "huigen_shenzhong", "name": "慧根深种", "type": "tianfu", "quality": "zi", "weight": 8, "effects": { "wuxing": 15 }, "desc": "天生慧根，闻道而悟。" },
+      { "id": "lingguang", "name": "灵光乍现", "type": "tianfu", "quality": "lan", "weight": 18, "effects": { "breakBonus": 0.05 }, "desc": "关键时刻常有奇思，突破更顺。" },
+      { "id": "tiansheng_daoti", "name": "天生道体", "type": "tianfu", "quality": "cheng", "weight": 2, "effects": { "speedMul": 0.3, "allAttr": 5 }, "desc": "近道之体，修万物皆快。" },
+      { "id": "tiansheng_shenli", "name": "天生神力", "type": "tianfu", "quality": "lan", "weight": 16, "effects": { "gengu": 10 }, "desc": "力可拔山，体修之资。" },
+      { "id": "guoer_chengsong", "name": "过耳成诵", "type": "tianfu", "quality": "lv", "weight": 24, "effects": { "wuxing": 4 }, "desc": "听一遍便可复述。" },
+      { "id": "jiyi_chaqun", "name": "记忆超群", "type": "tianfu", "quality": "lv", "weight": 26, "effects": { "shenshi": 4 }, "desc": "神魂敏锐，记忆不凡。" },
+      { "id": "zhishang_chaoqun", "name": "智识超群", "type": "tianfu", "quality": "lan", "weight": 18, "effects": { "wuxing": 6, "meili": 4 }, "desc": "机敏善辩，处事周全。" },
+      { "id": "shangdao_zhixin", "name": "上道之心", "type": "tianfu", "quality": "zi", "weight": 7, "effects": { "xinjing": 12 }, "desc": "一心向道，道心坚固。" },
+      { "id": "qinmian", "name": "勤勉", "type": "tianfu", "quality": "lv", "weight": 22, "effects": { "speedMul": 0.08 }, "desc": "勤修不辍，积微成著。" },
+
+      { "id": "chunyang_zhiti", "name": "纯阳之体", "type": "tizhi", "quality": "zi", "weight": 5, "effects": { "qixue": 0.2, "fireAffinity": 0.2 }, "desc": "阳气充沛，百邪不侵，修火法更强。" },
+      { "id": "jiuyin_xuanti", "name": "九阴玄体", "type": "tizhi", "quality": "zi", "weight": 5, "effects": { "iceAffinity": 0.25, "gengu": -4 }, "desc": "至阴之体，修冰法一日千里，然体弱畏寒。" },
+      { "id": "jianGu_tiancheng", "name": "剑骨天成", "type": "tizhi", "quality": "cheng", "weight": 2, "effects": { "swordBonus": 0.25 }, "desc": "天生剑骨，御剑如臂使指。" },
+      { "id": "tongling_zhiti", "name": "通灵之体", "type": "tizhi", "quality": "lan", "weight": 10, "effects": { "shenshi": 10 }, "desc": "生而通灵，可与草木禽兽语。" },
+      { "id": "wuxing_lingti", "name": "五行灵体", "type": "tizhi", "quality": "lan", "weight": 12, "effects": { "speedMul": 0.15 }, "desc": "五行亲和，修行顺遂。" },
+      { "id": "yinsha_zhiti", "name": "阴煞之体", "type": "tizhi", "quality": "zi", "weight": 5, "effects": { "darkAffinity": 0.25, "meili": -8 }, "desc": "身负阴煞，修魔道事半功倍，然为世人所忌。" },
+      { "id": "bingruo_zhiqu", "name": "病弱之躯", "type": "tizhi", "quality": "lv", "weight": 14, "effects": { "gengu": -10, "lifespanMul": 0.85 }, "desc": "自幼体弱，寿元亦短。" },
+      { "id": "longxue", "name": "龙血遗脉", "type": "tizhi", "quality": "cheng", "weight": 2, "effects": { "gengu": 15, "lifespanMul": 1.15 }, "desc": "身负上古龙族血脉，体魄超凡。" },
+      { "id": "fengsui", "name": "凤髓仙胎", "type": "tizhi", "quality": "cheng", "weight": 2, "effects": { "meili": 12, "fireAffinity": 0.15 }, "desc": "凤髓化胎，容光摄人。" },
+      { "id": "tongtizi", "name": "童子之身", "type": "tizhi", "quality": "lan", "weight": 10, "effects": { "speedMul": 0.12, "meili": -3 }, "desc": "元阳/元阴未泄，修行前期大有裨益。" },
+
+      { "id": "shishui", "name": "嗜睡", "type": "guaipi", "quality": "bai", "weight": 20, "effects": { "speedMul": -0.05 }, "desc": "一日三觉，误事不少。" },
+      { "id": "tanchi", "name": "贪吃", "type": "guaipi", "quality": "bai", "weight": 20, "effects": { "meili": -2 }, "desc": "口腹之欲极重。" },
+      { "id": "luchi", "name": "路痴", "type": "guaipi", "quality": "bai", "weight": 18, "effects": { "escape": -5 }, "desc": "天南地北，常走反路。" },
+      { "id": "jiepi", "name": "洁癖", "type": "guaipi", "quality": "bai", "weight": 16, "effects": { "xinjing": 2 }, "desc": "一尘不染，心境反清。" },
+      { "id": "shoudou", "name": "手抖", "type": "guaipi", "quality": "lv", "weight": 12, "effects": { "forge": -0.15, "alchemy": -0.15 }, "desc": "精细之事难成，炼丹炼器皆受挫。" },
+      { "id": "yaoyin", "name": "药瘾", "type": "guaipi", "quality": "lv", "weight": 10, "effects": { "gengu": 3, "xinjing": -5 }, "desc": "以身试药成瘾，体健而心浮。" },
+      { "id": "haoju", "name": "好酒", "type": "guaipi", "quality": "bai", "weight": 20, "effects": { "meili": 3 }, "desc": "千杯不醉，座上之宾。" },
+      { "id": "baozhao", "name": "暴躁", "type": "guaipi", "quality": "lv", "weight": 12, "effects": { "attack": 6, "xinjing": -8 }, "desc": "一言不合即动手，战力高而道心乱。" },
+      { "id": "duoyi", "name": "多疑", "type": "guaipi", "quality": "lv", "weight": 14, "effects": { "meili": -6, "shenshi": 3 }, "desc": "事事存疑，反少受骗。" },
+      { "id": "shuchini", "name": "书痴", "type": "guaipi", "quality": "lv", "weight": 14, "effects": { "wuxing": 5, "meili": -4 }, "desc": "沉溺典籍，不通人情。" },
+      { "id": "liancai", "name": "敛财癖", "type": "guaipi", "quality": "lv", "weight": 12, "effects": { "lingshiMul": 1.2, "meili": -3 }, "desc": "见钱眼开，善积财货。" },
+      { "id": "xinmo_shenzhong", "name": "心魔深种", "type": "guaipi", "quality": "zi", "weight": 5, "effects": { "xinjing": -15, "speedMul": 0.1 }, "desc": "心有执念难消，修行虽快却易走火入魔。" },
+
+      { "id": "tianming_suogui", "name": "天命所归", "type": "tianming", "quality": "hong", "weight": 1, "effects": { "qiyun": 30, "allAttr": 3 }, "desc": "气运加身，逢凶化吉，天生主角。" },
+      { "id": "daqiYun", "name": "大气运者", "type": "tianming", "quality": "hong", "weight": 2, "effects": { "qiyun": 20 }, "desc": "奇遇不断，机缘自来。" },
+      { "id": "ziwei_xingming", "name": "紫微星命", "type": "tianming", "quality": "cheng", "weight": 3, "effects": { "meili": 10, "xinjing": 8 }, "desc": "生具帝王之相，众望所归。" },
+      { "id": "shaPoLang", "name": "杀破狼", "type": "tianming", "quality": "cheng", "weight": 3, "effects": { "attack": 15, "xinjing": -5 }, "desc": "杀戮之星照命，一生征战。" },
+      { "id": "chizi_zhixin", "name": "赤子之心", "type": "tianming", "quality": "zi", "weight": 6, "effects": { "xinjing": 15, "meili": 5 }, "desc": "心性纯良，道心通透，最难滋生心魔。" },
+      { "id": "jieshu_zhishen", "name": "劫数之身", "type": "tianming", "quality": "cheng", "weight": 3, "effects": { "qiyun": -10, "speedMul": 0.25 }, "desc": "身负大劫，天妒英才，修行极快却多灾多难。" },
+      { "id": "lunhui_zhiren", "name": "轮回之人", "type": "tianming", "quality": "zi", "weight": 5, "effects": { "wuxing": 10, "shenshi": 8 }, "desc": "前世记忆残存，悟性神识远超常人。" }
+    ],
+    "conflicts": [
+      ["chunyang_zhiti", "jiuyin_xuanti"],
+      ["yinsha_zhiti", "chunyang_zhiti"],
+      ["yinsha_zhiti", "longxue"],
+      ["bingruo_zhiqu", "longxue"],
+      ["tianming_suogui", "jieshu_zhishen"],
+      ["chizi_zhixin", "xinmo_shenzhong"],
+      ["tiansheng_daoti", "bingruo_zhiqu"]
+    ],
+    "countRange": [1, 3]
+  },
+
+  "backgrounds": {
+    "list": [
+      { "id": "shijia", "name": "世家子弟", "weight": 10, "attrMod": { "meili": 8, "wuxing": 3 }, "startItems": ["yiner_yinliang", "daopao"], "lingshiMul": 2.0, "desc": "出身修行世家，见多识广，资源丰厚。" },
+      { "id": "sanxiu_guaer", "name": "散修孤儿", "weight": 14, "attrMod": { "gengu": 6, "xinjing": 6, "meili": -5 }, "startItems": ["yiner_yinliang"], "lingshiMul": 0.4, "desc": "自幼流落江湖，靠自己摸爬滚打，道心坚韧。" },
+      { "id": "liehu", "name": "猎户之子", "weight": 12, "attrMod": { "gengu": 8, "shenshi": 4 }, "startItems": ["shou_pi", "jiedu_dan"], "desc": "山中长大，箭术与体魄过人。" },
+      { "id": "yaonong", "name": "药农", "weight": 12, "attrMod": { "wuxing": 5, "gengu": 2 }, "startItems": ["bainian_lingzhi", "xuanshen"], "desc": "世代采药，识得百草。" },
+      { "id": "shangjia", "name": "商贾之家", "weight": 10, "attrMod": { "meili": 6, "qiyun": 5 }, "startItems": ["yiner_yinliang"], "lingshiMul": 1.8, "desc": "家中经商，精于算计与人情。" },
+      { "id": "huangzu", "name": "皇族旁支", "weight": 5, "attrMod": { "meili": 12, "xinjing": 4 }, "startItems": ["jiaoxiao_shayi", "yiner_yinliang"], "lingshiMul": 2.5, "desc": "帝王血裔，资源权势俱佳。" },
+      { "id": "yujia", "name": "渔家", "weight": 10, "attrMod": { "gengu": 4, "shenshi": 5 }, "startItems": ["shuinang", "ganliang"], "desc": "水边长大，水性极佳。" },
+      { "id": "shanzei", "name": "山贼出身", "weight": 8, "attrMod": { "gengu": 6, "attack": 8, "meili": -8 }, "startItems": ["xuantie_dao"], "desc": "曾落草为寇，杀伐果断。" },
+      { "id": "shushu", "name": "书塾学子", "weight": 10, "attrMod": { "wuxing": 8, "meili": 3 }, "startItems": ["daopao"], "desc": "寒窗苦读，诗书满腹。" },
+      { "id": "zhenfa_houyi", "name": "阵法师后裔", "weight": 5, "attrMod": { "shenshi": 8, "wuxing": 5 }, "startItems": ["lingyu_fubi"], "desc": "家学渊源，通晓阵理。" },
+      { "id": "lianqi_shijia", "name": "炼器世家", "weight": 5, "attrMod": { "gengu": 6, "wuxing": 4 }, "startItems": ["xuantie"], "desc": "炉火相伴，识器如识人。" },
+      { "id": "fomen_huansu", "name": "佛门还俗", "weight": 6, "attrMod": { "xinjing": 12, "meili": -3 }, "startItems": ["jingang_fu", "daopao"], "desc": "曾入空门，道心澄澈。" },
+      { "id": "daoguan_qitu", "name": "道观弃徒", "weight": 8, "attrMod": { "wuxing": 5, "xinjing": -4, "qiyun": 4 }, "startItems": ["luopan"], "desc": "被逐出道观，身负未解之谜。" },
+      { "id": "modao_yigu", "name": "魔道遗孤", "weight": 5, "attrMod": { "attack": 10, "meili": -10, "xinjing": 3 }, "startItems": ["yujian_xuedun"], "desc": "身负魔功血脉，为正道所不容。" },
+      { "id": "youfang_houyi", "name": "游方术士后裔", "weight": 8, "attrMod": { "qiyun": 8, "wuxing": 3 }, "startItems": ["huo_fu", "luopan"], "desc": "走南闯北，见识奇诡。" },
+      { "id": "lingshou_bansheng", "name": "灵兽伴生", "weight": 5, "attrMod": { "gengu": 5, "shenshi": 5 }, "startItems": ["neidan"], "desc": "自幼与灵兽相伴，通晓兽语。" },
+      { "id": "junwu", "name": "军伍出身", "weight": 7, "attrMod": { "gengu": 7, "xinjing": 5, "meili": -2 }, "startItems": ["xuantie_dao", "shou_pi"], "desc": "沙场余生，临危不乱。" },
+      { "id": "qigai", "name": "乞儿", "weight": 9, "attrMod": { "qiyun": 6, "meili": 4, "gengu": -4 }, "startItems": [], "lingshiMul": 0.3, "desc": "街头求生，深谙世态炎凉。" }
+    ]
+  },
+
+  "factions": {
+    "alignments": [
+      { "id": "zhengdao", "name": "正道", "weight": 55, "color": "#42a5f5", "desc": "名门正派，重规矩与道义。" },
+      { "id": "modao", "name": "魔道", "weight": 20, "color": "#8e24aa", "desc": "不择手段，唯力是尊。" },
+      { "id": "zhongli", "name": "中立", "weight": 18, "color": "#78909c", "desc": "两不相帮，独善其身。" },
+      { "id": "sanxiu", "name": "散修", "weight": 7, "color": "#a1887f", "desc": "无门无派，来去自由。" }
+    ],
+    "sampleSects": [
+      { "id": "qinglian_zong", "name": "青莲剑宗", "align": "zhengdao", "element": "木", "tier": 3 },
+      { "id": "taixu_dao", "name": "太虚道宗", "align": "zhengdao", "element": "空", "tier": 3 },
+      { "id": "wanyao_gu", "name": "万药谷", "align": "zhengdao", "element": "木", "tier": 2 },
+      { "id": "tianji_lou", "name": "天机楼", "align": "zhongli", "element": "水", "tier": 2 },
+      { "id": "xueluo_dian", "name": "血罗殿", "align": "modao", "element": "暗", "tier": 3 },
+      { "id": "wangui_yao", "name": "万鬼窟", "align": "modao", "element": "暗", "tier": 2 },
+      { "id": "juxing_ge", "name": "聚星阁", "align": "zhongli", "element": "火", "tier": 1 }
+    ]
+  },
+
+  "appearance": {
+    "builds": ["清瘦", "匀称", "健硕", "肥硕", "颀长", "娇小"],
+    "faces": ["俊逸", "清丽", "方正", "寻常", "阴柔", "粗犷", "稚嫩", "威仪"],
+    "temperaments": ["温和", "冷峻", "热忱", "孤僻", "狡黠", "憨直", "狂放", "娴静"]
+  },
+
+  "generate": {
+    "_note": "生成器的默认分布参数。全部正态/加权采样均可在此覆写，生成器只读此表，绝不硬编码。",
+    "genderWeights": { "男": 52, "女": 47, "无": 1 },
+    "age": { "mean": 22, "sd": 15, "min": 0, "max": 30000, "desc": "年龄从 0 开始： newborns 与幼童皆可生成；上限由寿元兜底。" },
+    "coreAttr": { "min": 1, "max": 100 },
+    "rootPurity": { "mean": 55, "sd": 16, "min": 1, "max": 100 },
+    "realmProgress": { "_note": "在境界内的修为进度(0~1)，正态偏中。", "mean": 0.5, "sd": 0.28, "min": 0.0, "max": 0.99 },
+    "traitCount": [1, 3],
+    "extraAuxTechniques": [0, 2],
+    "startingItemRolls": { "min": 2, "max": 6 },
+    "realmWeights": { "fanren": 42, "lianqi": 30, "zhuji": 13, "jindan": 7, "yuanying": 4, "huashen": 2.2, "lianxu": 1.2, "heti": 0.4, "dacheng": 0.15, "dujie": 0.05 },
+    "realmBias": { "_note": "天赋越高越可能落在高境：weight_i *= base^(talentNorm*(i-pivot))。", "base": 1.7, "pivot": 2, "talentCenter": 60, "talentDivisor": 60 },
+    "realmAgeBand": { "fanren": [0, 78], "lianqi": [0, 119], "zhuji": [14, 199], "jindan": [45, 499], "yuanying": [160, 999], "huashen": [420, 1999], "lianxu": [1100, 4999], "heti": [3200, 9999], "dacheng": [8200, 19999], "dujie": [12000, 29999] },
+    "layerBias": { "_note": "境界内层数：越靠后越稀有，权重 = (layers-i)^2。", "power": 2 },
+    "starterKits": {
+      "_note": "按境界追加的初始行囊，生成器会在背景 startItems 之后叠加。",
+      "fanren": ["ganliang", "shuinang", "huozhe"],
+      "lianqi": ["juqi_dan", "liaoshang_dan", "huo_fu", "huo_fu"],
+      "zhuji": ["zhuji_dan", "ningshen_dan", "qingfeng_jian", "yujian_yujian_shu"],
+      "jindan": ["jindan_dan", "huti_yufu", "liuyun_feiJian", "jingkun_dai"],
+      "yuanying": ["huaying_dan", "bagua_jing", "juling_fan"],
+      "huashen": ["pojing_dan", "dinghai_zhu"],
+      "lianxu": ["hunyuan_san", "xuming_dan"],
+      "heti": ["xianjing"],
+      "dacheng": ["xianjing"],
+      "dujie": ["xianjing"]
+    }
+  }
+}

@@ -3,18 +3,26 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Zongmen.Engine;
 using Zongmen.Services;
-using Zongmen.Storage;
+using Zongmen.Time;
 
-namespace Zongmen.Time;
+namespace Zongmen.Subsystems.City;
 
 /* ============================================================
- * P2 无状态 VM 池执行器 (docs/游戏时钟与Tick演化框架方案.md §五)
+ * 城市迭代子系统 · Tick 执行器 (docs/游戏时钟与Tick演化框架方案.md §五)
  * ------------------------------------------------------------
  * 职责: 把 tick 泵投递的一个 <see cref="TickBatch"/> 变成「世界状态的变更」。
  *   ① TownEvolve  —— 城内演化 (Verhulst 人口 / 库存 / tier / 建筑 / 事件态),
- *                     由引擎 `Engine/js/city-evo.js` 的 evolveCityJson 纯计算;
+ *                     由引擎 `Subsystems/City/js/city-evo.js` 的 evolveCityJson 纯计算;
  *   ② TradeEdge   —— 城际价格套利 (搬运库存), 由同一文件的 tradeEdgesJson 算边;
  *   ③ 其它 kind   —— 本执行器**不认领** (回 not-claimed, 交给别的执行器/下一期)。
+ *
+ * ★ 两个 VM Scope 的分工 (2026-10-11 目录重构):
+ *     · "core" (世界层) —— 只用 `citySettlementsJson` 读聚落身份表:
+ *       它带 type/q/r, 且是 ext(玩家宗门) 感知的 ⇒ 归世界层所有。
+ *     · "city" (本子系统) —— 演化与贸易的全部计算。**长任务在这里跑**,
+ *       因此不再占住世界层的 V8 门闩 (人类请求不再被 tick 拖慢)。
+ *   ⚠ 两把门闩**不嵌套持有**: 先借 core 收完清单并释放, 再借 city 建行/演化
+ *     (见 EnsureInitialized)。嵌套持有会在将来任何「先 city 后 core」的路径上死锁。
  *
  * ⚠ 三条红线 (与 city-evo.js 文件头一致, 破任何一条都是静默错):
  *   R1. 绝不写 seed 纯函数层 (chunk/settleCache/townCache/siteScore/prospect/region)。
@@ -27,19 +35,20 @@ namespace Zongmen.Time;
  *   客户端拿到的 settle 包里有聚落人口/等级 (SettleTownDto.Pop/Tier)。
  *   不推进 rev + 不作废包 ⇒ 客户端带旧 lastRevs 重拉被判「未变化」⇒
  *   **画面人口永远停在初始值** (不报错)。这是本执行器唯一会碰的写世界动作。
- *
- * ⚠ 本执行器与 DemoTickExecutor 的关系: 二者是**互斥**的 ITickExecutor 实现
- *   (Program.cs 只注册一个)。Demo 是一期占位 (只记账), 本类是二期真做。
  * ============================================================ */
-public sealed class TickVmPoolExecutor : ITickExecutor
+public sealed class CityTickExecutor : ITickExecutor
 {
     private readonly MapWorldServiceAccessor _world;
     private readonly CityStateStore _store;
     private readonly TickOptions _opt;
     private readonly ILogger _log;
-    /// <summary>本执行器认领的 job 种类 (其余一律不认领)。</summary>
-    private static bool Claims(TickJobKind k) =>
-        k == TickJobKind.TownEvolve || k == TickJobKind.TradeEdge;
+
+    /// <summary>本执行器认领的 job 种类 (TickExecutorHub 据此分发; 其余一律不认领)。</summary>
+    public IReadOnlyList<TickJobKind> Claims { get; } = new[]
+    {
+        TickJobKind.TownEvolve,
+        TickJobKind.TradeEdge,
+    };
 
     /* ---- 诊断计数 (StatsJson / 判据读) ---- */
     private long _evolvedCities;
@@ -48,23 +57,22 @@ public sealed class TickVmPoolExecutor : ITickExecutor
     private long _cacheHits;
     private long _initialized;
 
-    public string Name => "vmpool";
+    public string Name => "city";
     public long EvolvedCities => Interlocked.Read(ref _evolvedCities);
     public long TradesSettled => Interlocked.Read(ref _tradesSettled);
     public long Migrations => Interlocked.Read(ref _migrations);
     public long InitializedCities => Interlocked.Read(ref _initialized);
     public long CacheHits => Interlocked.Read(ref _cacheHits);
 
-    public TickVmPoolExecutor(MapWorldService world, CityStateStore store, TickOptions opt,
-                              ILogger<TickVmPoolExecutor> log)
+    public CityTickExecutor(MapWorldService world, CityStateStore store, TickOptions opt,
+                            ILogger<CityTickExecutor> log)
     {
         /* ⚠⚠ 这里**绝不能**再注入 TickPump —— 那是一条 DI 循环:
                   TickPump → ITickExecutor → TickPump
            而且因为它走的是 factory lambda 里的 GetRequiredService, **绕过了容器的循环检测**,
            表现为**永久静默挂死** (进程活着、不监听端口、零日志), 而不是抛异常。
            2026-09-27 实测: `dotnet run` 卡在「正在生成」, 后端 8140 起不来 —— 就是这个。
-           ⇒ 本类不需要 pump: 它只写自己的台账 + 派生层, 归谁调度由外层决定。
-              (曾有一个从未被使用的 `_pump` 字段, 就是它造成的死锁; 已删。) */
+           ⇒ 本类不需要 pump: 它只写自己的台账 + 派生层, 归谁调度由外层决定。 */
         _world = new MapWorldServiceAccessor(world);
         _store = store;
         _opt = opt;
@@ -77,56 +85,58 @@ public sealed class TickVmPoolExecutor : ITickExecutor
         var outcomes = new List<TickOutcome>(batch.Count);
 
         /* 本执行器只处理 TownEvolve (城演化) 与 TradeEdge (贸易)。
-           其它 kind 原样回报「未认领」, 让上层能看到「有 job 没人管」而不是静默吞掉。 */
+           其它 kind 原样回报「未认领」, 让上层能看到「有 job 没人管」而不是静默吞掉。
+           (Hub 已经分发过一次, 这里的过滤是「本类单机可用」的兜底。) */
         var mine = new List<TickJob>(batch.Count);
         foreach (var j in batch.Jobs)
         {
-            if (Claims(j.Kind)) mine.Add(j);
-            else outcomes.Add(new TickOutcome(j, false, "not-claimed-by-vmpool", 0, 0, 0));
+            if (Claims.Contains(j.Kind)) mine.Add(j);
+            else outcomes.Add(new TickOutcome(j, false, "not-claimed-by-city", 0, 0, 0));
         }
         if (mine.Count == 0) return Report(nowTick, outcomes, sw, batch.Count);
 
         var seed = mine[0].Seed;
         var round = mine[0].Round;
 
-        using var lease = _world.Lease(seed);
-        var vm = lease.Vm;
-
         /* ① 初始化: 台账里没有的聚落先建行 (首批 job 到达时必然为空)。
            ⚠ 必须用 `cityNewStateJson` 而不是 C# 侧自造 —— 初值的所有字段 (popF/baseAge/
            builtFrac/…) 都必须与引擎演化器同一口径, 否则第一次演化就会算出不同结果。 */
-        EnsureInitialized(vm, seed, round);
+        EnsureInitialized(seed, round);
 
         /* ② 逐 job 处理。⚠ 单个 job 失败**不得**中断整批:
            记 outcome.Fail ⇒ 泵会退避重试, 其它 job 照常推进。 */
-        foreach (var job in mine)
+        using (var lease = _world.LeaseScope(CityModule.CityScope, seed))
         {
-            var jsSw = Stopwatch.StartNew();
-            int bytesIn = 0, bytesOut = 0;
-            try
+            var vm = lease.Vm;
+            foreach (var job in mine)
             {
-                var dt = Math.Max(0, job.DtTicks);
-                string rowJson;
-                switch (job.Kind)
+                var jsSw = Stopwatch.StartNew();
+                int bytesIn = 0, bytesOut = 0;
+                try
                 {
-                    case TickJobKind.TownEvolve:
-                        rowJson = EvolveOne(vm, seed, round, job.EntityId, dt, metrics, ref bytesIn, ref bytesOut);
-                        break;
-                    case TickJobKind.TradeEdge:
-                        rowJson = "";    // 贸易是「批级」动作 (见 Step③), 单 job 只负责触发
-                        break;
-                    default:
-                        rowJson = "";
-                        break;
+                    var dt = Math.Max(0, job.DtTicks);
+                    string rowJson;
+                    switch (job.Kind)
+                    {
+                        case TickJobKind.TownEvolve:
+                            rowJson = EvolveOne(vm, round, job.EntityId, dt, metrics, ref bytesIn, ref bytesOut);
+                            break;
+                        case TickJobKind.TradeEdge:
+                            rowJson = "";    // 贸易是「批级」动作 (见 Step③), 单 job 只负责触发
+                            break;
+                        default:
+                            rowJson = "";
+                            break;
+                    }
+                    if (rowJson.Length > 0) PersistRow(round, rowJson);
+                    outcomes.Add(new TickOutcome(job, true, null, jsSw.Elapsed.TotalMilliseconds, bytesIn, bytesOut));
                 }
-                if (rowJson.Length > 0) PersistRow(round, rowJson);
-                outcomes.Add(new TickOutcome(job, true, null, jsSw.Elapsed.TotalMilliseconds, bytesIn, bytesOut));
-            }
-            catch (Exception ex)
-            {
-                outcomes.Add(new TickOutcome(job, false, $"{ex.GetType().Name}: {ex.Message}",
-                    jsSw.Elapsed.TotalMilliseconds, bytesIn, bytesOut));
-                _log.LogWarning(ex, "[tick] vmpool 处理失败 {Key}", job.Key);
+                catch (Exception ex)
+                {
+                    outcomes.Add(new TickOutcome(job, false, $"{ex.GetType().Name}: {ex.Message}",
+                        jsSw.Elapsed.TotalMilliseconds, bytesIn, bytesOut));
+                    _log.LogWarning(ex, "[tick] city 处理失败 {Key}", job.Key);
+                }
             }
         }
 
@@ -137,7 +147,7 @@ public sealed class TickVmPoolExecutor : ITickExecutor
         if (mine.Exists(j => j.Kind == TickJobKind.TradeEdge))
         {
             try { SettleTrade(seed, round, metrics); }
-            catch (Exception ex) { _log.LogWarning(ex, "[tick] vmpool 贸易结算失败 (下一轮重试)"); }
+            catch (Exception ex) { _log.LogWarning(ex, "[tick] city 贸易结算失败 (下一轮重试)"); }
         }
 
         return Report(nowTick, outcomes, sw, batch.Count);
@@ -148,51 +158,69 @@ public sealed class TickVmPoolExecutor : ITickExecutor
     {
         var r = new TickRunReport { TickId = nowTick, TotalMs = sw.Elapsed.TotalMilliseconds };
         r.Outcomes.AddRange(outcomes);
-        r.Skipped = total - outcomes.Count(o => o.Ok || o.Error != "not-claimed-by-vmpool");
+        r.Skipped = total - outcomes.Count(o => o.Ok || o.Error != "not-claimed-by-city");
         return r;
     }
 
     /* ============================================================
      * ① 初始化: 台账缺行的聚落按引擎初值建行
+     *     ⚠ 两趟走, **两把门闩不嵌套持有**:
+     *        趟 1 (core scope) 收「身份表」→ 释放; 趟 2 (city scope) 建行 → 释放。
      * ============================================================ */
-    private void EnsureInitialized(JsWorldVm vm, string seed, int round)
+    private void EnsureInitialized(string seed, int round)
     {
         /* 遍历当前区域格窗口 (与 v2 方案 §4.1 一致: 演化只覆盖「活跃窗口」,
            ⚠ 不做无限世界全量演化 —— 那是 O(∞) 且绝大多数城永远不会被看到)。 */
         var span = Math.Max(1, _opt.EvolveSpanRegions);
-        for (var i = -span; i <= span; i++)
+        var pending = new List<(string Id, string Type, int Q, int R, int Pop, int Tier)>();
+
+        using (var lease = _world.LeaseScope(WorldModule.WorldScope, seed))
         {
-            for (var j = -span; j <= span; j++)
+            var vm = lease.Vm;
+            for (var i = -span; i <= span; i++)
             {
-                /* ⚠ 用 citySettlementsJson 而不是 settleJson —— 后者**不带 type/q/r**
-                   (它是给前端画图的包)。用 settleJson 会让 type="" ⇒ 城被当村算
-                   ⇒ K 塌到 K_MIN ⇒ 人口永远停在 30 且**不报错** (实测踩过)。 */
-                var json = vm.Call("citySettlementsJson", i, j);
-                using var d = JsonDocument.Parse(json);
-                if (!d.RootElement.TryGetProperty("settlements", out var towns) ||
-                    towns.ValueKind != JsonValueKind.Array) continue;
-                foreach (var t in towns.EnumerateArray())
+                for (var j = -span; j <= span; j++)
                 {
-                    var id = t.TryGetProperty("id", out var idv) ? idv.GetString() ?? "" : "";
-                    if (id.Length == 0) continue;
-                    /* ⚠ 自愈: 2026-10-10 之前落库的行 **Type 全为空** (身份三字段没往返,
-                       见 CityStateStore.ToEngineJson) —— 那样的行会让「城被当村算」
-                       (K 塌到 K_MIN, 人口永远停在 30 且不报错) 永久化。
-                       ⇒ 只把「Type 非空」当已初始化; 空 Type 的行按当前骨架重建。 */
-                    var existing = _store.Get(round, id);
-                    if (existing != null && !string.IsNullOrEmpty(existing.Type))
-                    { Interlocked.Increment(ref _cacheHits); continue; }
-                    var type = t.TryGetProperty("type", out var tyv) && tyv.ValueKind == JsonValueKind.String
-                        ? tyv.GetString() ?? "" : "";
-                    if (type == "poi") continue;        // 秘境不演化 (v2 Q3)
-                    var q = t.TryGetProperty("q", out var qv) ? qv.GetInt32() : 0;
-                    var r = t.TryGetProperty("r", out var rv) ? rv.GetInt32() : 0;
-                    var pop = t.TryGetProperty("pop", out var pv) ? pv.GetInt32() : 0;
-                    var tier = t.TryGetProperty("tier", out var tv) ? tv.GetInt32() : 1;
-                    var stJson = vm.Call("cityNewStateJson", id, type, q, r, pop, tier, 0);
-                    PersistRow(round, stJson);
-                    Interlocked.Increment(ref _initialized);
+                    /* ⚠ 用 citySettlementsJson 而不是 settleJson —— 后者**不带 type/q/r**
+                       (它是给前端画图的包)。用 settleJson 会让 type="" ⇒ 城被当村算
+                       ⇒ K 塌到 K_MIN ⇒ 人口永远停在 30 且**不报错** (实测踩过)。 */
+                    var json = vm.Call("citySettlementsJson", i, j);
+                    using var d = JsonDocument.Parse(json);
+                    if (!d.RootElement.TryGetProperty("settlements", out var towns) ||
+                        towns.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var t in towns.EnumerateArray())
+                    {
+                        var id = t.TryGetProperty("id", out var idv) ? idv.GetString() ?? "" : "";
+                        if (id.Length == 0) continue;
+                        /* ⚠ 自愈: 2026-10-10 之前落库的行 **Type 全为空** (身份三字段没往返,
+                           见 CityStateStore.ToEngineJson) —— 那样的行会让「城被当村算」
+                           (K 塌到 K_MIN, 人口永远停在 30 且不报错) 永久化。
+                           ⇒ 只把「Type 非空」当已初始化; 空 Type 的行按当前骨架重建。 */
+                        var existing = _store.Get(round, id);
+                        if (existing != null && !string.IsNullOrEmpty(existing.Type))
+                        { Interlocked.Increment(ref _cacheHits); continue; }
+                        var type = t.TryGetProperty("type", out var tyv) && tyv.ValueKind == JsonValueKind.String
+                            ? tyv.GetString() ?? "" : "";
+                        if (type == "poi") continue;        // 秘境不演化 (v2 Q3)
+                        var q = t.TryGetProperty("q", out var qv) ? qv.GetInt32() : 0;
+                        var r = t.TryGetProperty("r", out var rv) ? rv.GetInt32() : 0;
+                        var pop = t.TryGetProperty("pop", out var pv) ? pv.GetInt32() : 0;
+                        var tier = t.TryGetProperty("tier", out var tv) ? tv.GetInt32() : 1;
+                        pending.Add((id, type, q, r, pop, tier));
+                    }
                 }
+            }
+        }
+        if (pending.Count == 0) return;
+
+        using (var lease = _world.LeaseScope(CityModule.CityScope, seed))
+        {
+            var vm = lease.Vm;
+            foreach (var p in pending)
+            {
+                var stJson = vm.Call("cityNewStateJson", p.Id, p.Type, p.Q, p.R, p.Pop, p.Tier, 0);
+                PersistRow(round, stJson);
+                Interlocked.Increment(ref _initialized);
             }
         }
     }
@@ -200,7 +228,7 @@ public sealed class TickVmPoolExecutor : ITickExecutor
     /* ============================================================
      * ② 单城演化
      * ============================================================ */
-    private string EvolveOne(JsWorldVm vm, string seed, int round, string id, int dt,
+    private string EvolveOne(JsVm vm, int round, string id, int dt,
                              TickMetrics metrics, ref int bytesIn, ref int bytesOut)
     {
         var cur = _store.Get(round, id);
@@ -235,10 +263,6 @@ public sealed class TickVmPoolExecutor : ITickExecutor
         var rows = _store.ByRound(round);
         if (rows.Count < 2) return;
 
-        var span = Math.Max(1, _opt.EvolveSpanRegions);
-        using var lease = _world.Lease(seed);
-        var vm = lease.Vm;
-
         /* 组装价格层入参: [{id,type,q,r,pop,tier,builtCount}] */
         var nodes = new List<string>(rows.Count);
         foreach (var e in rows)
@@ -249,6 +273,8 @@ public sealed class TickVmPoolExecutor : ITickExecutor
         }
         var nodesJson = "[" + string.Join(",", nodes) + "]";
 
+        using var lease = _world.LeaseScope(CityModule.CityScope, seed);
+        var vm = lease.Vm;
         using (metrics.BeginJs(TickJobKind.TradeEdge))
         {
             var priced = vm.Call("cityPriceLayerJson", nodesJson, "[]");
@@ -313,8 +339,9 @@ public sealed class TickVmPoolExecutor : ITickExecutor
     {
         var p = id.Split('_');
         if (p.Length < 2) return (null, null);
-        return (int.TryParse(p[0], out var i) ? i : null,
-                int.TryParse(p[1], out var j) ? j : null);
+        var i = int.TryParse(p[0], out var a) ? a : (int?)null;
+        var j = int.TryParse(p[1], out var b) ? b : (int?)null;
+        return (i, j);
     }
 
     /// <summary>⚠ type 由建行时从引擎写入 (CityStateRow.Type), **不做反解** ——
@@ -368,10 +395,10 @@ public sealed class TickVmPoolExecutor : ITickExecutor
    world 要借 VM), 直接构造注入会成环。用 accessor 把「取用」推迟到运行期。 */
 public sealed class MapWorldServiceAccessor
 {
-    private readonly Zongmen.Services.MapWorldService _svc;
-    public MapWorldServiceAccessor(Zongmen.Services.MapWorldService svc) => _svc = svc;
-    public JsEngineHost.VmLease Lease(string seed) => _svc.LeaseWorld(seed);
-    public string SettlementsForJson(JsWorldVm vm, int i, int j) => _svc.SettlementsForJson(vm, i, j);
+    private readonly MapWorldService _svc;
+    public MapWorldServiceAccessor(MapWorldService svc) => _svc = svc;
+    public JsVmPool.VmLease LeaseScope(string scope, string seed) => _svc.LeaseScope(scope, seed);
+    public string SettlementsForJson(JsVm vm, int i, int j) => _svc.SettlementsForJson(vm, i, j);
     public void MarkSettleDirty(string seed, int i, int j) => _svc.MarkSettleDirty(seed, i, j);
     public string? CurrentSeed() => _svc.CurrentSeed();
     public int CurrentRound() => _svc.CurrentRound();

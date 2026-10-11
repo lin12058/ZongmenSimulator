@@ -141,3 +141,19 @@
 - ⚠ 判据「绝对值阈值」在 headless 下极易假红 ⇒ 必须改 **A/B 归因**（例：`check_calc_local` 的 S5 原判「hybrid 首屏最长任务 ≤50ms」恒红 ~250ms，归因后发现 **server 档（零本地算）也 245~254ms** ⇒ 那是 WebGL/着色器/图集启动开销；改成「hybrid ≤ server + 40ms」）。⚠ `frontend_smoke` 的「解码字段读取审计」按**项目约定**放行 **`_` 前缀**属性（线路 protobuf 字段不带下划线 ⇒ `_xxx` 只可能是前端自挂 memo：`_anc`/`_fac`/`_facV`）。⚠ **判据的参照系不能是被测规则自己的目标函数**（自证陷阱）—— skill §32；⚠ 判据复算必须与实现**同容差语义**（2e-13 的 tie 就能翻案）—— skill §32.1。
 - **总 runner** `verify/run_regression.mjs`（默认 **18 离线 + 4 在线 = 22**；`--offline-only` / `--with-server` / `--base=` / `--only=` / `--skip=` / `--list`；统一清 `HTTP_PROXY` 置 `NO_PROXY=*`；w3 墙钟失败自动降级 warn）。
 
+---
+
+## Core / Subsystems 分层详述（2026-10-11 从 `MEMORY.md` 迁入，口径未改）
+- 结构：`Engine/`=地基（`JsvmModule` 抽象模块 / `JsVmPool`（键 **(Scope,seed)**）/ `WorldModule`）；`Subsystems/`=每子系统一个文件夹（`ISubsystem`+`SubsystemRegistry`，**Core 只认契约不引用具体子系统类**）。已搬：City（`Subsystems/City/{CityModule,CityTickExecutor,CityStateStore,CitySubsystem,js/city-evo.js}`）、Characters（`Subsystems/Characters/{js/chargen-core.js,chargen.mjs,CharactersModule,CharactersSubsystem,data/cultivation-base.json}`，**已接 C#+独立 V8+HTTP 端点**，见其 README）。
+- ⚠★ **角色 = 服务端实时生成，不是静态表**。`characters` 独立 V8 scope（`CharactersModule`：`OnVmReady` 注入 `cultivation-base.json`）+ `CharactersSubsystem`（`ISubsystem`，**无台账/无 job/无 tick 执行器**）→ **`GET /api/characters`**（`?seed=` 缺省=当前世、**gzip**、no-cache）。角色是 `(seed,index)` **纯函数派生 ⇒ 不落库**（对照 chunk/settle 哲学）。生成逻辑唯一真源 `js/chargen-core.js`（**classic script**，V8 bundle 无 fs/import；Node 的 `chargen.mjs` 用 `vm.runInThisContext` 求值同一份）。前端 `roster.js` fetch 该端点；载荷带 **`dict`**（前端**不许硬编码标签**）。⚠ 新子系统必查 `JsvmModule.AcceptsExternalSettlements`（默认 false）：`JsVmPool.onCreated` 对**每个**新 VM 无条调 `setExternalSettlements` ⇒ 纯数据子系统不早退 = **首次建 VM 即抛「未知 JS 函数」**。
+- ⭐ 一进程只服务一 seed，但**每子系统一个独立 V8**（VM 池键 `(Scope,seed)`）⇒ tick 走 `city` VM、人类读路径走 `core` VM，**零门闩争用**（修掉 Tick 框架缺陷 #17）。
+- ⚠★ **两个 VM 加载逐字节相同的 bundle，但出口分治**：`citySettlementsJson`/`citySettlePlanJson`（需 MapGen 骨架+**ext 层**）留 `WorldModule`；纯演化出口（evolve/newState/meta/priceLayer/tradeEdges/migrateEdges/harvestBuild/constants）在 `CityModule`。**ext(玩家宗门) 必须对两个 Scope 统一注入**（`JsVmPool._onCreated`+`ForEachExisting`；启动日志打 `重放玩家宗门 N 座 [core]`/`[city]`），漏一边=两 VM ext 漂移 ⇒ 静默错位。
+- ⚠ 旧 `JsEngineHost`/`JsWorldVm` **已删**；`JsVmPool` **无 `LiveSeeds`**（活跃数 = `Count`）。`ITickExecutor` 加 `Claims`；多执行器经 `TickExecutorHub` 按 `TickJobKind` 路由（认领集**不得重叠**，构造期校验）。`IReadOnlyList<string> Scopes`/`Count`/`Seeds` 供诊断。
+- ⚠ 回归脚本已随迁：`verify/evo/{check_city_evo_integration,city_evo_sim,_check_city_evo_js}.mjs` 从 `Subsystems/City/js` 载 `city-evo.js`；`check_city_evo_integration.mjs` 的 **I6 守卫**读 `WorldModule.cs`+`CityModule.cs` 断言「出口归属正确」。`verify_map.mjs`/`chunk_selfcalc_*` 只载 4 个 core 脚本，**不受影响**。
+
+## 本机环境坑 / 文件删除高危（2026-10-11 从 `MEMORY.md` 迁入，口径未改）
+- 已 3 次误删：清理一律 Node `fs.unlinkSync` 绝对路径+basename/数量断言，先 `git ls-files` 过滤被跟踪名单；禁 shell 通配与 `git rm`。恢复 `git restore --source=HEAD --worktree -- verify/`。⚠ `verify/_scratch_diag.mjs` **被跟踪**；⚠ `verify/_*.js/_*.png/_*.txt` 被 .gitignore 覆盖 ⇒ **删后不可恢复**。
+- ⚠ 本机坑：**WMIC 黑名单**；PowerShell 输出被吞 ⇒ 诊断走 Node；**Bash shim 缺 `ls/cd/dirname/wc/head`** ⇒ 先 `export PATH="/usr/bin:/bin:/c/Windows/System32:$PATH"`，或直接用内置 Glob/Grep/Read/Write + `python -c`；`dotnet build -o /d/...` 被拼成 `D:\d\...` ⇒ 用 `-o "D:\..."`；⚠ **`/tmp` → `D:\tmp`** ⇒ 临时脚本一律写工作目录 `Temp/`；⚠ Bash 重定向 `>log` 吞输出 ⇒ 抓子进程用 Node `spawn`；⚠ HEREDOC `cat >>` 被拦 ⇒ 用 Edit/Write。⚠ 判后端死活必须 `NO_PROXY='*' HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= curl`。
+- ⚠ 后台实例/服务**活不过一个回合** ⇒ 起实例+跑实机判据必须同回合（长命令 `run_in_background=true`）。⚠ `git stash` A/B：`web/js/store.js` 有 **CRLF 伪修改**挡 `stash pop` ⇒ 先 `git checkout -- <该文件>`。基线默认**离线 30 + 在线 6**；`--only=`/`--skip=` 是**子串匹配**；**rc=2=跳过**；⚠ **别 kill 用户 8140**。
+- ⚠ 判据四防：①绝对值阈值必假红 ⇒ 改 **A/B 归因** ②参照系不能是被测规则自己的目标函数 ③复算须与实现**同容差语义** ④源码守卫判「赋值点所在**整个函数体**」且**必须先剥注释**。⚠ 几何对齐优先**数值探针**+离线复算；分桶用**卡方**；**判据自己的断言也会错**（已 2 次）。
+

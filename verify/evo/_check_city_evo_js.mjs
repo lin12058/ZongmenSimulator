@@ -8,12 +8,15 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..');
 const ENG = path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js');
+/* 2026-10-11 目录重构: city-evo.js 现于 Subsystems/City/js */
+const CITY = path.join(ROOT, 'Server', 'Zongmen', 'Subsystems', 'City', 'js');
 
 global.window = globalThis;
 /* 严格按 bundle 序加载 (含 new city-evo.js 在最后) */
-for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js', 'city-evo.js']) {
+for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js']) {
   (0, eval)(fs.readFileSync(path.join(ENG, f), 'utf8'));
 }
+(0, eval)(fs.readFileSync(path.join(CITY, 'city-evo.js'), 'utf8'));
 const MG = global.MapGen;
 const CE = global.CityEvo;
 const CFG = MG.CFG;

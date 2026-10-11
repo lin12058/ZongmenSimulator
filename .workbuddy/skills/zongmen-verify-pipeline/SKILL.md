@@ -1,6 +1,60 @@
 
 ---
 
+## 45. 把「Node 侧生成脚本」接成 C# 子系统 + HTTP 端点（2026-10-11 · 角色系统 Characters）
+
+> 场景：一个已用 Node 脚本 (`.mjs`) 跑通的**纯数据生成器**，要变成「服务端实时生成、游戏内实时显示」
+> —— 而不是把生成结果落成一张静态大表。通用套路 = 照抄 City 子系统的形状。
+> 跑法真源：`Server/Zongmen/Subsystems/Characters/README.md`。
+
+### A. 交付物形状（新子系统 5 件套）
+```
+Subsystems/<Name>/
+├─ js/<core>.js         # classic script (**不是 .mjs**; V8 bundle 里没有 import/module/fs) → global.<Root>
+├─ <Name>Module.cs      # JsvmModule: Scope / RootMember / Files / OnVmReady / Invoke 白名单
+├─ <Name>Subsystem.cs   # ISubsystem + 自己 MapEndpoints (Core 不认识具体子系统类型)
+├─ data/*.json          # 宿主读入 → OnVmReady 注入 (V8 沙箱没有 fs)
+└─ verify*.mjs
+```
+装配四处（全在 `Program.cs`；**组合根允许认识具体类型**）：`new XSubsystem(...)` → 进 `SubsystemRegistry` → `AddSingleton` → `x.MapEndpoints(app, world)`。
+
+### B. ★★ 最贵的一个坑：JsVmPool.onCreated 会对**每一个**新 VM 无条件注入 ext
+`MapWorldService.InjectPlayerSects` 对新建 VM 调 `setExternalSettlements`。纯数据子系统没有这个出口
+⇒ **建 VM 即抛「未知 JS 函数」**，且只在**首次建 VM** 时暴露（极易漏测）。
+修法（显式契约，别用「switch 加个空 case 兜」）：`JsvmModule.AcceptsExternalSettlements`（默认 `false`），
+WorldModule / CityModule 覆写 `true`，`InjectPlayerSects` 首行早退。
+判据：启动日志的 ext 重放行只应有 `[core]` / `[city]`，**没有** `[characters]`。
+
+### C. 端点的三条纪律
+- **seed 不给前端**：`?seed=` 缺省 = `world.CurrentSeed()`（种子是服务端资产 —— 同既有规矩）。
+- **必须 gzip**：300 人 ≈ 750KB JSON ⇒ `GZipCodec.Compress` + 手工标 `Content-Encoding`（浏览器/undici 按 header 透明解压）。实测 750KB → 116KB。
+- **no-cache**：换世/演化都会改人，缓存住就是「改了没反应」。
+
+### D. 「静态快照 → 服务端端点」的迁移清单（少一步就是半截活）
+1. `main.js` 的 `dataUrl` 换端点；2. `roster.js` 兜底 url + 头部注释；3. 删静态文件与发布脚本；
+4. **判据加源守卫**（`main.js` 的 dataUrl 必须匹配 `^api/characters`、且全仓不再出现 `characters.json`）
+   —— 否则有人悄悄改回静态表也没人拦。四条全做，才算真迁移。
+
+### E. 重构生成器时的「金标准对拍」
+把生成逻辑抽进 core **之前**，先用**旧的静态快照**当金标准：
+`JSON.stringify(旧.characters) === JSON.stringify(新.characters)`。
+本次实测 529515 字节**逐字节一致** ⇒ 可证明重构是**行为保持**的（远强于「看起来对」）。
+
+### F. ⚠⚠ 工具行为：**同一文件的多条 Edit 放同一条消息里，只有最后一条生效**
+本次 4 次踩中（main.js / roster.js / index.html×2 / Program.cs），**都回执「成功」**。
+⇒ 规矩：**一个文件一次只发一条 Edit**；不同文件可并发。改完**必须 grep 复核**。
+（与既有的「并行 Edit 偶发只落第一条」同源；这次的失败模式是「只落最后一条」。）
+
+### G. headless 截图：`shot.mjs` 失效时的 CDP 直连兜底
+`verify/shot.mjs` 现在连基线 URL 都截不到图（`exit=0` 无产物）。兜底 = headless Chrome
+（`--headless=new --remote-debugging-port=9333 --user-data-dir=<Temp/_cdpprof>`）+ Node22 内置 `WebSocket`
+连 `/json/list` 的 page target + `Page.captureScreenshot` / `Runtime.evaluate`。
+- ⚠ `Runtime.evaluate` **不会**挂起（与旧结论相反）。
+- 调试姿态：`?debug=1&roster=1` 自动开窗；`window.__feat().roster` 读 `{ready,open,count,shown,filter,query,selected}`。
+- ⚠ 服务端必须 `run_in_background` 启动（见 §43-F）。
+
+---
+
 ## 43. Tick 框架（世界时钟 / 定时演化调度）的验证姿势 + 七条新坑（2026-09-26~27）
 
 > 全文设计 → `docs/游戏时钟与Tick演化框架方案.md`（v2.1）；**进度真源** → `待办事项/Tick框架开发进度.md`。
@@ -288,8 +342,10 @@ tasklist | grep -i zongmen || echo "无进程"
    `verify_map` 会红 292 项而**根因与被测代码无关**。
    2026-09-12 修复：`verify_map.mjs` / `scan_poison.mjs` / `w5_sprite_range.mjs` / `frontend_smoke.mjs` 四处补齐。
    **自检一行**：`for f in verify/*.mjs; do grep -q mapgen.js $f && ! grep -q mapgen-config $f && echo "缺配置 $f"; done`。
-2. **`JsWorldVm.Call` 是 `switch (fn)` 白名单**（`Engine/JsEngineHost.cs`）。`mapgen-server.js` 新增导出后
-   **必须补 case**，否则运行期抛 `未知 JS 函数: xxx` → 整个 `TileRequest` 中断。
+2. **每个 `JsvmModule.Invoke` 是 `switch (fn)` 白名单**（世界层出口 → `Engine/WorldModule.cs`；子系统出口 → 各自 `Subsystems/<Name>/<Name>Module.cs`）。
+   ⚠ 2026-10-11 目录重构：旧 `Engine/JsEngineHost.cs`（`JsWorldVm.Call` 的巨型 switch）**已删**，白名单按 Scope 分治。
+   `mapgen-server.js`/`city-evo.js` 新增导出后 **必须补到对应 Module 的 case**，否则运行期抛 `未知 JS 函数: xxx` → 整个 `TileRequest` 中断。
+   自检：`node verify/evo/check_city_evo_integration.mjs` 的 **I6** 会读 `WorldModule.cs`+`CityModule.cs` 断言「出口归属正确」。
    指纹症状：**`mask=ALL 0` + `revs []` + 所有图层「存在」全 FAIL**（看起来像服务端没数据，其实是异常提前返回）；
    判据：翻服务端 stdout 找 `TileRequest 处理异常`。
 3. **repeated 消息字段在前端必须「每次出现即 push 一个元素」**（同 `EntityGroup.items[]` 的写法）。
@@ -301,9 +357,9 @@ tasklist | grep -i zongmen || echo "无进程"
    看到超时先翻日志里有没有 `TileResponse 解码失败`，别一头扎进性能排查（本次就是解码错，30s 超时是假象）。
 
 ### 隔离验证实例（不打断用户正在看的 8140）
-`appsettings.json` 的 `Zongmen.{Port,WebDir,DbPath,EngineJsDir}` 全可覆盖；`ZongmenPaths.FindRoot`
+`appsettings.json` 的 `Zongmen.{Port,WebDir,DbPath,EngineJsDir,CityJsDir}` 全可覆盖；`ZongmenPaths.FindRoot`
 会自 ContentRoot **向上找 `web/index.html`**，所以从 `verify/_vmsrv/` 跑也能自动指到仓库根的
-`web/` 与 `Server/Zongmen/Engine/js`（=最新源码）。做法：
+`web/`、`Server/Zongmen/Engine/js`（世界层）与 `Server/Zongmen/Subsystems/City/js`（City 子系统，`CityJsDir`）（=最新源码）。做法：
 1. `dotnet build Server/Zongmen/Zongmen.csproj -o verify/_vmsrv -p:UseAppHost=false`
    （`-o` 独立目录 + `UseAppHost=false` 可在**正式 exe 被占用时**照样验证；**先停实例再 build**，dll 会被锁）。
 2. 覆写 `verify/_vmsrv/appsettings.json`：`Port` 换一个空闲口、`DbPath` 指到 `verify/` 下的独立库

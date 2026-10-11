@@ -30,6 +30,10 @@ public sealed class ZongmenOptions
     /// <summary>js 沙箱脚本目录 (noise.js/mapgen.js/mapgen-server.js)。</summary>
     public string? EngineJsDir { get; set; }
 
+    /// <summary>城市迭代子系统的 js 目录 (city-evo.js)。
+    /// 2026-10-11 目录重构: 该脚本随 City 子系统搬到 Subsystems/City/js,
+    /// 不再是引擎公共目录的一员。留空则自动定位 Subsystems/City/js。</summary>
+    public string? CityJsDir { get; set; }
     /// <summary>
     /// 世界时钟与 Tick 演化框架配置 (appsettings.json "Zongmen:Tick" 节)。
     /// 详见 <see cref="Time.TickOptions"/> 与 docs/游戏时钟与Tick演化框架方案.md。
@@ -67,6 +71,27 @@ public static class ZongmenPaths
         var cand = Path.Combine(root, "Server", "Zongmen", "Engine", "js");
         if (Directory.Exists(cand)) return cand;
         return Path.Combine(contentRoot, "Engine", "js");
+    }
+
+    /// <summary>城市迭代子系统的 js 目录 (city-evo.js)。见 <see cref="ZongmenOptions.CityJsDir"/>。</summary>
+    public static string ResolveCityJsDir(ZongmenOptions o, string contentRoot)
+    {
+        if (!string.IsNullOrEmpty(o.CityJsDir) && Directory.Exists(o.CityJsDir))
+            return o.CityJsDir!;
+        var root = FindRoot(contentRoot);
+        var cand = Path.Combine(root, "Server", "Zongmen", "Subsystems", "City", "js");
+        if (Directory.Exists(cand)) return cand;
+        return Path.Combine(contentRoot, "Subsystems", "City", "js");
+    }
+
+    /// <summary>角色子系统目录 (Subsystems/Characters; 内含 js/chargen-core.js 与
+    /// data/cultivation-base.json)。跑法见 Subsystems/Characters/README.md。</summary>
+    public static string ResolveCharactersDir(ZongmenOptions o, string contentRoot)
+    {
+        var root = FindRoot(contentRoot);
+        var cand = Path.Combine(root, "Server", "Zongmen", "Subsystems", "Characters");
+        if (Directory.Exists(cand)) return cand;
+        return Path.Combine(contentRoot, "Subsystems", "Characters");
     }
 
     public static string ResolveDbPath(ZongmenOptions o, string contentRoot)

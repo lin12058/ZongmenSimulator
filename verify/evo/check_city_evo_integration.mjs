@@ -31,6 +31,8 @@ import { spawn } from 'node:child_process';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..');
 const ENG = path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js');
+/* 2026-10-11 目录重构: city-evo.js 现属 City 子系统 (Subsystems/City/js)。 */
+const CITY = path.join(ROOT, 'Server', 'Zongmen', 'Subsystems', 'City', 'js');
 
 const SEED = process.argv[2] || 'city-evo-integration-1';
 const SPAN = 2;            // 与 tickprobe evo 的 span 对齐 (小窗口 ⇒ 判据快)
@@ -42,11 +44,15 @@ const ck = (n, c, d) => {
   if (!c) fails.push(n);
 };
 
-/* ══ 载入引擎 bundle (与生产 JsEngineHost 逐序一致) ══ */
+/* ══ 载入引擎 bundle (与生产 JsvmModule 逐序一致; city-evo.js 换到子系统目录) ══ */
 global.window = globalThis;
-const BUNDLE = ['noise.js', 'mapgen-config.js', 'mapgen.js', 'mapgen-server.js', 'city-evo.js'];
-for (const f of BUNDLE) {
+for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js', 'mapgen-server.js']) {
   const p = path.join(ENG, f);
+  if (!fs.existsSync(p)) { console.error(`缺文件: ${p}`); process.exit(1); }
+  (0, eval)(fs.readFileSync(p, 'utf8'));
+}
+{
+  const p = path.join(CITY, 'city-evo.js');
   if (!fs.existsSync(p)) { console.error(`缺文件: ${p}`); process.exit(1); }
   (0, eval)(fs.readFileSync(p, 'utf8'));
 }
@@ -414,13 +420,22 @@ if (!probed || probed.err) {
   ck('I5 city-evo 全出口齐备', NEED_EXPORTS.every((k) => typeof CE[k] === 'function'),
     NEED_EXPORTS.filter((k) => typeof CE[k] !== 'function').join(','));
 
-  /* I6 ★ 帧白名单守卫: 引擎新增的每个出口都必须挂到 JsEngineHost.Call 的 switch,
-     否则运行期才炸 `未知 JS 函数` (编译期不报)。这里对**源码**断言 (不看运行结果)。 */
+  /* I6 ★ 出口白名单守卫: 引擎新增的每个出口都必须挂到对应 JsvmModule.Invoke 的 switch,
+     否则运行期才炸 `未知 JS 函数` (编译期不报)。2026-10-11 目录重构后白名单分散到:
+       世界层 → Server/Zongmen/Engine/WorldModule.cs  (渲染/几何/ext 类出口)
+       城市层 → Server/Zongmen/Subsystems/City/CityModule.cs (纯演化出口)
+     这里对**源码**断言「出口存在」且「归属正确」两件事 (不看运行结果)。 */
   {
-    const host = fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'JsEngineHost.cs'), 'utf8');
-    const needCases = ['citySettlePlanJson', 'citySettlementsJson', 'cityEvolveJson', 'cityNewStateJson'];
-    const missing = needCases.filter((k) => !host.includes('"' + k + '"'));
-    ck(`I6 JsEngineHost.Call 白名单含新出口 (${needCases.length} 项)`, missing.length === 0, missing.join(','));
+    const worldSrc = fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'WorldModule.cs'), 'utf8');
+    const citySrc = fs.readFileSync(path.join(ROOT, 'Server', 'Zongmen', 'Subsystems', 'City', 'CityModule.cs'), 'utf8');
+    const ROUTE = {
+      citySettlementsJson: worldSrc,
+      citySettlePlanJson: worldSrc,
+      cityEvolveJson: citySrc,
+      cityNewStateJson: citySrc,
+    };
+    const missing = Object.keys(ROUTE).filter((k) => !ROUTE[k].includes('"' + k + '"'));
+    ck(`I6 出口白名单归属正确 (${Object.keys(ROUTE).length} 项)`, missing.length === 0, missing.join(','));
   }
 }
 

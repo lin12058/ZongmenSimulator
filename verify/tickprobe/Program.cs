@@ -617,21 +617,21 @@ internal static class Program
         };
     }
 
-    // ══ P2 城市演化: 真引擎 (JsEngineHost + city-evo.js) + 真台账 (CityStateStore) ══
+    // ══ P2 城市演化: 真引擎 (WorldModule/CityModule + city-evo.js) + 真台账 (CityStateStore) ══
     //
     //   ★ 这一支是「融入正确性」的判据本体:
-    //     用**生产代码路径** (JsEngineHost.Call 的白名单 → city-evo.js) 跑演化,
+    //     用**生产代码路径** (JsvmModule.Invoke 的白名单 → city-evo.js) 跑演化,
     //     把终态与 verify/evo/city_evo_sim.mjs 的终态比对。
     //     两者实现同源 (E 常量逐值一致) ⇒ 任何逐城差异都指向「融入走样了」。
     //
-    //   入参: { op:"evo", seed, years, span, k, engineJsDir? }
+    //   入参: { op:"evo", seed, years, span, k, engineJsDir?, cityJsDir? }
     //   出参: { seed, years, ticks, cities:[{id,pop,popF,tier,state,built,stock,Kf}...], ... }
     //
-    //   ⚠ 为什么这里**不复用** TickVmPoolExecutor/MapWorldService:
+    //   ⚠ 为什么这里**不复用** CityTickExecutor/MapWorldService:
     //     那两个需要完整 DI 图 (Kestrel/WS/台账/限流…), 在判据宿主里搭起来
     //     会把「被测对象」埋进一堆无关设施里, 失败时无法定位。
     //     本支只走**同一条编译器路径** (同样的 vm.Call 白名单 + 同样的 CityStateStore),
-    //     这才是判据要验的东西。端到端 (含 tick 泵) 另有 check_city_evo_ws.mjs。
+    //     这才是判据要验的东西。端到端 (含 tick 泵) 另有 check_city_evo_ws.mjs。端到端 (含 tick 泵) 另有 check_city_evo_ws.mjs。
     private static object Evo(JsonElement e)
     {
         var seed = e.TryGetProperty("seed", out var sv) ? sv.GetString() ?? "evo-probe" : "evo-probe";
@@ -641,50 +641,80 @@ internal static class Program
         var ticks = (int)Math.Round(years * 360);
 
         /* 引擎目录: 默认相对宿主 exe 推 (verify/tickprobe/bin/... → 仓库根) */
+        var repoRoot = FindRepoRoot();
         var jsDir = e.TryGetProperty("engineJsDir", out var jdv) && jdv.ValueKind == JsonValueKind.String
             ? jdv.GetString()!
-            : Path.Combine(FindRepoRoot(), "Server", "Zongmen", "Engine", "js");
+            : Path.Combine(repoRoot, "Server", "Zongmen", "Engine", "js");
+        var cityJsDir = e.TryGetProperty("cityJsDir", out var cjdv) && cjdv.ValueKind == JsonValueKind.String
+            ? cjdv.GetString()!
+            : Path.Combine(repoRoot, "Server", "Zongmen", "Subsystems", "City", "js");
 
-        var dbPath = Path.Combine(Path.GetTempPath(), $"zm_evo_{Guid.NewGuid():N}.sqlite");
+        /* ⚠ 临时库落 <repo>/Temp/ —— 不许用系统临时目录 (Path.GetTempPath() 指向
+           C:\Users\...\AppData\Local\Temp, 是明确禁用的位置)。 */
+        var tempDir = Path.Combine(repoRoot, "Temp");
+        Directory.CreateDirectory(tempDir);
+        var dbPath = Path.Combine(tempDir, $"zm_evo_{Guid.NewGuid():N}.sqlite");
         try
         {
-            using var host = new Zongmen.Engine.JsEngineHost(jsDir, maxSeeds: 2);
-            var store = new Zongmen.Storage.CityStateStore(dbPath);
+            /* ★ 两个独立 V8 实例 (与生产同构):
+                 core → citySettlementsJson (ext 感知的身份表)
+                 city → cityNewStateJson / cityMetaJson / cityEvolveJson (纯演化) */
+            var worldModule = new Zongmen.Engine.WorldModule(jsDir, cityJsDir);
+            var cityModule = new Zongmen.Subsystems.City.CityModule(jsDir, cityJsDir);
+            using var host = new Zongmen.Engine.JsVmPool(
+                new Zongmen.Engine.JsvmModule[] { worldModule, cityModule }, maxVms: 4);
+            var store = new Zongmen.Subsystems.City.CityStateStore(dbPath);
             try
             {
-                using var lease = host.Lease(seed);
-                var vm = lease.Vm;
-
-                /* ① 初始化: 遍历窗口建台账行 (与 TickVmPoolExecutor.EnsureInitialized 同口径) */
+                /* ① 初始化: 遍历窗口收「身份表」(与 CityTickExecutor.EnsureInitialized 同口径) */
                 var ids = new List<string>();
                 var metaOf = new Dictionary<string, string>(StringComparer.Ordinal);
-                for (var i = -span; i <= span; i++)
+                var pending = new List<(string Id, string Type, int Q, int R, int Pop, int Tier)>();
                 {
-                    for (var j = -span; j <= span; j++)
+                    /* ⚠ 世界层门闩只覆盖这一趟; 下面借 City 层时它已释放 (两把不嵌套持有) */
+                    using var worldLease = host.Lease(Zongmen.Engine.WorldModule.WorldScope, seed);
+                    var worldVm = worldLease.Vm;
+                    for (var i = -span; i <= span; i++)
                     {
-                        /* ⚠ 用 citySettlementsJson (带 type/q/r) 而不是 settleJson (不带) */
-                        using var d = JsonDocument.Parse(vm.Call("citySettlementsJson", i, j));
-                        if (!d.RootElement.TryGetProperty("settlements", out var towns) ||
-                            towns.ValueKind != JsonValueKind.Array) continue;
-                        foreach (var t in towns.EnumerateArray())
+                        for (var j = -span; j <= span; j++)
                         {
-                            var id = t.TryGetProperty("id", out var idv) ? idv.GetString() ?? "" : "";
-                            if (id.Length == 0 || metaOf.ContainsKey(id)) continue;
-                            var type = t.TryGetProperty("type", out var tyv) && tyv.ValueKind == JsonValueKind.String
-                                ? tyv.GetString() ?? "" : "";
-                            if (type == "poi") continue;
-                            var q = t.TryGetProperty("q", out var qv) ? qv.GetInt32() : 0;
-                            var r = t.TryGetProperty("r", out var rv) ? rv.GetInt32() : 0;
-                            var pop = t.TryGetProperty("pop", out var pv) ? pv.GetInt32() : 0;
-                            var tier = t.TryGetProperty("tier", out var tv) ? tv.GetInt32() : 1;
-                            var stJson = vm.Call("cityNewStateJson", id, type, q, r, pop, tier, 0);
-                            store.Put(Zongmen.Storage.CityStateStore.FromEngineJson(0, stJson));
-                            metaOf[id] = vm.Call("cityMetaJson", id, type, q, r);
-                            ids.Add(id);
+                            /* ⚠ 用 citySettlementsJson (带 type/q/r) 而不是 settleJson (不带) */
+                            using var d = JsonDocument.Parse(worldVm.Call("citySettlementsJson", i, j));
+                            if (!d.RootElement.TryGetProperty("settlements", out var towns) ||
+                                towns.ValueKind != JsonValueKind.Array) continue;
+                            foreach (var t in towns.EnumerateArray())
+                            {
+                                var id = t.TryGetProperty("id", out var idv) ? idv.GetString() ?? "" : "";
+                                if (id.Length == 0 || metaOf.ContainsKey(id)) continue;
+                                var type = t.TryGetProperty("type", out var tyv) && tyv.ValueKind == JsonValueKind.String
+                                    ? tyv.GetString() ?? "" : "";
+                                if (type == "poi") continue;
+                                var q = t.TryGetProperty("q", out var qv) ? qv.GetInt32() : 0;
+                                var r = t.TryGetProperty("r", out var rv) ? rv.GetInt32() : 0;
+                                var pop = t.TryGetProperty("pop", out var pv) ? pv.GetInt32() : 0;
+                                var tier = t.TryGetProperty("tier", out var tv) ? tv.GetInt32() : 1;
+                                metaOf[id] = "";                       // 占位去重
+                                pending.Add((id, type, q, r, pop, tier));
+                            }
                         }
                     }
                 }
+
+                /* 建行 + 取元数据 (City 层) */
+                using (var cityLease = host.Lease(Zongmen.Subsystems.City.CityModule.CityScope, seed))
+                {
+                    var vm = cityLease.Vm;
+                    foreach (var p in pending)
+                    {
+                        var stJson = vm.Call("cityNewStateJson", p.Id, p.Type, p.Q, p.R, p.Pop, p.Tier, 0);
+                        store.Put(Zongmen.Subsystems.City.CityStateStore.FromEngineJson(0, stJson));
+                        metaOf[p.Id] = vm.Call("cityMetaJson", p.Id, p.Type, p.Q, p.R);
+                        ids.Add(p.Id);
+                    }
+                }
                 ids.Sort(StringComparer.Ordinal);
+                using var evoLease = host.Lease(Zongmen.Subsystems.City.CityModule.CityScope, seed);
+                var evoVm = evoLease.Vm;
 
                 /* ② 推演: 与 city_evo_sim.mjs 同节拍 —— 每 90 tick 演化一步 (dt=90) */
                 for (var tick = 90; tick <= ticks; tick += 90)
@@ -693,9 +723,9 @@ internal static class Program
                     {
                         var cur = store.Get(0, id);
                         if (cur == null) continue;
-                        var stateJson = Zongmen.Storage.CityStateStore.ToEngineJson(cur);
-                        var outJson = vm.Call("cityEvolveJson", stateJson, metaOf[id], 90, kPolicy);
-                        store.Put(Zongmen.Storage.CityStateStore.FromEngineJson(0, outJson));
+                        var stateJson = Zongmen.Subsystems.City.CityStateStore.ToEngineJson(cur);
+                        var outJson = evoVm.Call("cityEvolveJson", stateJson, metaOf[id], 90, kPolicy);
+                        store.Put(Zongmen.Subsystems.City.CityStateStore.FromEngineJson(0, outJson));
                     }
                 }
 

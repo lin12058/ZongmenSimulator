@@ -45,6 +45,9 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..');
 const ENG = path.join(ROOT, 'Server', 'Zongmen', 'Engine', 'js');
+/* 2026-10-11 目录重构: city-evo.js 随 City 子系统搬到 Subsystems/City/js,
+   不再是引擎公共目录的一员。bundle 序不变, 只是最后一份换了目录。 */
+const CITY = path.join(ROOT, 'Server', 'Zongmen', 'Subsystems', 'City', 'js');
 
 const argv = process.argv.slice(2);
 const JSON_ONLY = argv.includes('--json');
@@ -87,9 +90,10 @@ const TICKS = Math.round(YEARS * T.Year);
      但建筑计划层 (v4) 额外与引擎的 CityEvo.planCityBuildings **交叉断言**,
      这样引擎侧漂移会被立刻抓住 (镜像 + 交叉 = 双向)。 */
 global.window = globalThis;
-for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js', 'city-evo.js']) {
+for (const f of ['noise.js', 'mapgen-config.js', 'mapgen.js']) {
   (0, eval)(fs.readFileSync(path.join(ENG, f), 'utf8'));
 }
+(0, eval)(fs.readFileSync(path.join(CITY, 'city-evo.js'), 'utf8'));
 const MG = global.MapGen;
 const CFG = MG.CFG;
 const CE = global.CityEvo;

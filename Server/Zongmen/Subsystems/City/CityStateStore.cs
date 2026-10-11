@@ -3,10 +3,10 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
-namespace Zongmen.Storage;
+namespace Zongmen.Subsystems.City;
 
 /// <summary>一座聚落的演化状态 (CityState 表的一行)。
-/// 与引擎 `Engine/js/city-evo.js` 的 CityState 结构**逐字段对应** ——
+/// 与引擎 `Subsystems/City/js/city-evo.js` 的 CityState 结构**逐字段对应** ——
 /// 字段名/语义必须与那里保持一致, 否则离线对拍会以「看起来像 bug 的口径差」失败。</summary>
 public sealed class CityStateRow
 {
@@ -50,7 +50,7 @@ public sealed class CityStateRow
 }
 
 /* ============================================================
- * 城市演化台账 (P2 · Server/Zongmen/Time/TickVmPoolExecutor 的后端)
+ * 城市演化台账 (City 子系统 · 由 Subsystems/City/CityTickExecutor 驱动)
  * ------------------------------------------------------------
  * 职责: 「本世每座聚落的演化状态」的唯一权威记录。
  *   写入时机 = 每次 TownEvolve job 出结果后 (TickPump.ApplyOutcome);

@@ -1064,6 +1064,30 @@
       regionM: function () { return geo ? geo.regionM : 0; }
     });
   }
+  /* 「众生录」角色窗口接线 (web/js/roster.js)。
+     ⚠ 本模块**只注入根节点与数据源, 不渲染** —— 开关/筛选/选中全在 roster.js 内部。
+     数据源 = **服务端实时生成**: GET /api/characters (C# CharactersSubsystem →
+     V8 "characters" scope → 同一份 chargen-core.js)。前端**不再**读任何预生成的静态快照
+     —— 角色是 (seed,index) 的纯函数派生, 由服务端按当前世现算。
+     ⚠ count 由前端给上限, seed **不给** (服务端缺省取当前世 —— 种子是服务端资产)。
+     ⚠ 响应 gzip; 端点带 no-cache, 换世后再开窗即得新一批人。 */
+  function initRoster() {
+    var R = window.SectRoster;
+    if (!R || !R.init) {
+      console.warn('众生录模块未加载 (web/js/roster.js) — 已跳过');
+      return;
+    }
+    R.init({
+      root: $('rosterWrap'),
+      btn: $('btnRoster'),
+      esc: esc,
+      dataUrl: 'api/characters?count=300',
+      onToggle: function (open) {
+        var b = $('btnRoster');
+        if (b) b.classList.toggle('on', !!open);
+      }
+    });
+  }
   /* ---------- 标注层: 全部基于后端数据绘制 ---------- */
   function staticNeedsRedraw(vw, vh) {
     if (staticDirty) return true;
@@ -3492,6 +3516,7 @@
       }
       initMinimap();          // R11: 挂载独立小地图模块 (可热拔插, 见 minimap-vein.js)
       initInfoCard();         // 注入「他人聚落详情卡」数据源 (infocard.js, 暂不渲染)
+      initRoster();           // 挂载「众生录」角色窗口 (roster.js, 数据源 = 服务端 /api/characters)
       renderMySect();         // 本宗面板: 开局先落引导态 (未立宗)
       /* 登录回填 —— 服务端 LoginResponse 带「我的聚落」(主宗 + 附属城镇), 它决定:
            ① 左侧按钮显隐 (有宗 ⇒ 隐「卜居」显「拓土」) ② 本宗面板 + 附属清单 ③ 回宗按钮。
@@ -3510,6 +3535,9 @@
       /* 调试: ?set=1 开局即展开设置弹窗 (headless 无法点齿轮 —— 与 plaqdbg/sel 同类)。
          仅 DEBUG 生效, 不进产品路径。 */
       if (DEBUG && urlParams.get('set') === '1') openSettings(true);
+      /* 调试: ?roster=1 开局即展开「众生录」窗口 (headless 无法点顶栏按钮 —— 与 set=1 同类)。
+         数据是异步 fetch ⇒ 这里只负责开窗, 内容到货后由 roster.js 自己渲染。 */
+      if (DEBUG && urlParams.get('roster') === '1' && window.SectRoster) window.SectRoster.open();
 
       /* R10: 调试句柄仅 DEBUG 模式 (debug=1 / capture=1) 暴露 */
       if (DEBUG) {
@@ -3705,6 +3733,9 @@
             /* 他人详情卡模块 (web/js/infocard.js) 是否就位 + 数据源是否已接。
                当前不渲染, 只证明"模块可用、等 UI 接线"。 */
             infoCard: (window.InkInfoCard && window.InkInfoCard.probe) ? window.InkInfoCard.probe() : null,
+            /* 众生录 (web/js/roster.js): 窗口开没开 / 数据到货没 / 选中谁 ——
+               headless 无法点顶栏按钮, 这三条事实只能靠探针读。 */
+            roster: (window.SectRoster && window.SectRoster.probe) ? window.SectRoster.probe() : null,
             zoom: +cam.zoom.toFixed(3), camTile: [Math.round(cam.x), Math.round(cam.y)]
           };
         };
