@@ -98,5 +98,64 @@ public sealed class CharactersSubsystem : ISubsystem
             ctx.Response.Headers.CacheControl = "no-cache, no-store";
             return Results.Bytes(gz, "application/json; charset=utf-8");
         });
+
+        /* ============================================================
+         * 点击详情: GET /api/people?seed=&q=&r=
+         * ------------------------------------------------------------
+         * 「点哪一格, 就看哪一格的人」(用户 Q2: 详情按**网格**取, 不按区块取)。
+         * 回 { schema, seed, q, r, kind, n, ps, squads:[{id,size,power,rep}] } —— 小队按战力降序。
+         *
+         * ⚠ 两段拼接 (两个独立 V8, 刻意不合并):
+         *   ① **落人格**「谁在哪一格」→ 核心 VM (`WorldModule`: 有骨架 + 地形)
+         *   ② **战力/小队**「是谁、多少战力」→ 本子系统的 characters VM (有六维)
+         *   任一环节失败 ⇒ 500 + err, 绝不回一份「人数对不上」的半成品。
+         * ============================================================ */
+        app.MapGet("/api/people", (string? seed, int? q, int? r, HttpContext ctx) =>
+        {
+            var s = (seed ?? "").Trim();
+            if (s.Length == 0) s = world.CurrentSeed() ?? "";
+            if (s.Length == 0 || q is null || r is null)
+                return Results.Text("{\"schema\":\"people/v1\",\"err\":\"bad_args\"}",
+                                    "application/json; charset=utf-8", statusCode: 400);
+
+            string json;
+            try
+            {
+                string place;
+                using (var core = world.LeaseScope(WorldModule.WorldScope, s))
+                    place = core.Vm.Call("peopleAtJson", q.Value, r.Value);
+
+                using var pd = System.Text.Json.JsonDocument.Parse(place);
+                var root = pd.RootElement;
+                var n = root.GetProperty("n").GetInt32();
+                var baseIdx = root.GetProperty("base").GetInt64();
+                var kind = root.TryGetProperty("kind", out var kEl) ? kEl.GetString() ?? "" : "";
+
+                string detail;
+                if (n <= 0)
+                    detail = "{\"n\":0,\"ps\":0,\"squads\":[]}";
+                else
+                {
+                    using var lease = world.LeaseScope(Module!.Scope, s);
+                    detail = lease.Vm.Call("squadBatchJson", s, baseIdx, n);
+                }
+                json = "{\"schema\":\"people/v1\",\"seed\":" +
+                       System.Text.Json.JsonSerializer.Serialize(s) +
+                       ",\"q\":" + q.Value + ",\"r\":" + r.Value +
+                       ",\"kind\":" + System.Text.Json.JsonSerializer.Serialize(kind) +
+                       "," + detail.Substring(1);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[people] 生成失败 seed={s} q={q} r={r}: {ex.GetType().Name}: {ex.Message}");
+                return Results.Text("{\"schema\":\"people/v1\",\"err\":\"generate_failed\"}",
+                                    "application/json; charset=utf-8", statusCode: 500);
+            }
+
+            var gz = GZipCodec.Compress(Encoding.UTF8.GetBytes(json));
+            ctx.Response.Headers.ContentEncoding = "gzip";
+            ctx.Response.Headers.CacheControl = "no-cache, no-store";
+            return Results.Bytes(gz, "application/json; charset=utf-8");
+        });
     }
 }

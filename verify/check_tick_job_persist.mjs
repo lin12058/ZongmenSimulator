@@ -160,10 +160,16 @@ srcGuard('F5 相位钥匙用线上名（KindNames.Of），绝不用 kind.ToStrin
   (s) => /KindNames\.Of\s*\(\s*kind\s*\)/.test(s) && !/kind\.ToString\s*\(\s*\)/.test(s),
   '落库存线上名 ⇒ 对账/重建必须用同一把钥匙，否则相位静默漂移');
 
-srcGuard('F6 CommitSuccess 复位哨兵并严格 += Period',
+srcGuard('F6 CommitSuccess 经 NextDue 推进相位（不经吊销哨兵）',
   'Server/Zongmen/Time/TickScheduler.cs',
-  (s) => /job\.NextTick\s*=\s*nowTick\s*\+\s*job\.PeriodTicks/.test(s),
-  '漏了这句 ⇒ long.MaxValue + Period 溢出成负数 ⇒ 相位错乱且不报错');
+  (s) => /_registry\.NextDue\s*\(\s*job\s*,\s*nowTick\s*\)/.test(s)
+         && !/job\.NextTick\s*=\s*nowTick\s*\+\s*job\.PeriodTicks/.test(s),
+  '收集即吊销 ⇒ NextTick=long.MaxValue，直接 +Period 溢出成负数；必须走 NextDue（用 DueTick + 哨兵防御）');
+
+srcGuard('F6b NextDue 用收集时的原到期 tick（DueTick）且保留哨兵防御',
+  'Server/Zongmen/Time/TickJobRegistry.cs',
+  (s) => /job\.DueTick/.test(s) && /RevokedTick\s*-\s*job\.PeriodTicks/.test(s),
+  '相位必须基于 DueTick（收集时记下的原到期 tick）；并保留哨兵防御分支，防回绕成负数');
 
 srcGuard('F7 Load 只取 Enabled=1（停用的 job 不该被重新调度）',
   'Server/Zongmen/Time/TickJobStore.cs',

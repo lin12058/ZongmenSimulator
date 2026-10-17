@@ -333,9 +333,10 @@
            该图层(聚落/景点/灵脉)永久缺失。 */
         if (resp.revs && resp.revs.length) {
           var k2 = resp.i + ',' + resp.j;
-          var next = (revs.get(k2) || [0, 0, 0, 0, 0]).slice(0, 5);
-          var bits = [PB.MASK.CHUNK, PB.MASK.REGION, PB.MASK.SETTLE, PB.MASK.POI, PB.MASK.COMM];
-          for (var b = 0; b < 5; b++) {
+          var next = (revs.get(k2) || [0, 0, 0, 0, 0, 0]).slice(0, 6);
+          var bits = [PB.MASK.CHUNK, PB.MASK.REGION, PB.MASK.SETTLE, PB.MASK.POI,
+                      PB.MASK.COMM, PB.MASK.PEOPLE];
+          for (var b = 0; b < 6; b++) {
             if ((resp.mask & bits[b]) !== 0 && b < resp.revs.length) next[b] = resp.revs[b];
           }
           revs.set(k2, next);

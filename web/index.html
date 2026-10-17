@@ -545,6 +545,8 @@
         <span class="nm">领地圈</span><span class="dsc">各聚落的领地范围 (规模决定)</span></label>
       <label class="set-item"><input type="checkbox" data-zm="clouds">
         <span class="nm">云气</span><span class="dsc">云毯 · 地面云影</span></label>
+      <label class="set-item"><input type="checkbox" data-zm="people">
+        <span class="nm">人烟</span><span class="dsc">人力热力图 · 每格战力合计 (点击看详情)</span></label>
       <div class="ink-rule"></div>
       <div class="set-cap">世 界</div>
       <div class="set-kv"><span class="k">轮次</span><span class="v" id="setRound">-</span></div>
@@ -635,6 +637,9 @@
   <!-- 众生录 (角色窗口): 独立模块, 数据源 = 服务端 /api/characters。
        在 main.js 之前 —— main.js 的 boot 里只调一次 initRoster() 注入根节点。 -->
   <script src="js/roster.js"></script>
+  <!-- 图层5 地图人物分布 (热力图 + 点击战力淡出 + 人烟面板): 独立可拔插模块,
+       必须在 main.js **之前** —— main.js 的 boot 里 PeopleLayer.init 注入依赖。 -->
+  <script src="js/people-layer.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>

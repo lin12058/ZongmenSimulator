@@ -533,6 +533,122 @@
       return CE;
     },
     /* 统计/自检钩子 */
-    _countVeins: function () { return JSON.stringify({ n: MG.countVeins() }); }
+    _countVeins: function () { return JSON.stringify({ n: MG.countVeins() }); },
+    /* ---- 地图人物分布 (2026-10-11 · 方案 `待办事项/地图人物分布-实施方案.md` v2) ----
+       只回答「谁在哪一格 / 这一格几个人」; 「是谁 / 多少战力」由角色子系统 (独立 V8) 现算。 */
+    peopleBlockJson: function (ca, cb) {
+      return JSON.stringify({ ca: ca | 0, cb: cb | 0, tiles: peopleBlockTiles(ca | 0, cb | 0) });
+    },
+    peopleAtJson: peopleAtJson
+  };
+
+  /* ============================================================
+   * 地图人物分布 —— 落人格 (派生在核心 VM: 这里有骨架 + 地形)
+   * ------------------------------------------------------------
+   * ★ 为什么不在角色 VM 里做: 落人格要知道「哪些格是聚落 / 哪些格是陆地」——
+   *   那是本模块 (settlementsFor / fields) 的知识; 角色 VM 是纯数据模块
+   *   (不载 mapgen-server.js, AcceptsExternalSettlements=false)。两个 V8 各管一段。
+   *
+   * ★ 纯派生: 同一 (seed, ca, cb) ⇒ 逐字节一致; **绝不落库**, 也不进 chunk/region 包
+   *   (一旦落库, 淘汰后 ReadSqlBackfill 会把旧包捞回来 ⇒ 「人一会儿跳回原样」)。
+   *
+   * ★ 属主分派: 每格只由「它自己的区块」(chunkOfTile) 上报。若按扫描半径 R 上报,
+   *   相邻两块的覆盖区重叠 ⇒ 同一格被两块各报一次 (客户端要么双画, 要么得先去重)。
+   * ============================================================ */
+  var _seedStr = '';
+  var PPL_PER_HEAD = 120;    // 每 120 人口 ⇒ 格上 1 个人
+  var PPL_CAP = 64;          // 单格人数硬上限 (被 personIndexOf 的 6 位槽位绑定, 改必同步)
+  var PPL_SCATTER_P = 0.03;  // 陆地散修格占比 (Q1「小部分随机分布」)
+
+  /* 纯函数哈希 (与 chargen-core.js 同族: FNV-1a 32bit)。seed 参与 ⇒ 换世即换分布。 */
+  function pplHash() {
+    var s = '', i;
+    for (i = 0; i < arguments.length; i++) s += (i ? '|' : '') + String(arguments[i]);
+    var h = 0x811c9dc5;
+    for (i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+    return (h >>> 0) / 4294967296;
+  }
+
+  /** 该 (q,r) 上第 k 个人的全局角色索引 —— **双射** (不同格必得不相交区间)。
+   *  值域 ≈ 2^46 < 2^53 ⇒ 前端 varint/JSON 都不溢出。k ∈ [0,64), 与 PPL_CAP 绑定。 */
+  function personIndexOf(q, r, k) {
+    return (((q + 524288) * 1048576) + (r + 524288)) * 64 + k;
+  }
+
+  /** 聚落人口 → 格上人数 (Q1 主聚集口径)。 */
+  function pplCountOf(st) {
+    var n = Math.round((st.pop || 0) / PPL_PER_HEAD);
+    if (n < 0) n = 0;
+    return n > PPL_CAP ? PPL_CAP : n;
+  }
+
+  /** 本块 (区块格 ca,cb) 的落人格: [{q,r,n,base}]。base = 该格第 0 人的索引。 */
+  function peopleBlockTiles(ca, cb) {
+    var ccq = ca * S, ccr = cb * S;
+    var R = MG.CHUNK_SCAN, M = MG.REGION_M, reach = R + M;
+    var out = [], seen = Object.create(null), i, j, s, dq, dr;
+    /* 1) 主聚集: 本块属主格上的聚落 (含 ext 玩家宗门) */
+    var i0 = Math.floor((ccq - reach) / M) - 1, i1 = Math.floor((ccq + reach) / M) + 1;
+    var j0 = Math.floor((ccr - reach) / M) - 1, j1 = Math.floor((ccr + reach) / M) + 1;
+    for (i = i0; i <= i1; i++) {
+      for (j = j0; j <= j1; j++) {
+        var sts = MG.settlementsFor(i, j);
+        for (s = 0; s < sts.length; s++) {
+          var st = sts[s];
+          if (st.type === 'poi') continue;
+          var oc = MG.chunkOfTile(st.q, st.r);
+          if (oc.ca !== ca || oc.cb !== cb) continue;      // 属主不是本块 ⇒ 交给那一块
+          var n = pplCountOf(st);
+          if (n <= 0) continue;
+          var key = st.q + ',' + st.r;
+          if (seen[key]) continue;
+          seen[key] = 1;
+          out.push({ q: st.q, r: st.r, n: n, base: personIndexOf(st.q, st.r, 0) });
+        }
+      }
+    }
+    /* 2) 副散布: 属主格为陆地且在阈值内的散修 (Q1「小部分随机分布」) */
+    for (dq = -R; dq <= R; dq++) {
+      for (dr = -R; dr <= R; dr++) {
+        if (MG.hexDist(dq, dr, 0, 0) > R) continue;
+        var q = ccq + dq, r = ccr + dr, ck = q + ',' + r;
+        if (seen[ck]) continue;
+        var oc2 = MG.chunkOfTile(q, r);
+        if (oc2.ca !== ca || oc2.cb !== cb) continue;      // 只报属主格 (天然不重叠)
+        var f = MG.fields(q, r);
+        if (!f || f.biome < 2) continue;                   // biome 0/1 = 深海 / 浅海
+        if (pplHash(_seedStr, 'sc', q, r) >= PPL_SCATTER_P) continue;
+        seen[ck] = 1;
+        out.push({ q: q, r: r, n: 1, base: personIndexOf(q, r, 0) });
+      }
+    }
+    return out;
+  }
+
+  /** 单格落人格 (点击详情用)。⚠ 必须与 peopleBlockTiles 同口径 —— 同格的 n 必须一致,
+   *  否则「热力图人数」与「点开看到的小队人数」对不上 (静默不一致)。 */
+  function peopleAtJson(q, r) {
+    q = q | 0; r = r | 0;
+    var n = 0, kind = 'none', s;
+    var rs = MG.regionSeedOf(q, r);
+    var sts = MG.settlementsFor(rs.i, rs.j);
+    for (s = 0; s < sts.length; s++) {
+      if (sts[s].q === q && sts[s].r === r) {
+        if (sts[s].type !== 'poi') { n = pplCountOf(sts[s]); if (n > 0) kind = 'settle'; }
+        break;
+      }
+    }
+    if (n <= 0) {
+      var f = MG.fields(q, r);
+      if (f && f.biome >= 2 && pplHash(_seedStr, 'sc', q, r) < PPL_SCATTER_P) { n = 1; kind = 'scatter'; }
+    }
+    return JSON.stringify({ q: q, r: r, n: n, base: personIndexOf(q, r, 0), kind: kind });
+  }
+
+  /* 记下 seed (散布哈希要用) —— 包一层 init, 不改上面的字面量 (同文件一次一条 Edit 的纪律)。 */
+  var _pplOrigInit = global.MapGenServer.init;
+  global.MapGenServer.init = function (seed) {
+    _seedStr = String(seed);
+    return _pplOrigInit(seed);
   };
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));

@@ -195,7 +195,7 @@
     - 守卫：`check_tick_job_persist.mjs` F6 + `check_tick_lazy.mjs` B5。
 11. ⚠⚠ **★ 相位钥匙必须用线上名（判据抓出的真实生产 bug）**：`PhaseHash` 派生的 kind 参数必须用 `KindNames.Of(kind)`（线上名，如 `demoHeartbeat`），**绝不能用 `kind.ToString()`（枚举名，如 `DemoHeartbeat`）** —— `TickJobStore` 落库存的是线上名，对账/重建要按同一把钥匙复现同一相位。**改个枚举成员名就会让全世界的相位漂移且不报错。**
     - 守卫：`check_tick_job_persist.mjs` F5 + `check_tick_queue_threadsafe.mjs` F15。
-12. ⚠ **`Load` 只取 `Enabled=1`**：停用的 job 不该在重启后复活（否则失败 job 无限重试）。`check_tick_job_persist.mjs` F7 钉死。
+12. ⚠ **`Load` 只取 `Enabled=1`**：停用的 job 不该在重启后复活（否则失败 job 无限重试）。`check_tick_job_persist.mjs` F7 钉死。⚠★ **但这把过滤器只对「载入」是正确的**：`Reconcile` 的 `existing` 也复用了它 ⇒ 停用行被判「不存在」⇒ 对账反而把它当**新增** UPSERT 复活。同一把钥匙开两把锁，见 §五 22。
 13. ⚠ **相位分布不能用「max/min 桶比」**：该度量随样本量剧烈波动（N=2000 落 90 桶时 2.6 属正常采样方差）。**必须用卡方检验**（χ² vs df），见 `check_tick_phase.mjs` B。
 14. ⚠ **换世必须先清 `clockBase`**：否则新世界头几秒继续显示旧世界年份（「换了世界时间却没换」，静默错）。
 15. ⚠ **前端时钟绝不清零**：校准失败只停更、保留旧显示 —— 显示旧值远好于显示「0 年」/空白。
@@ -209,6 +209,19 @@
 20. ⚠ **跨世串味**：城 id `{i}_{j}_u{n}` **跨世会重名** ⇒ 换世**必须** `CityStateStore.RemoveRound(旧 round)`（`BindCurrentWorldToTick` 已做）；漏了就是「新世第 0 天的城带着上一世几十年的人口继续跑」，且**不报错**。
 21. ⚠ **死配置 / 死计数器**：`EvolveMaxCitiesPerTick`（硬上限）、`TickVmPoolSize`、`UseReadPathVmForTick`、`TickVmPoolExecutor._migrations` —— **均未被读取/自增** ⇒ 改它们不会有任何效果。P3 开工前要么接线、要么删。
 
+**P2 收尾（2026-10-11 二轮）**
+
+22. ⚠⚠★ **「无条件保底心跳」+「`Enabled=1` 过滤」= 每 1 游戏年复活一次的注定失败 job**。实测报错 `94621817/2/demo_0_0/demoHeartbeat err=not-claimed-by-any-executor`，三重叠加缺一不可：
+    ① 旧 `ExpectedJobs` **无条件**补一个 `demo_0_0/demoHeartbeat`（P1 脚手架残留，provider 已就位后它早该退休）；
+    ② 生产组合根 `Program.cs` 的 `TickExecutorHub` 只注册 `CityTickExecutor`（认领 `TownEvolve`/`TradeEdge`）⇒ **无人认领** `DemoHeartbeat` ⇒ Hub 回 `not-claimed-by-any-executor` ⇒ 连续 5 次后 `Enabled=0`；
+    ③ `Reconcile` 的 `existing = Load(Enabled=1)` 看不到那条停用行 ⇒ 判为「不存在」⇒ 走 `added` + UPSERT（`Enabled=1`/`FailCount=0`）⇒ **原地复活再死一次**（`ReconcileEveryTicks=360` ⇒ 每游戏年一轮）。
+    **已修**：`TickOptions.EnableDemoHeartbeat` 默认 **false**；保底只在「**无** `ExpectedJobsProvider`」且显式开启时才补；`BindWorld` 顺手清存档里的 demo 心跳残留（内存丢弃 + `TickJobStore.DeleteKindRows` 删僵尸行 —— 停用行既不在 expected 也不在 `Load(Enabled=1)` 里，`Reconcile` **永远判不到它**，会永久滞留）。
+    ⚠ 通用形态：**「某 kind 无执行器认领」+「保底/对账会重建它」= 永久刷错且永不收敛**。第 19 条（`Reputation`）是同一个雷，只是还没被投递。
+
+23. ⚠⚠★ **provider 抛异常时「回退到演示心跳」= 灾难级**：旧 `ExpectedJobs` 在 `ExpectedJobsProvider` 抛异常时 `list.Clear()` 再补一个 demo 心跳 ⇒ 期望集被换成「一个注定失败的 job」⇒ `Reconcile` 把本世**所有真实演化 job 判为 removed 删光** ⇒ 整世静默停摆，而日志只有一条 LogError（把「provider 挂了」伪装成「有 job 在跑」）。
+    **已修**：`ExpectedJobs` 改返回 `List<TickJob>?`，**null = 本世期望集未知** ⇒ `MaybeReconcile` **整轮跳过**（世界 job 表保持原样 + LogWarning 留痕）。
+    ⚠ 原则：对账的语义是「只增删」，所以它的**输入必须可信**；拿空集/残缺集去对账 = 授权它删东西。
+
 ---
 
 ## 六、变更日志
@@ -219,3 +232,4 @@
 | 2026-09-27 | **P1 收尾（第二轮）**：① 帧 7 全链路打通（`MapMessages` DTO + `MapWsHandler.HandleClockAsync` + `pb.js` 编解码 + `mapclient.clock()` + `main.js` 时钟显示 + `Program` 传 pump）；② `MapWorldService.StatsJson` / `MapEndpoints` 销账；③ `TickPump.Stats()` 的 `perfRows` 写死 0 改为 `_perfStore.WrittenRows`（注入 `TickPerfStore`）；④ 新增 `check_tick_job_persist.mjs`（25 断言）+ `ws_clock_probe.mjs`（18 断言，端到端）；⑤ `frontend_smoke.mjs` 扩充帧 7 三处契约；⑥ 进度文件 §2.6/§2.7 销账 + §五 补 7 条守卫。**P1 全部 ✅**，7 条判据全绿。 |
 | 2026-10-10 | **P2 融入（纵向切片）**：`TickVmPoolExecutor` + `Storage/CityStateStore`（第三条独立表）+ 引擎 `city-evo.js` 融入 + `verify/evo/` 判据（G 同源 / H 生产路径 / I 红线）；v4 建筑计划 `planCityBuildings`（纯派生）+ `ApplyShock` 事件入口。⚠ 无状态 VM 池 / protobuf 边界 / 双缓冲 / 消费队列**均未做**。 |
 | 2026-10-11 | **回写 P2 销账**：§一 状态改为 🟡 部分完成（并加定性说明）；新增 §二.8（逐条对账，标出「替代形态 / 未做 / 死配置」）；§二.7 追加 P2 落地证据段；§四 补 D4~D9（P2 与设计的六处背离）；§五 补 17~21（P2 新坑与死配置）。 |
+| 2026-10-11 | **修「保底心跳」静默病（§五 22/23）**：① `TickOptions.EnableDemoHeartbeat` 默认 **false**（原为无条件保底补 demo 心跳）；② `TickPump.ExpectedJobs` 改返回 `List<TickJob>?`，**null = 期望集未知** ⇒ `MaybeReconcile` **整轮跳过**（原 provider 抛异常时 `list.Clear()` + 回退 demo 心跳 ⇒ 会把本世真实 job 全判 removed 删光）；③ `BindWorld` 清理存档内 demo 心跳残留（内存丢弃 + 新增 `TickJobStore.DeleteKindRows` 清僵尸行）。§五 12 补交叉引用。 |

@@ -132,7 +132,9 @@ function runBehavior() {
      2026-09-23 新增 domain (领地圈, 种植方案的放置预览配套): 它答的是「这里能不能立宗」,
      属偶发需求, 故**默认关** —— 与其余「显示层开关默认全开」的成例刻意不同, 必须登记在此。 */
   const SWITCH_ON = ['veins', 'nameSettle', 'nameVein', 'nameRegion', 'clouds'];
-  const SWITCH_OFF = ['domain'];
+  /* 2026-10-11 新增 people (图层5 人力热力图): 默认关 —— 它是「按需取人物层」的 opt-in
+     (关着时前端连 PEOPLE 掩码位都不带, 服务端零开销), 必须登记在此。 */
+  const SWITCH_OFF = ['domain', 'people'];
   {
     const { ZM } = loadStore();
     const d = ZM.settings.all();

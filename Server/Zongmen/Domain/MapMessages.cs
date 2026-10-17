@@ -300,7 +300,11 @@ public enum TileMask : uint
     Settle = 1 << 2,    // 0x04 聚落实体
     Poi = 1 << 3,       // 0x08 景点实体
     Comm = 1 << 4,      // 0x10 灵脉群落
-    All = Chunk | Region | Settle | Poi | Comm   // 0x1F
+    /* 0x20 地图人物分布 (2026-10-11 方案 v2): 每格人数 + 该格战力总和。
+       ⚠ 纯派生、**不落库**; 只在开启「人力热力图」时才请求 (前端按需带该位)。
+       ⚠ 加这一位 ⇒ All 由 0x1F 变 0x3F, 判据里几处硬编码 31/30 必须同批改 (否则假红)。 */
+    People = 1 << 5,
+    All = Chunk | Region | Settle | Poi | Comm | People   // 0x3F
 }
 
 [ProtoContract]
@@ -338,7 +342,8 @@ public sealed class TileRequest
     [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int J { get; set; }
     [ProtoMember(5)] public uint Mask { get; set; }            // 0 或 ALL = 全量
     [ProtoMember(6)] public uint Seq { get; set; }             // 客户端关联序号, 响应回显
-    /// <summary>客户端已持有的各图层 rev (按 TileMask 位序: 0=Chunk..4=Comm; 0=未持有)。</summary>
+    /// <summary>客户端已持有的各图层 rev (按 TileMask 位序: 0=Chunk, 1=Region, 2=Settle,
+    /// 3=Poi, 4=Comm, 5=People; 0=未持有)。⚠ 与 <c>TileResponse.Revs</c> 同序、同长(6)。</summary>
     [ProtoMember(7)] public List<int> LastRevs { get; set; } = [];
 }
 
@@ -398,6 +403,24 @@ public sealed class RegionData
     [ProtoMember(4)] public List<RoadDto> Roads { get; set; } = [];
 }
 
+/// <summary>地图人物分布 (图层5 People, 2026-10-11 方案 v2): 一格的人数与战力总和。
+/// ⚠ **稀疏** —— 只带 n&gt;0 的格 (绝大多数格没人); 全量按格发会把块响应撑大且全是 0。
+/// ⚠ 纯派生 (seed+聚落人口), **绝不落库**; 由 MapWorldService 请求时现算 + 进程内 LRU。</summary>
+[ProtoContract]
+public sealed class PeopleTileDto
+{
+    [ProtoMember(1, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(3)] public int N { get; set; }        // 该格人数 (≤64)
+    [ProtoMember(4)] public long Ps { get; set; }      // 该格战力总和 (热力图上色依据)
+}
+
+[ProtoContract]
+public sealed class PeopleData
+{
+    [ProtoMember(1)] public List<PeopleTileDto> Tiles { get; set; } = [];
+}
+
 [ProtoContract]
 public sealed class TileResponse
 {
@@ -407,7 +430,7 @@ public sealed class TileResponse
     [ProtoMember(4)] public uint DeniedMask { get; set; }      // 未登录被拒的图层位
     [ProtoMember(5)] public string Err { get; set; } = "";
     [ProtoMember(6)] public uint Seq { get; set; }             // 回显请求序号
-    /// <summary>各图层当前 rev (按 TileMask 位序 0..4), 供客户端下次带 LastRevs。</summary>
+    /// <summary>各图层当前 rev (按 TileMask 位序 0..5), 供客户端下次带 LastRevs。</summary>
     [ProtoMember(7)] public List<int> Revs { get; set; } = [];
 
     /* ---- 图层子消息 (字段缺省 = 未请求 / rev 未变, 设计 §4) ---- */
@@ -416,6 +439,7 @@ public sealed class TileResponse
     [ProtoMember(12)] public SettleData? Settle { get; set; }     // 图层2
     [ProtoMember(13)] public PoiData? Poi { get; set; }           // 图层3
     [ProtoMember(14)] public List<byte[]> Comms { get; set; } = [];        // 图层4: CommunityPack 原始 protobuf
+    [ProtoMember(15)] public PeopleData? People { get; set; }     // 图层5: 地图人物分布 (纯派生, 不落库)
 }
 
 /// <summary>世界键规约: 所有持久化内容按 种子 隔离。</summary>

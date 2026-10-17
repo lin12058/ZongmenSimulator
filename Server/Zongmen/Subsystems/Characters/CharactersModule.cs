@@ -56,6 +56,11 @@ public sealed class CharactersModule : JsvmModule
         "cultivatorBatchJson" => (string)root.batchJson(args[0], args[1], args[2]),
         "cultivatorOneJson" => (string)root.oneJson(args[0], args[1]),
         "cultivatorConstantsJson" => (string)root.constantsJson(),
+        /* ---- 地图人物分布 (2026-10-11 方案 v2): **战力 / 小队** (六维侧) ----
+           ⚠ 落人格 (谁在哪一格) 在 WorldModule —— 那个 V8 才有骨架与地形。
+             本层只吃 (seed, base, n) 现算, 不碰任何地图几何。 */
+        "squadBatchJson" => (string)root.squadBatchJson(args[0], args[1], args[2]),
+        "powerSumsJson" => (string)root.powerSumsJson(args[0], args[1]),
         _ => throw new InvalidOperationException($"角色模块未知 JS 函数: {fn}")
     };
 }

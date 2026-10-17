@@ -150,6 +150,11 @@ public sealed class TickJob
     /// <summary>本轮调度序号（诊断用）。</summary>
     public long ScheduleSeq { get; set; }
 
+    /// <summary>被 <see cref="ConcurrentTickQueue.AdvanceTo"/> 收集时的**原到期 tick**（瞬态，不落库）。
+    /// ⚠ 收集即吊销（`NextTick` 被置为哨兵）⇒ 合流推进相位只能靠这个字段。重启后时钟被
+    ///   `WorldClockStore` 推进到更晚时，用它把相位对齐回原网格（见 <see cref="TickJobRegistry.NextDue"/>）。</summary>
+    public long DueTick { get; set; }
+
     public JobKey Key => new(Seed, Round, EntityId, Kind);
 
     /// <summary>

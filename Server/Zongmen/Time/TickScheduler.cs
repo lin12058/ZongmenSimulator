@@ -95,13 +95,11 @@ public sealed class TickScheduler
     /// 成功：`LastRunTick = now`，`NextTick = 严格 += Period`（一次性则停用）。
     /// ⚠ 这两步**只能在这里做** —— 「失败也推进」= 静默跳过周期。
     ///
-    /// ⚠⚠ **调用前 `job.NextTick` 是吊销哨兵（`long.MaxValue`）**，必须先复位再推进。
-    ///   否则 `NextDue` 里的 `long.MaxValue + Period` 会**整数溢出成负数**
-    ///   ⇒ `next <= nowTick` 命中兜底分支 ⇒ 又一步溢出 ⇒ 下一次到期是个随机的负数
-    ///   ⇒ job 立刻被再次收集，相位彻底错乱（间隔出现 8/12/46/342 这种不规则值）。
-    ///   **不报错，只是演化节奏乱掉** —— 典型静默病。
-    ///   ⚠ 因为命中点恒为 `firstDue + k*Period` 且此刻 `nowTick` 本身就是命中点，
-    ///     正确的下一跳就是 `nowTick + Period`（不需要读旧 `NextTick`）。
+    /// ⚠⚠ **调用前 `job.NextTick` 是吊销哨兵（`long.MaxValue`）** ⇒ 绝不能拿它推进。
+    ///   改为经 <see cref="TickJobRegistry.NextDue"/> 用 `job.DueTick`（收集时的**原到期 tick**）
+    ///   算下一跳：正常（准时）时 `DueTick == nowTick`，结果就是 `nowTick + Period`；而重启后
+    ///   时钟被推进到更晚、或 job 被顺延过时，相位仍能对齐回原网格（否则会漂回 nowTick）。
+    ///   ⚠ 旧实现直接写 `nowTick + Period`：拿哨兵 + Period 会**整数溢出成负数** ⇒ 随机到期。
     /// </summary>
     public void CommitSuccess(TickJob job, long nowTick)
     {
@@ -115,7 +113,7 @@ public sealed class TickScheduler
             return;
         }
 
-        job.NextTick = nowTick + job.PeriodTicks;      // ★ 复位哨兵 + 严格 += Period
+        job.NextTick = _registry.NextDue(job, nowTick);   // ★ 用原到期 tick 保相位 + 严格 += Period
         _queue.Reprioritize(job.Key, job.NextTick);
     }
 

@@ -179,8 +179,19 @@ public sealed class JsVmPool : IDisposable
         /* P: 重放本世的玩家宗门 (ext 层)。放在入表**之前** = 锁外执行, 且此刻
            还没有别的线程能拿到这个 VM ⇒ 不必与并发请求抢 V8 门闩。
            回调抛异常 ⇒ 直接向上抛 (宁可这一次请求失败, 也不要一个「丢了玩家资产」
-           的世界悄悄服役)。 */
-        _onCreated?.Invoke(created, module);
+           的世界悄悄服役)。⚠ 但抛之前必须把已构造好的 V8 释放掉 —— V8ScriptEngine 持
+           非托管内存且没有可靠终结器, 漏掉这一步 = 每次冷启失败泄漏一个完整 V8
+           (且 `_inFlight` 永久停在 1, 永不参与 LRU 淘汰)。 */
+        try
+        {
+            _onCreated?.Invoke(created, module);
+        }
+        catch
+        {
+            created.Exit();
+            created.Dispose();
+            throw;
+        }
         lock (_lock)
         {
             if (_vms.TryGetValue(key, out var existing))
@@ -222,6 +233,9 @@ public sealed class JsVmPool : IDisposable
 
     /// <summary>当前常驻 VM 数 (= scope 数 × 常驻 seed 数)。</summary>
     public int Count => _vms.Count;
+    /// <summary>池容量 = MaxSeeds × Scope 数 (供 /api/map/stats 判定 liveSeeds 是否越界)。
+    /// ⚠ liveSeeds 是**跨 Scope 的活跃 VM 总数**, 不能拿它跟 MaxSeeds(=种子数) 直接比。</summary>
+    public int Capacity => _maxVms;
 
     /// <summary>当前常驻 VM 的 seed 列表快照 (去重), 供 SQLite 清理按 seed 前缀过滤。</summary>
     public List<string> Seeds

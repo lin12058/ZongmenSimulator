@@ -170,7 +170,9 @@ public static class MapWsHandler
                - 被剔除的位记入 DeniedMask 回显, 且只针对本次真正请求的位
                  (避免「仅 rev 未变」被误报为 denied)。 */
             uint reqMask = req.Mask == 0 ? (uint)TileMask.All : req.Mask & (uint)TileMask.All;
-            const uint entityMask = (uint)(TileMask.Settle | TileMask.Poi | TileMask.Comm);
+            /* 实体层 = 需要登录才放行的图层。人物分布 (People) 与聚落/景点/灵脉同口径:
+               它由聚落人口派生, 属「世界实体信息」而非公开地貌。 */
+            const uint entityMask = (uint)(TileMask.Settle | TileMask.Poi | TileMask.Comm | TileMask.People);
             uint allowedMask = session.Authed ? reqMask : reqMask & ~entityMask;
 
             /* C6: 块构建是「全同步」管线 (V8 门闩 + A* + gzip), 直接内联 await 会占着

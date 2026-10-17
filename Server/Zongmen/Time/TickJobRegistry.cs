@@ -171,21 +171,23 @@ public sealed class TickJobRegistry
     /// <summary>
     /// 周期推进：**严格** `+= PeriodTicks`。
     /// ⚠ 绝不许写 `Period ± jitter` —— 周期一旦被改，计数判据失效、演化速率漂移。
-    /// ⚠⚠ **前提：`job.NextTick` 必须是真实的到期 tick，不能是吊销哨兵**
-    ///   （`ConcurrentTickQueue.RevokedTick` = `long.MaxValue`）。
-    ///   哨兵 + Period 会整数溢出成负数 ⇒ 静默错乱。见 `TickScheduler.CommitSuccess` 的注释。
+    /// ⚠⚠ 相位基准取 <see cref="TickJob.DueTick"/>（**被收集时的原到期 tick**），
+    ///   不是 `job.NextTick` —— `AdvanceTo` 收集即吊销（`NextTick` 被置哨兵
+    ///   `long.MaxValue`），拿哨兵算会走「+Period 溢出成负数」的兜底分支 ⇒ 相位漂移。
+    ///   见 `TickScheduler.CommitSuccess` 的注释。
     /// </summary>
     public long NextDue(TickJob job, long nowTick)
     {
         if (job.IsOneShot) return long.MaxValue;      // 跑完即止（由调用方 Enabled=0）
 
+        var dueTick = job.DueTick;
         // ★ 防御：哨兵（或任何非法值）⇒ 不回绕，直接从 nowTick 起算一个周期
-        if (job.NextTick >= ConcurrentTickQueue.RevokedTick - job.PeriodTicks)
+        if (dueTick >= ConcurrentTickQueue.RevokedTick - job.PeriodTicks)
         {
             return nowTick + job.PeriodTicks;
         }
 
-        var next = job.NextTick + job.PeriodTicks;
+        var next = dueTick + job.PeriodTicks;
         // 兜底：若落后太多（如长时间停机后手动对齐），推进到 nowTick 之后的第一个相位命中点。
         if (next <= nowTick)
         {

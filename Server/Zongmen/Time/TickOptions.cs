@@ -65,8 +65,26 @@ public sealed class TickOptions
     /// <summary>TickPerf 内存环形缓冲容量（tick 数）。</summary>
     public int PerfRingCapacity { get; set; } = 512;
 
-    /// <summary>演示心跳 job 的实体 id（P1 验证链路用；P2 起无人添加它，自然消失）。</summary>
+    /// <summary>演示心跳 job 的实体 id。⚠ 仅在 <see cref="EnableDemoHeartbeat"/>=true 时才会被用到。</summary>
     public string DemoEntityId { get; set; } = "demo_0_0";
+
+    /// <summary>
+    /// P1 演示心跳的总开关 —— **默认 false**（旧行为是「无条件保底补一个」，见下方教训）。
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ 2026-10-11 实测到的**静默病**，默认关闭就是为了根治它：
+    ///   生产组合根 (`Program.cs`) 的 `TickExecutorHub` 只注册了 `CityTickExecutor`
+    ///   （认领 `TownEvolve` / `TradeEdge`），**没有任何执行器认领 `DemoHeartbeat`**。
+    ///   而旧代码在 `TickPump.ExpectedJobs` 里**无条件**保底补一个 `demo_0_0/demoHeartbeat`
+    ///   ⇒ 该 job 一到即被 Hub 判 `not-claimed-by-any-executor` ⇒ 注定失败
+    ///   ⇒ 连续 5 次后 `Enabled=0` 停用。
+    ///   更坏的是：`Load` 与 `Reconcile` 都**只读 `Enabled=1` 的行**，于是那条停用行
+    ///   在它们眼里等于「不存在」⇒ 下一次对账把它当新增行 UPSERT 回来
+    ///   （`Enabled=1`、`FailCount=0`）⇒ **每 360 tick（1 游戏年）原地复活再死一次**。
+    ///   ⇒ 现在只在「**根本没有 `ExpectedJobsProvider`**」（裸链路 / 单测）时才允许开它，
+    ///     并且开启时也只在「本世从未投递过心跳」的前提下补一次。
+    /// </remarks>
+    public bool EnableDemoHeartbeat { get; set; } = false;
 
     /// <summary>P2 城市演化的**活跃窗口**半径（区域格）。
     /// 演化只覆盖 `[-span, span]²` 区域格内的聚落 —— 无限世界全量演化是 O(∞) 且

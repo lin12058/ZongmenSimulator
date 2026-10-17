@@ -204,82 +204,100 @@ public sealed class TickJobStore : IDisposable
             return jobs.Count;
         }
 
-        using var c = Open();
-        using var tx = c.BeginTransaction();
-
-        using (var cmd = c.CreateCommand())
+        /* ⚠⚠ at-least-once: 脏集已在上面清空 ⇒ 这里任何一步抛异常都必须**把快照并回脏集**
+           再抛出。否则内存里已无待写行, 调用方 MaybeFlush 打印的「下轮重试」是**假的**
+           —— 丢失 NextTick / FailCount / Enabled / LastRunTick 的持久化更新。 */
+        try
         {
-            cmd.Transaction = tx;
-            cmd.CommandText = """
-                INSERT INTO TickJob(Seed, Round, EntityId, Kind, Layer, Resource,
-                                    NextTick, PeriodTicks, Phase, LastRunTick,
-                                    FailCount, Enabled, Payload)
-                VALUES($s, $r, $e, $k, $l, $res, $n, $p, $ph, $lr, $fc, $en, $pl)
-                ON CONFLICT(Seed, Round, EntityId, Kind) DO UPDATE SET
-                    Layer       = excluded.Layer,
-                    Resource    = excluded.Resource,
-                    NextTick    = excluded.NextTick,
-                    PeriodTicks = excluded.PeriodTicks,
-                    -- ⚠ Phase 刻意**不更新**：抖动一旦定下就不许被任何回写推平
-                    LastRunTick = excluded.LastRunTick,
-                    FailCount   = excluded.FailCount,
-                    Enabled     = excluded.Enabled,
-                    Payload     = excluded.Payload;
-                """;
+            using var c = Open();
+            using var tx = c.BeginTransaction();
 
-            var ps = cmd.Parameters;
-            var pS = ps.Add("$s", SqliteType.Text);
-            var pR = ps.Add("$r", SqliteType.Integer);
-            var pE = ps.Add("$e", SqliteType.Text);
-            var pK = ps.Add("$k", SqliteType.Text);
-            var pL = ps.Add("$l", SqliteType.Integer);
-            var pRes = ps.Add("$res", SqliteType.Integer);
-            var pN = ps.Add("$n", SqliteType.Integer);
-            var pP = ps.Add("$p", SqliteType.Integer);
-            var pPh = ps.Add("$ph", SqliteType.Integer);
-            var pLr = ps.Add("$lr", SqliteType.Integer);
-            var pFc = ps.Add("$fc", SqliteType.Integer);
-            var pEn = ps.Add("$en", SqliteType.Integer);
-            var pPl = ps.Add("$pl", SqliteType.Blob);
-
-            foreach (var j in jobs)
+            using (var cmd = c.CreateCommand())
             {
-                pS.Value = j.Seed;
-                pR.Value = j.Round;
-                pE.Value = j.EntityId;
-                pK.Value = KindNames.Of(j.Kind);
-                pL.Value = (int)j.Layer;
-                pRes.Value = (int)j.Resource;
-                pN.Value = j.NextTick == ConcurrentTickQueue.RevokedTick ? j.NextTick - 1 : j.NextTick;
-                pP.Value = j.PeriodTicks;
-                pPh.Value = j.Phase;
-                pLr.Value = j.LastRunTick;
-                pFc.Value = j.FailCount;
-                pEn.Value = j.Enabled ? 1 : 0;
-                pPl.Value = (object?)j.Payload ?? DBNull.Value;
-                cmd.ExecuteNonQuery();
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                    INSERT INTO TickJob(Seed, Round, EntityId, Kind, Layer, Resource,
+                                        NextTick, PeriodTicks, Phase, LastRunTick,
+                                        FailCount, Enabled, Payload)
+                    VALUES($s, $r, $e, $k, $l, $res, $n, $p, $ph, $lr, $fc, $en, $pl)
+                    ON CONFLICT(Seed, Round, EntityId, Kind) DO UPDATE SET
+                        Layer       = excluded.Layer,
+                        Resource    = excluded.Resource,
+                        NextTick    = excluded.NextTick,
+                        PeriodTicks = excluded.PeriodTicks,
+                        -- ⚠ Phase 刻意**不更新**：抖动一旦定下就不许被任何回写推平
+                        LastRunTick = excluded.LastRunTick,
+                        FailCount   = excluded.FailCount,
+                        Enabled     = excluded.Enabled,
+                        Payload     = excluded.Payload;
+                    """;
+
+                var ps = cmd.Parameters;
+                var pS = ps.Add("$s", SqliteType.Text);
+                var pR = ps.Add("$r", SqliteType.Integer);
+                var pE = ps.Add("$e", SqliteType.Text);
+                var pK = ps.Add("$k", SqliteType.Text);
+                var pL = ps.Add("$l", SqliteType.Integer);
+                var pRes = ps.Add("$res", SqliteType.Integer);
+                var pN = ps.Add("$n", SqliteType.Integer);
+                var pP = ps.Add("$p", SqliteType.Integer);
+                var pPh = ps.Add("$ph", SqliteType.Integer);
+                var pLr = ps.Add("$lr", SqliteType.Integer);
+                var pFc = ps.Add("$fc", SqliteType.Integer);
+                var pEn = ps.Add("$en", SqliteType.Integer);
+                var pPl = ps.Add("$pl", SqliteType.Blob);
+
+                foreach (var j in jobs)
+                {
+                    pS.Value = j.Seed;
+                    pR.Value = j.Round;
+                    pE.Value = j.EntityId;
+                    pK.Value = KindNames.Of(j.Kind);
+                    pL.Value = (int)j.Layer;
+                    pRes.Value = (int)j.Resource;
+                    pN.Value = j.NextTick == ConcurrentTickQueue.RevokedTick ? j.NextTick - 1 : j.NextTick;
+                    pP.Value = j.PeriodTicks;
+                    pPh.Value = j.Phase;
+                    pLr.Value = j.LastRunTick;
+                    pFc.Value = j.FailCount;
+                    pEn.Value = j.Enabled ? 1 : 0;
+                    pPl.Value = (object?)j.Payload ?? DBNull.Value;
+                    cmd.ExecuteNonQuery();
+                }
             }
+
+            if (deleted.Count > 0)
+            {
+                using var cmd = c.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = "DELETE FROM TickJob WHERE Seed=$s AND Round=$r AND EntityId=$e AND Kind=$k;";
+                var ps = cmd.Parameters;
+                var pS = ps.Add("$s", SqliteType.Text);
+                var pR = ps.Add("$r", SqliteType.Integer);
+                var pE = ps.Add("$e", SqliteType.Text);
+                var pK = ps.Add("$k", SqliteType.Text);
+                foreach (var k in deleted)
+                {
+                    pS.Value = k.Seed; pR.Value = k.Round; pE.Value = k.EntityId;
+                    pK.Value = KindNames.Of(k.Kind);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+
+            tx.Commit();
+        }
+        catch
+        {
+            /* 失败 ⇒ 并回脏集 (不覆盖 flush 期间被 MarkDirty 写入的更新值), 保证下次重试。
+               ⚠ 用 TryAdd / Add: 已存在的键保留新状态, 绝不回退。 */
+            lock (_gate)
+            {
+                foreach (var j in jobs) _dirty.TryAdd(j.Key, j);
+                foreach (var k in deleted) _deleted.Add(k);
+            }
+            throw;
         }
 
-        if (deleted.Count > 0)
-        {
-            using var cmd = c.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = "DELETE FROM TickJob WHERE Seed=$s AND Round=$r AND EntityId=$e AND Kind=$k;";
-            var ps = cmd.Parameters;
-            var pS = ps.Add("$s", SqliteType.Text);
-            var pR = ps.Add("$r", SqliteType.Integer);
-            var pE = ps.Add("$e", SqliteType.Text);
-            var pK = ps.Add("$k", SqliteType.Text);
-            foreach (var k in deleted)
-            {
-                pS.Value = k.Seed; pR.Value = k.Round; pE.Value = k.EntityId;
-                pK.Value = KindNames.Of(k.Kind);
-                cmd.ExecuteNonQuery();
-            }
-        }
-
-        tx.Commit();
         Interlocked.Increment(ref _flushCount);
         Interlocked.Add(ref _upsertedRows, jobs.Count);
         return jobs.Count;
@@ -348,6 +366,24 @@ public sealed class TickJobStore : IDisposable
         cmd.CommandText = "DELETE FROM TickJob WHERE Seed=$s AND Round=$r;";
         cmd.Parameters.AddWithValue("$s", seed);
         cmd.Parameters.AddWithValue("$r", round);
+        return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// 清掉某世某 kind 的**全部**行（不限 `Enabled`）。用于收尾清理**僵尸行**：
+    /// `Enabled=0` 的停用行既不在 `expected`（provider 不再投递）也不在
+    /// <see cref="Load"/>(只取 `Enabled=1`) 里 ⇒ <see cref="Reconcile"/> **永远判不到它**
+    /// ⇒ 会永久滞留在表里。只有换世 (`DeleteWorld`) 才顺手清得掉。
+    /// </summary>
+    public int DeleteKindRows(string seed, int round, string kind)
+    {
+        if (_cs == null) return 0;
+        using var c = Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "DELETE FROM TickJob WHERE Seed=$s AND Round=$r AND Kind=$k;";
+        cmd.Parameters.AddWithValue("$s", seed);
+        cmd.Parameters.AddWithValue("$r", round);
+        cmd.Parameters.AddWithValue("$k", kind);
         return cmd.ExecuteNonQuery();
     }
 

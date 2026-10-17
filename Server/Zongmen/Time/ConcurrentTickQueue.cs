@@ -48,7 +48,6 @@ public sealed class ConcurrentTickQueue
     private long _popCount;
     private long _peekCount;
     private long _revokeCount;
-    private long _duplicateSuppressed;
 
     /// <summary>
     /// ★ 无锁快速计数。**空转 tick 的第一道闸**：
@@ -68,8 +67,10 @@ public sealed class ConcurrentTickQueue
     /// <summary>★ 空转成本的度量：无 job 的 tick 里这个值应该只 +1。</summary>
     public long PeekCount => Interlocked.Read(ref _peekCount);
     public long RevokeCount => Interlocked.Read(ref _revokeCount);
-    /// <summary>惰性删除命中数（重排后残留的旧副本被丢弃的次数）。</summary>
-    public long DuplicateSuppressed => Interlocked.Read(ref _duplicateSuppressed);
+    /// <summary>惰性删除命中数。**恒为 0**：本队列用「键索引 + 就地重排」实现，同键入堆由
+    /// <see cref="Push"/> 去重 ⇒ 从不产生重复副本（旧实现的「在途副本」分支恒不可达，已删）。
+    /// 保留该属性只为 /stats 与判据的形状稳定。</summary>
+    public long DuplicateSuppressed => 0;
 
     // ══ 入队 ═══════════════════════════════════════════════════════════
 
@@ -217,15 +218,17 @@ public sealed class ConcurrentTickQueue
     /// <summary>
     /// 收集所有 `NextTick &lt;= nowTick` 的 job（**含 <paramref name="nowTick"/> 当天**）。
     ///
-    /// ⚠ 三步（弹出 — 校验 — 吊销）在**一次持锁内**完成，这是线程安全的唯一要点：
+    /// ⚠ 两步（弹出 — 吊销）在**一次持锁内**完成，这是线程安全的唯一要点：
     ///   1. 弹出堆顶；
-    ///   2. 若 `job.NextTick == RevokedTick` ⇒ 是已收集的在途副本，丢弃；
-    ///      若 `job.NextTick != 索引里的值` ⇒ 惰性删除（已被重排），丢弃；
-    ///   3. 填 `DtTicks`，并把 `NextTick` 置为 <see cref="RevokedTick"/>（**吊销**），
-    ///      然后重新入堆 —— 这样并行线程此刻 `Reprioritize` 也不会让同一 job 被二次收集。
+    ///   2. 记下**原到期 tick**（<see cref="TickJob.DueTick"/>，合流推进相位要用它），填 `DtTicks`，
+    ///      把 `NextTick` 置为 <see cref="RevokedTick"/>（**吊销**）后重新入堆 —— 这样并行线程
+    ///      此刻 `Reprioritize` 也不会让同一 job 被二次收集。
+    ///   ⚠ 这里**没有**「在途副本丢弃」这一步：键索引 + 就地重排保证同键从不产生重复副本。
     ///
     /// ⚠ 收集出的 job 的 `NextTick` 推进**不在这里做** ——
     ///   必须等合流 apply 成功后才推进（§6.8），否则「失败也推进」= 静默跳过周期。
+    /// ⚠⚠ **收集即吊销** ⇒ 调用方（`TickPump.RunOneTick`）**必须**在本次收集后把每个 job
+    ///   re-arm（成功推进 / 失败退避 / 顺延），否则它永久沉在堆底、再也不到期。
     /// </summary>
     public List<TickJob> AdvanceTo(long nowTick)
     {
@@ -247,19 +250,17 @@ public sealed class ConcurrentTickQueue
             {
                 var job = _heap[0];
 
-                if (job.NextTick == RevokedTick)
-                {
-                    // 在途副本：不该再被收集。丢掉。
-                    RemoveAt(0);
-                    Interlocked.Increment(ref _duplicateSuppressed);
-                    continue;
-                }
+                /* ⚠ 这里**没有**「在途副本」分支：本队列用「键索引 + 就地重排」实现，
+                   同键入堆已由 Push/Reinsert 去重 ⇒ 从不产生重复副本（旧分支的条件
+                   `NextTick == RevokedTick` 与循环条件 `NextTick <= nowTick` 互斥，恒不可达，已删）。 */
 
                 // 弹出
                 RemoveAt(0);
                 Interlocked.Increment(ref _popCount);
 
-                // ★ 吊销：置哨兵后重新入堆。此 job 现在「不可见」（在途）。
+                // ★ 吊销：先记下**原到期 tick**（合流推进相位用它，见 TickJobRegistry.NextDue），
+                //   再置哨兵后重新入堆 ⇒ 此 job 现在「不可见」（在途）。
+                job.DueTick = job.NextTick;
                 job.DtTicks = (int)Math.Max(0, nowTick - job.LastRunTick);
                 job.ScheduleSeq = Interlocked.Increment(ref _pushCount);
                 job.NextTick = RevokedTick;

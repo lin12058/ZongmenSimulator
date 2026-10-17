@@ -140,8 +140,8 @@ async function verifyBlock(ws, seed, ca, cb) {
 
   const resp = await ws.tile(seed, ca, cb);
   check(`${tag} 回显坐标`, resp.i === ca && resp.j === cb, `${resp.i},${resp.j}`);
-  check(`${tag} mask=ALL`, resp.mask === 31, String(resp.mask));
-  check(`${tag} revs 5 位`, resp.revs.length === 5 && resp.revs.every((v) => v > 0), JSON.stringify(resp.revs));
+  check(`${tag} mask=ALL`, resp.mask === PB.MASK.ALL, String(resp.mask));
+  check(`${tag} revs 6 位`, resp.revs.length === 6 && resp.revs.every((v) => v > 0), JSON.stringify(resp.revs));
 
   /* 图层0 chunk */
   check(`${tag} 图层0 chunk 存在`, !!resp.chunk, '');
@@ -313,9 +313,9 @@ console.log('\n== 未登录门禁 ==');
   await anon.connect();
   const resp = await anon.tile('42', 0, 0);
   check('未登录: chunk/region 可取', !!resp.chunk && resp.regions.length > 0, '');
-  const denied = 4 | 8 | 16;
-  check('未登录: deniedMask = Settle|Poi|Comm', resp.deniedMask === denied, String(resp.deniedMask));
-  check('未登录: 不含实体/群落层', !resp.settle && !resp.poi && resp.comms.length === 0, '');
+  const denied = 4 | 8 | 16 | PB.MASK.PEOPLE;      // Settle|Poi|Comm|People (=60)
+  check('未登录: deniedMask = Settle|Poi|Comm|People', resp.deniedMask === denied, String(resp.deniedMask));
+  check('未登录: 不含实体/群落/人物层', !resp.settle && !resp.poi && resp.comms.length === 0 && !resp.people, '');
   /* W1: mask 回显「客户端可视为持有」的图层位 — 未登录时应已剔除实体层,
      否则客户端会把从未收到数据的实体层 rev 记为已持有 → 永久缺层 */
   check('未登录: resp.mask 已剔除实体层 (=Chunk|Region)', resp.mask === 3, String(resp.mask));
@@ -362,17 +362,17 @@ console.log('\n== W1 mask→全量 回归 ==');
   check('局部 mask: resp.mask 精确回显 (=Chunk)', part.mask === PB.MASK.CHUNK, String(part.mask));
   check('局部 mask: 未含 region/settle/poi/comm',
     part.regions.length === 0 && !part.settle && !part.poi && part.comms.length === 0, '');
-  check('局部 mask: chunk 已下发且 revs 为 5 位',
-    !!part.chunk && part.revs.length === 5, JSON.stringify(part.revs));
+  check('局部 mask: chunk 已下发且 revs 为 6 位',
+    !!part.chunk && part.revs.length === 6, JSON.stringify(part.revs));
 
   /* 客户端按 mask 只记账 chunk 位 → 其余位保持 0 (未持有) */
-  const carried = [part.revs[0], 0, 0, 0, 0];
-  const full = await w1.tile('42', BLK[0], BLK[1], 31, carried);
+  const carried = [part.revs[0], 0, 0, 0, 0, 0];
+  const full = await w1.tile('42', BLK[0], BLK[1], PB.MASK.ALL, carried);
   check('全量重拉: chunk 因 rev 未变而缺省', !full.chunk, String(!!full.chunk));
   check('全量重拉: region 层仍下发', full.regions.length > 0, String(full.regions.length));
 
   /* 与「全新连接首次全量」对照: 图层存在性必须一致 */
-  const fresh = await w2.tile('42', BLK[0], BLK[1], 31);
+  const fresh = await w2.tile('42', BLK[0], BLK[1], PB.MASK.ALL);
   check('全量重拉与首次全量图层存在性一致',
     (full.regions.length > 0) === (fresh.regions.length > 0) &&
     (!!full.settle) === (!!fresh.settle) &&
@@ -391,13 +391,13 @@ console.log('\n== rev 增量失效 ==');
 {
   const first = await ws.tile('42', 1, 1);
   check('首次全量', !!first.chunk && first.regions.length > 0, '');
-  const second = await ws.tile('42', 1, 1, 31, first.revs);
+  const second = await ws.tile('42', 1, 1, PB.MASK.ALL, first.revs);
   check('rev 相同 → 最小响应 (无任何图层子消息)',
     !second.chunk && second.regions.length === 0 && !second.settle && !second.poi && second.comms.length === 0,
     JSON.stringify({ c: !!second.chunk, r: second.regions.length, s: !!second.settle, p: !!second.poi, m: second.comms.length }));
   check('最小响应回显 revs 一致', JSON.stringify(second.revs) === JSON.stringify(first.revs), '');
   const bumped = first.revs.slice(); bumped[2] = bumped[2] + 1;   // settle 层版本前进
-  const third = await ws.tile('42', 1, 1, 31, bumped);
+  const third = await ws.tile('42', 1, 1, PB.MASK.ALL, bumped);
   check('settle rev 变化 → 仅重发受影响层', !third.chunk && third.regions.length === 0 &&
     !!third.settle && !third.poi && third.comms.length === 0,
     JSON.stringify({ c: !!third.chunk, r: third.regions.length, s: !!third.settle, p: !!third.poi, m: third.comms.length }));

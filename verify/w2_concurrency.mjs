@@ -3,7 +3,7 @@
  *   1) 同一「新 seed」冷启动下 24 路并发 WS 请求 (6 块 × 4 客户端):
  *        - 全部成功, 每块 chunk/region 图层齐备;
  *        - 同块不同客户端的 chunk 字节完全一致 (确定性与 in-flight 去重);
- *        - liveSeeds 不超过 MaxSeeds(3) —— 冷建 VM 的 double-check 未泄漏实例。
+ *        - liveSeeds 不超过池容量 (MaxSeeds × Scope 数) —— 冷建 VM 的 double-check 未泄漏实例。
  *   2) 同块重复请求 (blockLayersJson 走 LRU 后) 响应内容保持一致。
  *
  * 用法: node verify/w2_concurrency.mjs [baseUrl]
@@ -107,7 +107,7 @@ console.log('\n== 冷 VM 24 路并发 ==');
   check('24 路并发全部返回', results.length === 24 && results.every((r) => r.resp && r.resp.err === ''),
     results.filter((r) => r.resp && r.resp.err).map((r) => r.resp.err).join('|'));
 
-  const okLayers = results.every((r) => !!r.resp.chunk && r.resp.regions.length > 0 && r.resp.mask === 31);
+  const okLayers = results.every((r) => !!r.resp.chunk && r.resp.regions.length > 0 && r.resp.mask === PB.MASK.ALL);
   check('每块 chunk+region 图层齐备且 mask=ALL', okLayers,
     JSON.stringify(results.filter((r) => !(r.resp.chunk && r.resp.regions.length)).map((r) => [r.ca, r.cb])));
 
@@ -124,9 +124,14 @@ console.log('\n== 冷 VM 24 路并发 ==');
   check('同块各客户端 chunk 字节一致', allSame, '');
 
   const after = await stats();
-  check('liveSeeds 有界 (LRU 淘汰生效, 冷建未泄漏实例)',
-    after.liveSeeds <= after.maxSeeds && after.maxSeeds > 0,
-    JSON.stringify({ before: before.liveSeeds, after: after.liveSeeds, max: after.maxSeeds }));
+  /* ⚠ liveSeeds = **跨 Scope 的活跃 VM 总数** (世界层 + 各子系统各一个独立 V8)。
+     上界 = 「池容量 = MaxSeeds × Scope 数」(stats 里的 poolCapacity), **不是** MaxSeeds ——
+     一个 seed 占多个 VM, 拿 MaxSeeds 直接比会假红 (图层5 起, tile 请求也会借 characters VM)。
+     旧服务端无该字段时回落 maxSeeds (兼容)。 */
+  const cap = after.poolCapacity || after.maxSeeds;
+  check('liveSeeds 有界 (≤ 池容量; LRU 淘汰生效, 冷建未泄漏实例)',
+    after.liveSeeds <= cap && cap > 0,
+    JSON.stringify({ before: before.liveSeeds, after: after.liveSeeds, cap }));
   console.log(`  (并发耗时 ${Date.now() - t0}ms, liveSeeds ${before.liveSeeds} → ${after.liveSeeds}, maxSeeds=${after.maxSeeds})`);
   /* 锁定「appsettings.json 被静默忽略」回归: 配置里 MaxSeeds=3, 代码默认是 4。
      ⚠ 但起**隔离实例**时惯例会显式放大 (skill §22: `check_mm_ui` 每次用新随机 seed,

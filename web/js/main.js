@@ -10,6 +10,14 @@
 (function () {
   'use strict';
   var MC = MapClient, IT = InkTextures, PB = window.PB;
+  /* 图层5「地图人物分布」表现层 (web/js/people-layer.js) —— 可拔插:
+     缺文件 / 加载失败时退化为空实现, main.js 的既有行为一个字节都不变。 */
+  var PeopleLayer = window.PeopleLayer || {
+    init: function () {}, maskBit: function () { return 0; }, enabled: function () { return false; },
+    wantBlock: function () { return false; }, dropBlock: function () {}, onBlock: function () {},
+    draw: function () {}, noteClick: function () {}, refresh: function () {},
+    sectionHTML: function () { return ''; }
+  };
 
   var els = {};
   var renderer = null;
@@ -281,7 +289,7 @@
   };
   /* 本地档的请求掩码 —— ⚠ 全项目**只此一处**出现「去掉 CHUNK 位」的运算
      (契约守卫: verify/frontend_smoke.mjs 断言该表达式仅出现 1 次, 防有人另起炉灶) */
-  var CALC_MASK = PB.MASK.ALL & ~PB.MASK.CHUNK;      // 31 & ~1 = 30
+  var CALC_MASK = PB.MASK.ALL & ~PB.MASK.CHUNK;      // ALL(63) & ~CHUNK(1) = 62；热力图关时再剔 PEOPLE 位 ⇒ 30
   function EL() { return window.EngineLocal || null; }
   /* 档位生效判定: armed && 引擎就绪 && 指纹未漂移 */
   function calcRefresh() {
@@ -310,7 +318,7 @@
       var it = chunkDefer.shift();
       deferKeys.delete(it.job.key);
       if (it.gen !== worldSeed) continue;                 // 旧世界的块: 直接丢
-      if (!keepChunk.has(it.job.key)) { MC.blockForget(it.job.key); continue; }
+      if (!keepChunk.has(it.job.key)) { MC.blockForget(it.job.key); PeopleLayer.dropBlock(it.job.key); continue; }
       finishChunk(it.job, it.resp, it.gen);
     }
   }
@@ -553,6 +561,7 @@
         chunkData.delete(key);
         propBuilt.delete(key);               // 精灵过滤记录随块卸载 (重进视野重算)
         MC.blockForget(key);                 // rev 缓存同步失效: 重进视野须全量重取
+        PeopleLayer.dropBlock(key);          // 图层5: 人物落格表随块卸载
         forceStaticDirty();                  // 内容移除: 尽快重绘清除残影 (R1)
       }
     });
@@ -562,8 +571,10 @@
     var tNow = performance.now();
     for (var key in need) {
       var rr = chunkRetry.get(key);
-      if (!chunkData.has(key) && !chunkBusy.has(key) && !deferKeys.has(key) &&
-          (!rr || rr.at <= tNow)) {
+      /* 图层5: 已加载但缺 People 层的块也要重排一次 (开关刚打开时, 否则"开了什么也没有")。
+         热力图关着 ⇒ 该子条件恒 false, 行为与旧版一致。 */
+      if ((!chunkData.has(key) || PeopleLayer.wantBlock(key)) &&
+          !chunkBusy.has(key) && !deferKeys.has(key) && (!rr || rr.at <= tNow)) {
         var cc = need[key];
         var w = MC.tileToWorld(cc.ca * geo.chunkS, cc.cb * geo.chunkS);
         var d = (w.x - cam.x) * (w.x - cam.x) + (w.y - cam.y) * (w.y - cam.y);
@@ -584,6 +595,9 @@
     /* S3: 本地算档不带 CHUNK 位 (服务端就不算不发整块地形);
        ?chunkab=1 是显式开发自检 ⇒ 仍带 CHUNK 位, 好拿服务端的块做逐位对拍。 */
     var mask = (CALC.local && !CALC.ab) ? CALC_MASK : PB.MASK.ALL;
+    /* 图层5: 热力图关着时**剔掉该位** —— All/CALC_MASK 现已含 PEOPLE 位 (0x3F/0x3E),
+       不剔的话服务端每块都白算一层 (Q2「只有开启人力热力图时才要」)。 */
+    if (!PeopleLayer.enabled()) mask &= ~PB.MASK.PEOPLE;
     lastMask = mask;
     MC.block(gen, job.ca, job.cb, mask).then(function (resp) {
       /* 修复「个别色块无贴图」(待办/色块无贴图bug排查): MapClient.onFrame 收到
@@ -734,6 +748,9 @@
       commCells.set(ck, cm);
       markStaticDirty();
     }
+
+    /* 图层5 人物分布 (稀疏 {q,r,n,ps}); 未登录/关热力图时服务端不给 ⇒ 落空表止住重排 */
+    PeopleLayer.onBlock(resp, job.key);
   }
 
   /* 指数退避: 0.8s→1.6→3.2→6.4→12.8→…→30s 封顶, 之后保持 30s 周期重试,
@@ -756,7 +773,9 @@
     if (!CALC.settled) return;
     while (chunkBusy.size < NET_CFG.concChunk && chunkQueue.length) {
       var job = chunkQueue.shift();
-      if (chunkData.has(job.key) || chunkBusy.has(job.key)) continue;
+      /* 图层5: 已加载的块仅当"缺 People 层"时才允许再发一次 (只为补那一层)。 */
+      if (chunkBusy.has(job.key)) continue;
+      if (chunkData.has(job.key) && !PeopleLayer.wantBlock(job.key)) continue;
       chunkBusy.set(job.key, true);
       loadChunk(job);
     }
@@ -2226,6 +2245,8 @@
     }
     /* 云气: 压在静态层之上 (云是"天", 在路/建筑/名牌之上), 交互高亮之下 */
     drawClouds(ctx, vw, vh);
+    /* 图层5 人物分布: 热力图 + 点击战力淡出 (关着时 PL.draw 内部早退, 零开销) */
+    PeopleLayer.draw(ctx);
     /* 悬停: 淡墨细六边框 —— 只回答"鼠标底下是哪一格", 不是选中态 */
     function hexHi(t, alpha) {
       if (!t) return;
@@ -2349,6 +2370,7 @@
       rows.push('<div class="row"><span class="k">去水</span><span class="v">' +
         (m.biome <= 1 ? '滨水' : wd >= 1 && wd <= 4 ? wd + ' 里' : '较远') + '</span></div>');
       if (m.onRoad) rows.push('<div class="row"><span class="k">道路</span><span class="v">有墨路经此</span></div>');
+      rows.push(PeopleLayer.sectionHTML(q, r));   // 图层5: 「人烟」小队列表 (热力图开启时才取)
       els.infoBody.innerHTML = rows.join('');
     }).catch(function (err) {
       if (rid !== infoSeq) return;                 // 过期请求的失败不再覆盖面板
@@ -2960,6 +2982,7 @@
         renderer.dropChunk(key);                 // ② 已加载的块必须**卸载**, 才会被重新排队
         chunkData.delete(key);
         propBuilt.delete(key);
+        PeopleLayer.dropBlock(key);              // 图层5: 人物落格表一并作废
       }
       if (!keepChunk.has(key) || chunkBusy.has(key) || deferKeys.has(key)) continue;
       var w = MC.tileToWorld(ca * geo.chunkS, cb * geo.chunkS);
@@ -3119,6 +3142,7 @@
     if (!t) return;
     var w = MC.tileToWorld(t.q, t.r);
     selMark = { q: t.q, r: t.r, x: w.x, y: w.y };
+    PeopleLayer.noteClick(t);      // 图层5: 记下点击格 → 覆盖层做一次「战力淡出」
   }
 
   /* ---------- 输入 ---------- */
@@ -3492,6 +3516,17 @@
            一次 applySettings 就同时完成: 变量更新 + 复选框回填 + 静态层置脏。 */
       applySettings();
       S.settings.on(applySettings);
+      /* 图层5 人物分布: 注入依赖 (全部是 main.js 内既有函数/状态), 内部自行订阅 people 开关。 */
+      PeopleLayer.init({
+        geo: function () { return geo; },
+        view: function () { return { dpr: dpr, zoom: cam.zoom,
+          vw: els.app.clientWidth, vh: els.app.clientHeight, x: cam.x, y: cam.y }; },
+        tileToWorld: MC.tileToWorld,
+        hexDist: hexDist,
+        hexPath: hexPath,
+        esc: esc,
+        forceRescan: function () { lastStream.x = NaN; forceStaticDirty(); }
+      });
       bindInput();
       bindPlaceUI();          // 卜居: 顶栏按钮 / 起名 / 品阶 / Esc (2026-09-23 方案 §4.4)
       /* 卜居的 headless 验收通道 (仅 DEBUG; 与 set=1 / sel= 同类 —— 鼠标悬停与点按钮

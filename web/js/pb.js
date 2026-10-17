@@ -340,7 +340,7 @@
 
   var FRAME = { LOGIN: 1, TILE: 2, PING: 3, SCRIPT: 4, PLACE_CHECK: 5, PLACE_COMMIT: 6,
                 CLOCK_QUERY: 7, CLOCK_PUSH: 7 };   // 7 同号: 方向由上下文区分 (同其余)
-  var MASK = { CHUNK: 1, REGION: 2, SETTLE: 4, POI: 8, COMM: 16, ALL: 31 };
+  var MASK = { CHUNK: 1, REGION: 2, SETTLE: 4, POI: 8, COMM: 16, PEOPLE: 32, ALL: 63 };
 
   /* ---------------- 微型编码器 (仅覆盖本协议所需) ---------------- */
   function Writer() { this.a = []; }              // 字节数组 (Array<number> → Uint8Array)
@@ -619,7 +619,7 @@
   function decodeTileResponse(buf) {
     var r = new Reader(new Uint8Array(buf));
     var m = { i: 0, j: 0, mask: 0, deniedMask: 0, err: '', seq: 0, revs: [],
-              chunk: null, regions: [], settle: null, poi: null, comms: [] };
+              chunk: null, regions: [], settle: null, poi: null, comms: [], people: null };
     while (r.p < r.end) {
       var t = r.tag();
       switch (t.field) {
@@ -641,8 +641,38 @@
         case 12: m.settle = parseEntityData(r.bin(rdLen(r, t))); break;
         case 13: m.poi = parseEntityData(r.bin(rdLen(r, t))); break;
         case 14: m.comms.push(decodeCommMsg(r.bin(rdLen(r, t)))); break;
+        case 15: m.people = parsePeopleData(r.bin(rdLen(r, t))); break;   // 图层5: 地图人物分布
         default: r.skip(t.wire);
       }
+    }
+    return m;
+  }
+
+  /* ---------------- PeopleData (图层5) ----------------
+     Server/Zongmen/Domain/MapMessages.cs 的 PeopleData / PeopleTileDto。
+     ⚠ **稀疏** —— 只带 n>0 的格; 全量按格发会把块响应撑大且全是 0。 */
+  function parsePeopleData(u8) {
+    var r = new Reader(u8);
+    var m = { tiles: [] };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1 && t.wire === 2) m.tiles.push(parsePeopleTile(r.bin(rdLen(r, t))));
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  /* PeopleTileDto: 1q 2r sint32 | 3n int32 | 4ps int64 */
+  function parsePeopleTile(u8) {
+    var r = new Reader(u8);
+    var m = { q: 0, r: 0, n: 0, ps: 0 };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.q = rdSInt(r, t);
+      else if (t.field === 2) m.r = rdSInt(r, t);
+      else if (t.field === 3) m.n = rdInt(r, t);
+      /* ps 是 int64, 但量级 = 单格人数 × 单人战力 ≈ 6e4 ≪ 2^53 ⇒ 用 vi 累加安全 */
+      else if (t.field === 4) m.ps = rdInt(r, t);
+      else r.skip(t.wire);
     }
     return m;
   }

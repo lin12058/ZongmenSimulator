@@ -74,6 +74,10 @@ public sealed class MapWorldService : IDisposable
        包对象只读 (response 组装只搬运引用, 序列化后即丢) ⇒ 可安全共享。 */
     private readonly LruCache<RegionPack> _regionPackCache = new(PackCacheCap);
     private readonly LruCache<SettlePack> _settlePackCache = new(PackCacheCap);
+    /* 地图人物分布 (2026-10-11 方案 v2): 每块 { 每格人数, 战力总和 }。
+       ⚠ **只进进程内 LRU, 绝不落 SQLite/_mem** —— 它是 (seed, 区块) 的纯派生,
+         不是「世界内容」; 一旦落库, 淘汰后 ReadSqlBackfill 会把旧包捞回来。 */
+    private readonly LruCache<PeopleData> _peopleCache = new(1024);
 
     /// <summary>tile 缓存条目: 值 + 生成时的 VM 道路版本号 (T4) + 服务端落点世代 (P)。</summary>
     private sealed record TileEntry(byte[] Gz, long RoadVer, int PlaceVer);
@@ -365,6 +369,12 @@ public sealed class MapWorldService : IDisposable
     {
         EvictWithGate(seed, i, j);
         BumpBlockRev(seed, i, j, TileMask.Settle | TileMask.Poi);
+        /* ★ 图层5（人物分布）的**第二处**钩子：它以 (seed, 区块) 缓存在进程内 _peopleCache 里，
+           而它的输入（聚落人口）**会随 tick 演化** ⇒ 光作废落库包是不够的，进程内 LRU 也必须清，
+           否则热力图永远显示旧人数（BumpBlockRev 只解决「客户端带旧 rev 重拉」，服务端 Get
+           仍会命中旧 LRU 包）。区块格与区域格不是一一对应（无 O(1) 逆映射）⇒ 无法按键精确失效，
+           这里整清（容量仅 1024，且只有用户开热力图时才有热度，重建按需懒发生）。 */
+        _peopleCache.Clear();
     }
 
     /* ---------------- 区块 ---------------- */
@@ -702,10 +712,10 @@ public sealed class MapWorldService : IDisposable
      * 未来建筑事件只需 BumpBlockRev 后让客户端重拉该块即可。 */
     private sealed class BlockRevs
     {
-        public int Chunk = 1, Region = 1, Settle = 1, Poi = 1, Comm = 1;
+        public int Chunk = 1, Region = 1, Settle = 1, Poi = 1, Comm = 1, People = 1;
         public int ByBit(int bit) => bit switch
         {
-            0 => Chunk, 1 => Region, 2 => Settle, 3 => Poi, _ => Comm
+            0 => Chunk, 1 => Region, 2 => Settle, 3 => Poi, 4 => Comm, _ => People
         };
         public void Bump(uint mask)
         {
@@ -716,6 +726,11 @@ public sealed class MapWorldService : IDisposable
             if ((mask & (uint)TileMask.Settle) != 0) System.Threading.Interlocked.Increment(ref Settle);
             if ((mask & (uint)TileMask.Poi) != 0) System.Threading.Interlocked.Increment(ref Poi);
             if ((mask & (uint)TileMask.Comm) != 0) System.Threading.Interlocked.Increment(ref Comm);
+            /* 人物层: 它的输入（聚落人口）会随 tick 演化 ⇒ MarkSettleDirty 已在那一侧同时清掉
+               进程内 _peopleCache（**rev + LRU 两处都要挂才算闭环**：只 Bump rev 只解决「客户端
+               带旧 rev 重拉」，服务端 Get 仍会命中旧 LRU 包）。此处保留位号以便将来前端改为
+               「按 rev 变化重拉已加载块」时再补 Bump。 */
+            if ((mask & (uint)TileMask.People) != 0) System.Threading.Interlocked.Increment(ref People);
         }
     }
 
@@ -751,7 +766,7 @@ public sealed class MapWorldService : IDisposable
         mask &= (uint)TileMask.All;
         var revs = _blockRev.GetOrAdd("blk:" + WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j,
                                       _ => new BlockRevs());
-        int[] revArr = [revs.Chunk, revs.Region, revs.Settle, revs.Poi, revs.Comm];
+        int[] revArr = [revs.Chunk, revs.Region, revs.Settle, revs.Poi, revs.Comm, revs.People];
         var resp = new TileResponse { I = i, J = j, Mask = mask, Revs = [.. revArr] };
 
         /* 图层是否需要下发: mask 命中 且 (客户端未持有 或 rev 已变化) */
@@ -763,7 +778,14 @@ public sealed class MapWorldService : IDisposable
         }
         bool needChunk = Need(0), needRegion = Need(1), needSettle = Need(2),
              needPoi = Need(3), needComm = Need(4);
-        if (!needChunk && !needRegion && !needSettle && !needPoi && !needComm)
+        /* 图层5 人物分布 = (seed,块) 的**纯函数**, 内容永不变化 ⇒ **不走 rev 去重**:
+           只要 mask 要它, 每一发都带上。理由: 该层在前端是「热力图开关」的临时数据 ——
+           关掉开关客户端就丢数据, 但 lastRevs[5] 仍记着旧 rev ⇒ 再次打开时服务端按
+           rev「未变化」缺省下发 ⇒ 热力图**第二次打开永久空白** (且不报错)。
+           代价 = 每块一次 LRU 命中 + 小载荷; 且仅在用户开启热力图时发生 (mask 不带该位
+           则一个字节都不算 —— Need 之外再单独判 mask, 见下)。 */
+        bool wantPeople = (mask & (uint)TileMask.People) != 0;
+        if (!needChunk && !needRegion && !needSettle && !needPoi && !needComm && !wantPeople)
             return resp;   // 全层 rev 未变: 最小响应 (验收 §8.6)
 
         /* C1: 借出覆盖整个块构建期 (期间本 VM 不会被 LRU 淘汰; 内层各 GetXxxBytes
@@ -839,7 +861,84 @@ public sealed class MapWorldService : IDisposable
             foreach (var (ci, cj) in layers!.Value.comms)
                 resp.Comms.Add(UnwrapCached(WorldKeys.Comm(seed, ci, cj), GetCommBytes(seed, ci, cj)));
         }
+
+        /* 图层5: 地图人物分布 (纯派生, 不落库; 不走 rev 去重 —— 见上方 wantPeople 注释) */
+        if (wantPeople)
+            resp.People = BuildPeopleLayer(seed, i, j);
         return resp;
+    }
+
+    /* ============================================================
+     * 图层5: 地图人物分布 (2026-10-11 方案 v2)
+     * ------------------------------------------------------------
+     * 两段拼接 (**两个独立 V8**, 刻意不合并):
+     *   ① 落人格「谁在哪一格 / 这一格几个人」→ 核心 VM (有骨架 + 地形)
+     *   ② 战力合计「这一格有多少战力」       → characters VM (有六维与资源)
+     * ⚠ 纯派生 ⇒ **绝不落库、绝不进 _mem/SQLite** (落库后淘汰回读会把旧包捞回来);
+     *   只进进程内 LRU, 键含 seed 前缀。
+     * ⚠ 抛异常就让它抛 —— 吞成空层会被客户端当成「这地方本来就没人才」(静默错误)。
+     * ============================================================ */
+    private PeopleData BuildPeopleLayer(string seed, int ca, int cb)
+    {
+        /* ⚠ 本文件唯一一处与子系统的**字符串耦合**: 人物战力归 characters 子系统
+           (只有它的 V8 载了 chargen-core.js)。值 = CharactersModule.CharactersScope。
+           为什么不写类型引用: Core(Services) 不许引用具体子系统类型 (ISubsystem 契约)。 */
+        const string CharactersVmScope = "characters";
+
+        var key = "ppl:" + WorldKeys.SeedPrefix(seed) + ":" + ca + ":" + cb;
+        var hit = _peopleCache.Get(key);
+        if (hit != null) return hit;
+
+        string tilesJson;
+        using (var core = LeaseScope(WorldModule.WorldScope, seed))
+            tilesJson = core.Vm.Call("peopleBlockJson", ca, cb);
+
+        var tiles = new List<PeopleTileDto>();
+        var pairs = new List<long>();      // 扁平 [base,n, base,n, …]
+        using (var d = JsonDocument.Parse(tilesJson))
+        {
+            foreach (var t in d.RootElement.GetProperty("tiles").EnumerateArray())
+            {
+                var n = t.GetProperty("n").GetInt32();
+                tiles.Add(new PeopleTileDto
+                {
+                    Q = t.GetProperty("q").GetInt32(),
+                    R = t.GetProperty("r").GetInt32(),
+                    N = n,
+                });
+                pairs.Add(t.GetProperty("base").GetInt64());
+                pairs.Add(n);
+            }
+        }
+
+        if (tiles.Count > 0)
+        {
+            /* 传扁平数组而不是 [[base,n],…] 嵌套: 字符串拼接最省事, JS 侧按 2 步长解。
+               ⚠ 这里**不超发**: 只有 tiles.Count>0 才去借 characters VM (纯海区块零开销)。 */
+            var sb = new StringBuilder("[");
+            for (var i = 0; i < pairs.Count; i += 2)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append('[').Append(pairs[i]).Append(',').Append(pairs[i + 1]).Append(']');
+            }
+            sb.Append(']');
+
+            string sumsJson;
+            using (var ch = LeaseScope(CharactersVmScope, seed))
+                sumsJson = ch.Vm.Call("powerSumsJson", seed, sb.ToString());
+
+            using var sd = JsonDocument.Parse(sumsJson);
+            var si = 0;
+            foreach (var s in sd.RootElement.GetProperty("sums").EnumerateArray())
+            {
+                if (si >= tiles.Count) break;
+                tiles[si++].Ps = s.GetInt64();
+            }
+        }
+
+        var data = new PeopleData { Tiles = tiles };
+        _peopleCache.Set(key, data);
+        return data;
     }
 
     private static PlaceEntity ToEntity(SettlementDto s) => new()
@@ -1113,8 +1212,12 @@ public sealed class MapWorldService : IDisposable
         _sql?.Flush();
         return System.Text.Json.JsonSerializer.Serialize(new
         {
-            liveSeeds = _host.Count,
+            liveSeeds = _host.Count,       // 跨 Scope 的活跃 VM 总数
             maxSeeds = _opt.MaxSeeds,      // 便于验证 appsettings.json 是否真的生效
+            /* ⚠ liveSeeds 的上界是「池容量 = MaxSeeds × Scope 数」, **不是** MaxSeeds ——
+               一个 seed 现在占多个 VM (世界层 + 各子系统各一个独立 V8)。w2 的
+               「LRU 有界」判据必须拿这个比, 否则会假红。 */
+            poolCapacity = _host.Capacity,
             dbRows = _sql?.Count() ?? 0,
             memRows = _mem.Count(),
             /* W: 台账对账用 —— ⚠ 只读 Count(), 不调 Current(): 别让一次探活就把第一世开出来 */

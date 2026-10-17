@@ -54,9 +54,12 @@ public sealed class TickPump : BackgroundService
     private long _lastFlushTick;
     private long _lastReconcileTick;
 
-    /// <summary>待合流的批（P1 = 同步执行完立刻合流，这个字典只为 P2 的异步合流预留）。</summary>
-    private readonly object _joinGate = new();
-    private readonly HashSet<long> _pendingTicks = new();
+    /* T3: catch-up 的**墙钟落后基准** = 绑定时刻的 (tick, 单调毫秒)。
+       ⚠ 判据必须是「此刻应到 tick 比 _currentTick 大」——旧实现拿「本 tick 有没有到期 job」
+         当落后信号，而 L0 摊 30 / 季 90 / 旬 10 的稀疏世界里绝大多数 tick 是空的 ⇒ 落后后
+         每秒只补 1 tick，永远追不上（`MaxCatchUpTicks` 形同虚设）。 */
+    private long _bindTick;
+    private long _bindMonoMs;
 
     public TickPump(
         TickOptions opt,
@@ -103,7 +106,9 @@ public sealed class TickPump : BackgroundService
     ///   世界状态的持有者是 MapWorldService, 而 MapWorldService 又要持有 TickPump
     ///   (借 VM / 绑世) ⇒ 直接互相引用会成环。用一个委托把「取聚落列表」推迟到运行期,
     ///   MapWorldService 在 AttachTickPump 时把自己的实现注册进来。
-    /// 返回 `(EntityId, Kind)[]`; 为空/未注册 ⇒ 退回 P1 的演示心跳行为。</summary>
+    /// 返回 `(EntityId, Kind)[]`; ⚠ **未注册（null）= 「本世有哪些 job」无人知晓 ⇒ 跳过对账**,
+    ///   绝不退回演示心跳 —— 那是 2026-10-11 之前的旧行为, 会造出注定失败的 job
+    ///   （详见 <see cref="TickOptions.EnableDemoHeartbeat"/> 的教训）。</summary>
     public Func<string, int, long, IReadOnlyList<(string EntityId, TickJobKind Kind)>>? ExpectedJobsProvider { get; set; }
 
     /// <summary>P2: job 执行**成功后**的回调 (写派生层/推进区块 rev 的挂点)。
@@ -126,13 +131,43 @@ public sealed class TickPump : BackgroundService
         // ② 时钟：没有就**就地创建**（从 InitialTick 起）
         var clock = _clockStore.GetOrCreate(seed, round, _opt.InitialTick);
 
-        // ③ job：从存档载入
-        var jobs = _jobStore.Load(seed, round);
+        /* ③ job：从存档载入。
+           ⚠ 关掉演示心跳时, 存档里可能还留着**旧版本投下的** demo 心跳行, 两类都要处理:
+             · 启用中的 ⇒ 从内存/队列就地剔掉（否则它又会走一遍 5 次失败退避, 白刷日志）;
+             · 已停用的 ⇒ 从库里删掉（它既不在 expected 也不在 `Load`(只取 Enabled=1) 里
+               ⇒ `Reconcile` **永远判不到它** ⇒ 会永久滞留成僵尸行）。 */
+        var loaded = _jobStore.Load(seed, round);
+        List<TickJob> jobs;
+        if (_opt.EnableDemoHeartbeat)
+        {
+            jobs = loaded;
+        }
+        else
+        {
+            jobs = loaded.Where(j => j.Kind != TickJobKind.DemoHeartbeat).ToList();
+            var dropped = loaded.Count - jobs.Count;
+            try
+            {
+                var removed = _jobStore.DeleteKindRows(seed, round, KindNames.Of(TickJobKind.DemoHeartbeat));
+                if (dropped > 0 || removed > 0)
+                    _log.LogInformation("[tick] 清理演示心跳残留：内存丢弃 {Dropped} 条 / 库中删除 {Removed} 条"
+                                      + " (seed={Seed} round={Round})", dropped, removed, seed, round);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "[tick] 清理演示心跳残留行失败（不影响演化）");
+            }
+        }
         _sched.EnqueueRange(jobs);
 
         Volatile.Write(ref _currentTick, clock.Tick);
         _lastFlushTick = clock.Tick;
         _lastReconcileTick = clock.Tick;
+
+        /* T3: 记下 catch-up 的墙钟基准。重绑定 (重启/换世) 时归零 ⇒ 停机期间的差值不会被
+           当成「落后」去补（与 OfflineCatchUp=false 的「冻结核」语义一致）。 */
+        _bindTick = clock.Tick;
+        _bindMonoMs = GameClock.NowMonoMs();
 
         _binding = new WorldBinding { Seed = seed, Round = round, Jobs = jobs };
 
@@ -178,14 +213,22 @@ public sealed class TickPump : BackgroundService
                 var wait = GameClock.MsToNextSecondBoundary(GameClock.NowMonoMs());
                 await Task.Delay(wait, stoppingToken);
 
-                // catch-up 预算：最多补 MaxCatchUpTicks
+                if (_binding is null) continue;
+
+                /* catch-up：每个墙钟秒**至少**推进 1 tick；若某 tick 超时 / GC 停顿让墙钟跑到
+                   更前面，就补齐到墙钟位置，但一轮最多补 MaxCatchUpTicks（防雪崩）。
+                   ⚠ 落后判据 = 墙钟（IsBehindWallClock），**不是**「本 tick 有没有到期 job」：
+                     L0 摊 30 / 季 90 / 旬 10 的稀疏世界里绝大多数 tick 是空的，用 due.Count>0
+                     会让落后后每秒只补 1 tick ⇒ 永远追不上（MaxCatchUpTicks 形同虚设）。 */
                 var caughtUp = 0;
-                while (caughtUp < _opt.MaxCatchUpTicks && !stoppingToken.IsCancellationRequested)
+                do
                 {
-                    var advanced = RunOneTick();
+                    RunOneTick();
                     caughtUp++;
-                    if (!advanced) break;      // 没落后 ⇒ 本秒已对齐，不必再补
                 }
+                while (caughtUp < _opt.MaxCatchUpTicks
+                       && !stoppingToken.IsCancellationRequested
+                       && IsBehindWallClock());
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -200,11 +243,19 @@ public sealed class TickPump : BackgroundService
             CurrentTick, _metrics.TotalTicks, _metrics.IncompleteTicks);
     }
 
-    /// <summary>跑一个 tick。返回 true 表示「确实落后了，还需要补」。</summary>
-    private bool RunOneTick()
+    /// <summary>「墙钟是否已跑到世界前面」—— catch-up 的唯一判据（见 <see cref="ExecuteAsync"/>）。</summary>
+    private bool IsBehindWallClock()
+    {
+        var expected = _bindTick + (GameClock.NowMonoMs() - _bindMonoMs) / 1000;
+        return Volatile.Read(ref _currentTick) < expected;
+    }
+
+    /// <summary>跑一个 tick（推进一天）。
+    /// ⚠ 无返回值 —— 「是否落后」由墙钟判定（<see cref="IsBehindWallClock"/>），不由本方法的产出决定。</summary>
+    private void RunOneTick()
     {
         var b = _binding;
-        if (b is null) return false;
+        if (b is null) return;
 
         var nowTick = Volatile.Read(ref _currentTick);
         _metrics.BeginTick(nowTick);
@@ -217,6 +268,15 @@ public sealed class TickPump : BackgroundService
         if (due.Count > 0)
         {
             var batches = _partitioner.Partition(due, nowTick);
+
+            /* ★★ P0 不变量：**被 AdvanceTo 收集的 job 必然在本次 RunOneTick 结束前 re-arm**
+               （成功推进 / 失败退避 / 顺延）。因为 AdvanceTo 是「收集即吊销」（NextTick 置
+               RevokedTick）⇒ 任何「收集了但没 apply」的 job 会永久沉在堆底、再也不到期，
+               那些城永久停止演化，而对账也救不回（它还在堆里、DB 行也在 ⇒ 判为 existing）。
+               apply 成功的走 CommitSuccess/CommitFailure 自行 re-arm；这里只兜
+               「预算 break / 执行器抛异常」两条路径漏下的。 */
+            var applied = new HashSet<JobKey>();
+
             foreach (var batch in batches)
             {
                 // 预算闸：超预算就中断本 tick 剩余批（它们保持「在途」，下个 tick 继续）
@@ -230,14 +290,31 @@ public sealed class TickPump : BackgroundService
                     break;
                 }
 
-                var report = _executor.Execute(batch, nowTick, _metrics, CancellationToken.None);
-                if (report.Skipped > 0) budgetExceeded = true;
-
-                using (_metrics.BeginApply(batch.Jobs[0].Kind))
+                TickRunReport report;
+                try
                 {
-                    foreach (var outcome in report.Outcomes) ApplyOutcome(outcome, nowTick, b);
+                    report = _executor.Execute(batch, nowTick, _metrics, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    /* ⚠ 执行器契约是「不得抛」；真抛了也绝不能因此让本批 job 永久沉底
+                       （下面 DeferUnapplied 会把这批连同后面没跑的批一起顺延）。 */
+                    _log.LogError(ex, "[tick] 执行器抛异常 tick={Tick}（本 tick 未 apply 的 job 顺延）", nowTick);
+                    break;
+                }
+
+                if (report.BudgetExceeded) budgetExceeded = true;
+
+                foreach (var outcome in report.Outcomes)
+                {
+                    // 分段计时按**真实 kind** 归属（原实现把整批记到 batch.Jobs[0].Kind 头上）
+                    using (_metrics.BeginApply(outcome.Job.Kind))
+                        ApplyOutcome(outcome, nowTick, b);
+                    applied.Add(outcome.Job.Key);
                 }
             }
+
+            DeferUnapplied(due, applied, nowTick, b);
         }
 
         _metrics.EndTick(budgetExceeded);
@@ -245,9 +322,26 @@ public sealed class TickPump : BackgroundService
 
         MaybeFlush(nowTick + 1, b);
         MaybeReconcile(nowTick + 1, b);
+    }
 
-        // 「本秒是否落后」：对齐后 nowTick 应该 ≈ 出生时刻 + 经过秒数
-        return due.Count > 0;
+    /// <summary>
+    /// ★ P0 兜底：把「已收集但未 apply」的 job 按 `nowTick + 1` 重新排回队列。
+    /// 这是「收集即吊销」不变量的唯一补丁点 —— 少了它，任何一次预算 break / 执行器异常
+    /// 都会让那批 job 永久停在 <see cref="ConcurrentTickQueue.RevokedTick"/> 沉底。
+    /// ⚠ 退避与正常推进的 re-arm 由 <c>CommitSuccess</c>/<c>CommitFailure</c> 负责，这里只补漏。
+    /// </summary>
+    private void DeferUnapplied(List<TickJob> due, HashSet<JobKey> applied, long nowTick, WorldBinding b)
+    {
+        var deferred = 0;
+        foreach (var job in due)
+        {
+            if (applied.Contains(job.Key)) continue;
+            if (!string.Equals(job.Seed, b.Seed, StringComparison.Ordinal)) continue;  // 换世后属于别的世
+            if (_sched.Queue.Reprioritize(job.Key, nowTick + 1)) deferred++;
+        }
+        if (deferred > 0)
+            _log.LogWarning("[tick] tick={Tick} 顺延 {N} 个未执行 job（预算/异常），下个 tick 继续",
+                nowTick, deferred);
     }
 
     // ══ 合流：唯一写世界的入口 ═════════════════════════════════════════
@@ -325,7 +419,9 @@ public sealed class TickPump : BackgroundService
     /// 兜底对账（默认每 360 tick = 1 游戏年）。
     /// ⚠ 对账**只增删，不重置** —— 已有行的 `NextTick` / `Phase` 绝不被覆盖，
     ///   否则每年一次的兜底会把相位抖动全部推平回同一天。
-    /// ⚠ P1 的「应该有哪些 job」还是空集合（真实来源在 P2：引擎聚落集合 + PlayerSect 台账）。
+    /// ⚠⚠ 正因为「只增删」, 对账的**输入必须可信**: <see cref="ExpectedJobs"/> 返回 null
+    ///   （无 provider / provider 抛异常）时**整轮跳过** —— 拿空集去对账等于宣告
+    ///   「本世不该有任何 job」, `Reconcile` 会把它们**全部删掉**（静默丢掉演化）。
     /// </summary>
     private void MaybeReconcile(long tick, WorldBinding b)
     {
@@ -333,9 +429,16 @@ public sealed class TickPump : BackgroundService
         if (tick - _lastReconcileTick < _opt.ReconcileEveryTicks) return;
         _lastReconcileTick = tick;
 
+        var expected = ExpectedJobs(b, tick);
+        if (expected is null)
+        {
+            _log.LogWarning("[tick] 跳过对账 @tick={Tick}：本世「应该有哪些 job」未知"
+                          + "（无 ExpectedJobsProvider 或 provider 失败）, 世界 job 表保持原样", tick);
+            return;
+        }
+
         try
         {
-            var expected = ExpectedJobs(b, tick);
             var report = _jobStore.Reconcile(b.Seed, b.Round, expected, _registry, tick);
 
             // ⚠ 新补上的 job 必须回灌进堆（只落库不调度 = 永久漏事件）
@@ -357,41 +460,52 @@ public sealed class TickPump : BackgroundService
     }
 
     /// <summary>
-    /// 「本世应该有哪些 job」。
-    /// P1 只给演示心跳；P2 由 <see cref="ExpectedJobsProvider"/> (MapWorldService 注册)
-    /// 给出「每聚落 × 每 kind」。⚠ 对账**只增删不重置** ⇒ 这里返回的必须是**全集**,
-    /// 少给一类会导致那一类的所有 job 被 Remove (静默丢掉演化)。
+    /// 「本世应该有哪些 job」。**null = 未知** ⇒ 调用方必须跳过本轮对账。
     /// </summary>
-    private List<TickJob> ExpectedJobs(WorldBinding b, long tick)
+    /// <remarks>
+    /// 三种情形的语义（2026-10-11 收紧了后两种；旧行为是「一律回退到演示心跳」，实测有害）：
+    ///   · provider 已注册且正常 ⇒ 返回它给出的**全集**（对账只增删不重置 ⇒ 少给一类
+    ///     会让那一类的所有 job 被 Remove，静默丢掉演化）。
+    ///   · provider 已注册但**抛异常** ⇒ 返回 **null**。
+    ///     ⚠⚠ 旧代码在此 `list.Clear()` 后回退演示心跳，后果是**灾难级**的：期望集被换成
+    ///       一个注定失败的 `demo_0_0/demoHeartbeat` ⇒ 本世**所有真实演化 job 被对账删光**
+    ///       ⇒ 整世停摆，而日志只有一条 LogError（把「provider 挂了」伪装成「有 job 在跑」）。
+    ///   · provider **未注册**（裸链路 / 单测）⇒ 默认返回 null；
+    ///     仅当显式置 <see cref="TickOptions.EnableDemoHeartbeat"/>=true 才补演示心跳
+    ///     （它只是「让 P1 链路有东西可跑」的脚手架，且生产组合根里**无人认领**这个 kind）。
+    /// </remarks>
+    private List<TickJob>? ExpectedJobs(WorldBinding b, long tick)
     {
-        var list = new List<TickJob>();
-
         var provider = ExpectedJobsProvider;
         if (provider != null)
         {
             try
             {
+                var list = new List<TickJob>();
                 foreach (var (entityId, kind) in provider(b.Seed, b.Round, tick))
                 {
                     if (string.IsNullOrEmpty(entityId)) continue;
                     list.Add(_registry.NewJob(b.Seed, b.Round, entityId, kind, tick));
                 }
+                return list;
             }
             catch (Exception ex)
             {
-                _log.LogError(ex, "[tick] ExpectedJobsProvider 失败, 本轮回退到演示心跳");
-                list.Clear();
+                _log.LogError(ex, "[tick] ExpectedJobsProvider 失败 @tick={Tick} ⇒ 本世期望集「未知」,"
+                               + " 本轮跳过对账（世界 job 表保持原样）", tick);
+                return null;
             }
         }
 
-        // 演示心跳：若从未投递过，保底补一个（让 P1 的链路始终有东西可跑）
-        if (!b.Jobs.Any(j => j.Kind == TickJobKind.DemoHeartbeat) &&
-            !list.Any(j => j.Kind == TickJobKind.DemoHeartbeat))
+        /* 无 provider：本世「应该有哪些 job」无人知晓。
+           ⚠ 此处**绝不能**返回空集 —— 空集在对账语义里 = 「本世不该有任何 job」⇒ 全删。 */
+        if (!_opt.EnableDemoHeartbeat) return null;
+        if (b.Jobs.Any(j => j.Kind == TickJobKind.DemoHeartbeat)) return null;
+
+        return new List<TickJob>
         {
-            list.Add(_registry.NewJob(b.Seed, b.Round, _opt.DemoEntityId,
-                TickJobKind.DemoHeartbeat, tick));
-        }
-        return list;
+            _registry.NewJob(b.Seed, b.Round, _opt.DemoEntityId, TickJobKind.DemoHeartbeat, tick)
+        };
     }
 
     // ══ 对外只读 ═══════════════════════════════════════════════════════

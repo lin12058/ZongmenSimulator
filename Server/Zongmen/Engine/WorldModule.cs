@@ -69,6 +69,11 @@ public sealed class WorldModule : JsvmModule
            ⚠ 它们定义在 city-evo.js (导出在 global.CityEvo), 不在 MapGenServer 上。 */
         "citySettlementsJson" => (string)script.CityEvo.settlementsJson(args[0], args[1]),
         "citySettlePlanJson" => (string)script.CityEvo.settlePlanJson(args[0], args[1], args[2]),
+        /* ---- 地图人物分布 (2026-10-11 方案 v2): **落人格** (骨架/地形侧) ----
+           ⚠ 与「战力/小队」分家: 那两个在 CharactersModule (另一个 V8, 有六维)。
+             本层只回 { q, r, n, base } —— 谁在哪一格、这一格几个人。 */
+        "peopleBlockJson" => (string)root.peopleBlockJson(args[0], args[1]),
+        "peopleAtJson" => (string)root.peopleAtJson(args[0], args[1]),
         _ => throw new InvalidOperationException($"世界层模块未知 JS 函数: {fn}")
     };
 }

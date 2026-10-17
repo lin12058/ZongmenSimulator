@@ -145,7 +145,7 @@ function driveClient() {
         seen.push(req);
         const mask = mode === 'partial' ? PB.MASK.CHUNK : PB.MASK.ALL;
         setTimeout(() => {
-          gzip(encTileResponse({ i: BLK[0], j: BLK[1], mask, seq: req.seq, revs: [1, 1, 1, 1, 1] }))
+          gzip(encTileResponse({ i: BLK[0], j: BLK[1], mask, seq: req.seq, revs: [1, 1, 1, 1, 1, 1] }))
             .then((gz) => {
               const frame = new Uint8Array(1 + gz.length);
               frame[0] = PB.FRAME.TILE; frame.set(gz, 1);
@@ -168,14 +168,14 @@ console.log('== W1 客户端 revs 记账回归 ==');
 const real = await realPartialResponse();
 console.log(`  服务端真实响应: mask=${real.mask} chunk=${!!real.chunk} regions=${real.regions.length} revs=${JSON.stringify(real.revs)}`);
 check('服务端: 非全量请求 mask 精确回显 =CHUNK', real.mask === PB.MASK.CHUNK, String(real.mask));
-check('服务端: revs 仍为 5 位契约不变', real.revs.length === 5, JSON.stringify(real.revs));
+check('服务端: revs 仍为 6 位契约不变', real.revs.length === 6, JSON.stringify(real.revs));
 
 /* ---------- pb.js packed varint 解码回归 (长度前缀不得被重复计数) ---------- */
 {
-  const packed = encTileResponse({ i: 1, j: 2, mask: PB.MASK.ALL, seq: 9, revs: [1, 2, 3, 4, 5] });
+  const packed = encTileResponse({ i: 1, j: 2, mask: PB.MASK.ALL, seq: 9, revs: [1, 2, 3, 4, 5, 6] });
   const d = PB.decodeTileResponse(packed);
-  check('pb.js: packed revs 全量解码为 5 项 (旧实现少 1 项)',
-    d.revs.length === 5 && d.revs[0] === 1 && d.revs[4] === 5, JSON.stringify(d.revs));
+  check('pb.js: packed revs 全量解码为 6 项 (旧实现少 1 项)',
+    d.revs.length === 6 && d.revs[0] === 1 && d.revs[5] === 6, JSON.stringify(d.revs));
 }
 
 const env = driveClient();
@@ -187,8 +187,8 @@ check('第 1 次请求未携带 lastRevs (本地无记录)',
 await env.MC.block(SEED, BLK[0], BLK[1]);          // 第 2 次: 只应带 chunk 位
 await new Promise((r) => setTimeout(r, 60));
 const carried = env.seen[1] ? env.seen[1].lastRevs : [];
-check('第 2 次请求 lastRevs 只记 chunk 位 (其余 4 位为 0)',
-  carried.length === 5 && carried[0] > 0 && carried[1] === 0 && carried[2] === 0 && carried[3] === 0 && carried[4] === 0,
+check('第 2 次请求 lastRevs 只记 chunk 位 (其余 5 位为 0)',
+  carried.length === 6 && carried[0] > 0 && carried[1] === 0 && carried[2] === 0 && carried[3] === 0 && carried[4] === 0 && carried[5] === 0,
   JSON.stringify(carried));
 
 env.setMode('full');
@@ -197,8 +197,8 @@ await new Promise((r) => setTimeout(r, 60));
 await env.MC.block(SEED, BLK[0], BLK[1]);          // 第 4 次: 应体现全量响应后的 5 位记账
 await new Promise((r) => setTimeout(r, 60));
 const carried2 = env.seen[3] ? env.seen[3].lastRevs : [];
-check('全量响应后 revs 恢复为 5 位全非 0',
-  carried2.length === 5 && carried2.every((v) => v > 0), JSON.stringify(carried2));
+check('全量响应后 revs 恢复为 6 位全非 0',
+  carried2.length === 6 && carried2.every((v) => v > 0), JSON.stringify(carried2));
 env.stop();
 
 console.log('\n========== 结果: ' + (failures ? failures + ' 项失败' : '全部通过 ✔') + ' ==========');

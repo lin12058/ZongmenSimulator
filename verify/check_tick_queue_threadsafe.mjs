@@ -201,9 +201,14 @@ try {
     !/await/.test(code), '');
 
   const schedSrc = strip(fs.readFileSync(path.join(TIME_DIR, 'TickScheduler.cs'), 'utf8'));
-  check('F14 CommitSuccess 先复位吊销哨兵再推进 (防 long.MaxValue 溢出)',
-    /job\.NextTick\s*=\s*nowTick\s*\+\s*job\.PeriodTicks/.test(schedSrc),
-    '');
+  /* ⚠ 2026-10-12 改口径: 推进相位不再直接写 `nowTick + Period`（只在「准时」时等价，且
+     依赖调用方先复位哨兵），统一经 TickJobRegistry.NextDue(job, nowTick) —— 它内部用
+     「收集时记下的原到期 tick」(job.DueTick) 算相位，并对吊销哨兵做防御。
+     守卫改为：CommitSuccess 必须走 NextDue，且**不得**出现裸的 `nowTick + Period`。 */
+  check('F14 CommitSuccess 经 NextDue 推进相位 (不经吊销哨兵, 防 long.MaxValue 溢出)',
+    /job\.NextTick\s*=\s*_registry\.NextDue\s*\(\s*job\s*,\s*nowTick\s*\)/.test(schedSrc) &&
+    !/job\.NextTick\s*=\s*nowTick\s*\+\s*job\.PeriodTicks/.test(schedSrc),
+    'CommitSuccess 须用 _registry.NextDue(job, nowTick)：收集即吊销 ⇒ NextTick=MaxValue, 直接 +Period 溢出成负数');
 
   const regSrc = strip(fs.readFileSync(path.join(TIME_DIR, 'TickJobRegistry.cs'), 'utf8'));
   check('F15 相位用线上名派生 (KindNames.Of), 不是枚举名 ToString',

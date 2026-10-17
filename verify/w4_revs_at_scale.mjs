@@ -82,7 +82,7 @@ class Ws {
     this.sock.send(lf);
     await new Promise((r) => setTimeout(r, 400));
   }
-  tile(i, j, mask = 31, lastRevs = []) {
+  tile(i, j, mask = PB.MASK.ALL, lastRevs = []) {
     const seq = ++this.seq;
     return new Promise((res, rej) => {
       const t = setTimeout(() => { this.pending.delete(seq); rej(new Error('超时 ' + i + ',' + j)); }, 60000);
@@ -103,18 +103,18 @@ await ws.connect();
 const revs = new Map(), sig1 = new Map();
 let miss1 = 0;
 for (const [i, j] of blocks) {
-  const r = await ws.tile(i, j, 31, []);
+  const r = await ws.tile(i, j, PB.MASK.ALL, []);
   if (!r.chunk) { miss1++; continue; }
   revs.set(i + ',' + j, r.revs);
   sig1.set(i + ',' + j, chunkSig(r.chunk));
 }
 check(`阶段1 全量首拉: 全部含 chunk (缺 ${miss1})`, miss1 === 0, `${N - miss1}/${N}`);
-check('阶段1 revs 恒为 5 位', [...revs.values()].every((v) => v.length === 5), '');
+check('阶段1 revs 恒为 6 位', [...revs.values()].every((v) => v.length === 6), '');
 
 /* ---- 阶段2: 带 revs 重拉 → 必须最小响应 ---- */
 let notMinimal = [];
 for (const [i, j] of blocks) {
-  const r = await ws.tile(i, j, 31, revs.get(i + ',' + j));
+  const r = await ws.tile(i, j, PB.MASK.ALL, revs.get(i + ',' + j));
   if (r.chunk || r.regions.length || r.settle || r.poi || r.comms.length) notMinimal.push(`${i},${j}`);
 }
 check(`阶段2 带 revs 重拉: 全部最小响应 (非最小 ${notMinimal.length})`, notMinimal.length === 0,
@@ -123,7 +123,7 @@ check(`阶段2 带 revs 重拉: 全部最小响应 (非最小 ${notMinimal.lengt
 /* ---- 阶段3: 丢弃 revs 重拉 → 必须重新拿到与阶段1 一致的 chunk ---- */
 let mismatch = [], noChunk = 0;
 for (const [i, j] of blocks) {
-  const r = await ws.tile(i, j, 31, []);          // 模拟 blockForget 后的请求
+  const r = await ws.tile(i, j, PB.MASK.ALL, []);          // 模拟 blockForget 后的请求
   if (!r.chunk) { noChunk++; continue; }
   if (chunkSig(r.chunk) !== sig1.get(i + ',' + j)) mismatch.push(`${i},${j}`);
 }
@@ -134,12 +134,12 @@ check(`阶段3 重发内容与首拉逐字节一致 (不一致 ${mismatch.length
 /* ---- 阶段4: 只带 chunk 位 → 其余图层仍必须下发 (W1 契约) ---- */
 let blocked = [];
 for (const [i, j] of blocks.slice(0, 40)) {
-  const carried = [revs.get(i + ',' + j)[0], 0, 0, 0, 0];
-  const r = await ws.tile(i, j, 31, carried);
+  const carried = [revs.get(i + ',' + j)[0], 0, 0, 0, 0, 0];
+  const r = await ws.tile(i, j, PB.MASK.ALL, carried);
   // chunk 该缺省 (rev 命中); region 层必须下发 (rev=0 = 未持有)
   if (r.chunk) blocked.push(`${i},${j}:chunk未缺省`);
   else if (r.regions.length === 0) blocked.push(`${i},${j}:region被误缺省`);
-  else if (r.mask !== 31) blocked.push(`${i},${j}:mask=${r.mask}`);
+  else if (r.mask !== PB.MASK.ALL) blocked.push(`${i},${j}:mask=${r.mask}`);
 }
 check('阶段4 只带 chunk 位: 其余图层未被 rev 误缺省', blocked.length === 0, blocked.slice(0, 5).join(' '));
 

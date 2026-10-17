@@ -650,6 +650,92 @@
     constantsJson: constantsJson,
   };
 
+  /* ========================= 地图人物分布: 战力 / 小队 (方案 v2) =========================
+   * 为什么放在这里: 「战力」要从角色六维/资源算, 而六维只有本文件知道怎么派生。
+   * 落人格在**另一个 VM** (核心 VM, 有骨架/地形) —— 两个 V8 各管一段, 经 C# 拼装。
+   * ===================================================================================== */
+
+  /** 战力: **只看基本属性与资源** (Q3: 开局人人是筑基、演化未接, 故不吃境界)。
+   *  ⚠ 纯展示口径, 不改任何既有字段; 接上 SectCultivation 后再补「境界绝对优先」项。 */
+  function powerOf(ch) {
+    var a = ch.attributes || {}, rs = ch.resources || {};
+    var v = 3.0 * (a.shenshi || 0) + 2.0 * (a.gengu || 0) + 1.5 * (a.wuxing || 0)
+          + 1.5 * (a.xinjing || 0) + 1.0 * (a.qiyun || 0) + 1.0 * (a.meili || 0)
+          + 0.5 * (rs.qi || 0) + 0.25 * (rs.qixue || 0) + 0.33 * (rs.jingshen || 0);
+    return Math.max(1, Math.round(v));
+  }
+
+  /** 单人摘要 (小队列表里显示代表/成员用)。 */
+  function personBrief(ch, index) {
+    return {
+      index: index, id: ch.id, name: ch.name.full,
+      gender: ch.gender, age: ch.age,
+      realm: ch.realm.name, stage: ch.realm.stage,
+      power: powerOf(ch),
+    };
+  }
+
+  /** 小队切分: n 个人按 **1~12 人**一组 (Q4「单位就是小队; 单人 = 规模 1 的小队」)。
+   *  纯派生 —— 同一 (seed, base, n) 结果逐项一致。 */
+  function splitSquads(seed, base, n) {
+    var out = [], k = 0, guard = 0;
+    while (k < n && guard++ < 4096) {
+      var sz = 1 + Math.floor(hash01(seed, 'sq', base, k) * 12);   // 1~12
+      if (sz > n - k) sz = n - k;
+      if (sz < 1) sz = 1;
+      out.push({ from: k, size: sz });
+      k += sz;
+    }
+    return out;
+  }
+
+  /** [V8] 单格小队列表 (点击详情): { n, ps, squads:[{id,size,power,rep}] } —— 按战力降序。 */
+  function squadBatchJson(seed, base, n) {
+    ensureReady();
+    n = n | 0;
+    if (n <= 0) return JSON.stringify({ n: 0, ps: 0, squads: [] });
+    if (n > 64) n = 64;                          // 与引擎 PPL_CAP 对齐
+    var chars = [], i, j;
+    for (i = 0; i < n; i++) chars.push(generateCharacter(BASE, { index: base + i, seed: seed }));
+    var parts = splitSquads(seed, base, n), squads = [], ps = 0;
+    for (i = 0; i < parts.length; i++) {
+      var p = parts[i], sum = 0, rep = null, repIdx = 0;
+      for (j = 0; j < p.size; j++) {
+        var idx = base + p.from + j, pw = powerOf(chars[p.from + j]);
+        sum += pw;
+        if (rep === null || pw > rep.power) { rep = { power: pw, ch: chars[p.from + j] }; repIdx = idx; }
+      }
+      ps += sum;
+      squads.push({ id: 'sq-' + base + '-' + p.from, size: p.size, power: sum,
+                    rep: personBrief(rep.ch, repIdx) });
+    }
+    squads.sort(function (a, b) { return b.power - a.power; });
+    return JSON.stringify({ n: n, ps: ps, squads: squads });
+  }
+
+  /** [V8] 批量战力合计 (区块热力图): 入参 = [[base,n],…] ⇒ { sums:[…] } 同序。
+   *  ⚠ 只回战力合计, 不回身份 —— 热力图用不到「谁」, 少生成一堆名字/功法。 */
+  function powerSumsJson(seed, pairsJson) {
+    ensureReady();
+    var pairs = [];
+    try { pairs = typeof pairsJson === 'string' ? JSON.parse(pairsJson) : (pairsJson || []); }
+    catch (e) { pairs = []; }
+    var out = [];
+    for (var i = 0; i < pairs.length; i++) {
+      var base = pairs[i][0], n = pairs[i][1] | 0, sum = 0;
+      if (n > 64) n = 64;
+      for (var k = 0; k < n; k++) sum += powerOf(generateCharacter(BASE, { index: base + k, seed: seed }));
+      out.push(sum);
+    }
+    return JSON.stringify({ sums: out });
+  }
+
   global.CultivatorGen = api;
+  /* 地图人物分布 (方案 v2) 的出口 —— 单独挂, 与主 api 表分开, 便于判据按名取用。 */
+  api.powerOf = powerOf;
+  api.personBrief = personBrief;
+  api.splitSquads = splitSquads;
+  api.squadBatchJson = squadBatchJson;
+  api.powerSumsJson = powerSumsJson;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;   // 兜底: CJS 环境
 })(typeof globalThis !== 'undefined' ? globalThis : this);

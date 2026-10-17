@@ -104,7 +104,11 @@ public sealed class CityTickExecutor : ITickExecutor
         EnsureInitialized(seed, round);
 
         /* ② 逐 job 处理。⚠ 单个 job 失败**不得**中断整批:
-           记 outcome.Fail ⇒ 泵会退避重试, 其它 job 照常推进。 */
+           记 outcome.Fail ⇒ 泵会退避重试, 其它 job 照常推进。
+           ⚠ 落库**成批**做（下方 ②b 的 PutRange）: 逐行 Put 每行开一次连接 + 一次隐式事务,
+             而 PutRange 的注释明确写着「逐行各自开事务在 90 tick × 数百城的量级上会把 WAL 打满」。 */
+        var pendingRows = new List<CityStateRow>(mine.Count);
+        var dirtyRegions = new HashSet<(int I, int J)>();
         using (var lease = _world.LeaseScope(CityModule.CityScope, seed))
         {
             var vm = lease.Vm;
@@ -128,7 +132,13 @@ public sealed class CityTickExecutor : ITickExecutor
                             rowJson = "";
                             break;
                     }
-                    if (rowJson.Length > 0) PersistRow(round, rowJson);
+                    if (rowJson.Length > 0)
+                    {
+                        var row = CityStateStore.FromEngineJson(round, rowJson);
+                        pendingRows.Add(row);
+                        var (i, j) = RegionOf(row.Id);
+                        if (i.HasValue && j.HasValue) dirtyRegions.Add((i.Value, j.Value));
+                    }
                     outcomes.Add(new TickOutcome(job, true, null, jsSw.Elapsed.TotalMilliseconds, bytesIn, bytesOut));
                 }
                 catch (Exception ex)
@@ -139,6 +149,14 @@ public sealed class CityTickExecutor : ITickExecutor
                 }
             }
         }
+
+        /* ②b 落库 + 脏块通知（批级）。
+           ⚠ 落库用一次事务（PutRange），不是逐行 Put。
+           ⚠ 脏块通知用 **job 的 seed**（而非 `_world.CurrentSeed()`）—— 换世竞态下后者已是
+             新世，会拿它给新世某块打上「内容并未变化」的脏 rev；seed 为空时直接跳过。 */
+        if (pendingRows.Count > 0) _store.PutRange(pendingRows);
+        if (!string.IsNullOrEmpty(seed))
+            foreach (var (i, j) in dirtyRegions) _world.MarkSettleDirty(seed, i, j);
 
         /* ③ 贸易 (批级): 本批若有 TradeEdge, 就用**当前全部城市**重算一次价格层并结算搬运。
            ⚠ 为什么批级而不是 per-job: 贸易是城际双边动作, 边集合本身是全局的
@@ -216,12 +234,15 @@ public sealed class CityTickExecutor : ITickExecutor
         using (var lease = _world.LeaseScope(CityModule.CityScope, seed))
         {
             var vm = lease.Vm;
+            /* ⚠ 成批落库（一次事务）——与演化主路径口径一致，见 Execute ②b。 */
+            var rows = new List<CityStateRow>(pending.Count);
             foreach (var p in pending)
             {
                 var stJson = vm.Call("cityNewStateJson", p.Id, p.Type, p.Q, p.R, p.Pop, p.Tier, 0);
-                PersistRow(round, stJson);
+                rows.Add(CityStateStore.FromEngineJson(round, stJson));
                 Interlocked.Increment(ref _initialized);
             }
+            if (rows.Count > 0) _store.PutRange(rows);
         }
     }
 
@@ -321,16 +342,12 @@ public sealed class CityTickExecutor : ITickExecutor
 
     /* ============================================================
      * 落库 + 脏块通知
+     * ------------------------------------------------------------
+     * ⚠ 落库口径 = **批级 PutRange**（一次事务），不再逐行 Put —— 见 Execute ②b 与 EnsureInitialized。
+     *   逐行 Put 每行开一次连接 + 一次隐式事务，PutRange 的注释明确写着那会把 WAL 打满。
+     * ⚠ 脏块通知用 **job 的 seed**（而非 `_world.CurrentSeed()`）: 换世竞态下后者已是新世,
+     *   拿它去 MarkSettleDirty 会给新世某块打上「内容并未变化」的脏 rev（且它同时会清人物缓存）。
      * ============================================================ */
-    private void PersistRow(int round, string engineJson)
-    {
-        var row = CityStateStore.FromEngineJson(round, engineJson);
-        _store.Put(row);
-        /* ⚠ 唯一写「显示层」的动作: 演化改了人口/等级 ⇒ 该区域格的 settle 包必须作废 +
-           rev 前进, 否则客户端永远看到初始人口 (不报错, 只是画面不动)。 */
-        var (i, j) = RegionOf(row.Id);
-        if (i.HasValue) _world.MarkSettleDirty(_world.CurrentSeed() ?? "", i.Value, j!.Value);
-    }
 
     /* ---------- 小工具 ---------- */
 
