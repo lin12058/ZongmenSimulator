@@ -21,11 +21,11 @@
     --seal: #a63a2c;
     --panel-border: rgba(150, 128, 96, 0.55);
     /* 小地图面板几何 —— 面板高 = --mm-h (画布) + --mm-chrome (头行+提示+内边距+间隙, 实测 57px)。
-       #info (山川志) 的 bottom 由这几个变量推出: 早先写死成 230px/168px, 画布高度一变就会压到小地图上。 */
+       ⚠ 2026-11-24: 山川志 (#info) 不再靠这几个变量推出 bottom (它已改为自由拖动浮窗),
+         --mm-gap 随之删除; --mm-chrome 仍留给判据/文档描述面板总高。 */
     --mm-h: 141px;          /* 小地图画布高度 (窄屏另给) */
     --mm-chrome: 57px;      /* 画布之外的面板垂直占位 */
     --mm-bottom: 18px;      /* 面板距视口底 */
-    --mm-gap: 14px;         /* 山川志与小地图的间距 */
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; }
@@ -78,23 +78,18 @@
                 rgba(46,42,36,0.32) 68%, rgba(46,42,36,0) 100%);
   }
 
-  /* ---- 顶栏 ---- */
+  /* ---- 顶栏 ----
+     2026-11-24 (用户: 「删除UI上的这几个, 因为不好用」): 左上角的「题名牌」与「宗门录 + 择宗」
+     整块移除, 顶栏只剩右上齿轮。故这里的排布从 space-between 改成 flex-end ——
+     只剩一个子元素时 space-between 会把它顶到左边, 而齿轮必须留在右上。
+     #topbar 本身仍保留: 齿轮需要它做定位上下文, 且将来再有顶部控件也挂这里。 */
   #topbar {
     position: absolute;
     top: 14px; left: 16px; right: 16px;
-    display: flex; justify-content: space-between; align-items: flex-start;
+    display: flex; justify-content: flex-end; align-items: flex-start;
     pointer-events: none;
   }
   #topbar > * { pointer-events: auto; }
-  /* 左上纵列: 题名 + 宗门录 (原「山河五色/种子」所在位) */
-  #hudLeft { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
-  #titleBox { padding: 9px 15px 7px; }
-  #titleBox h1 {
-    font-size: 22px; font-weight: 700; letter-spacing: 6px;
-    color: var(--ink);
-  }
-  #titleBox h1 em { font-style: normal; color: var(--seal); }
-  #titleBox .sub { margin-top: 2px; font-size: 12px; color: var(--ink-soft); letter-spacing: 2px; }
   #controls { padding: 6px; }
   /* ---- 齿轮: 右上角只剩这一枚 (用户 2026-09-16: 「右上角改成一个齿轮, 点开后有弹窗」)。
      旧口径是 7 个按钮/输入框平铺 (#seedInput/btnSeed/btnRegen/btnVeins/btnLabels/btnBanners/
@@ -155,92 +150,41 @@
   button.off { opacity: 0.45; text-decoration: line-through; }
   #stats { font-size: 12px; color: var(--ink-soft); letter-spacing: 1px; }
 
-  /* ---- 宗门录 (代替原「山河五色」图例) ----
-     菜单必须浮出面板之外, 而 .panel 的 clip-path 会裁剪整个子树 →
-     下拉层放在 #sectWrap 里 (与 #sectBox 平级), 由 #sectWrap 作定位上下文。 */
-  #sectWrap { position: relative; }
-  #sectBox { width: 246px; padding: 9px 12px 11px; }
-  #sectHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  #sectHead .cap { font-size: 13px; letter-spacing: 5px; color: var(--ink); }
-  #sectHead .cap b { font-weight: 400; color: var(--seal); }
-  #sectMenuBtn {
-    padding: 2px 9px; cursor: pointer; font-family: inherit;
-    font-size: 12px; letter-spacing: 2px; color: var(--ink-soft);
-    border: 1px solid var(--panel-border); border-radius: 2px;
-    background: linear-gradient(180deg, rgba(255,252,244,0.92), rgba(237,228,207,0.9));
-    transition: color 0.15s, border-color 0.15s;
-  }
-  #sectMenuBtn:hover, #sectMenuBtn.on { color: var(--seal); border-color: var(--seal); }
-  .sec-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-  .sec-name { font-size: 17px; line-height: 1.3; letter-spacing: 3px; color: var(--ink); }
-  /* 朱砂印章: 宗门前二字竖排 */
-  .sec-seal {
-    flex: 0 0 auto; width: 32px; height: 32px; border-radius: 2px;
-    display: flex; align-items: center; justify-content: center;
-    writing-mode: vertical-rl; text-orientation: upright;
-    font-size: 12.5px; letter-spacing: 1px; color: rgba(250,241,228,0.95);
-    background: var(--seal); opacity: 0.92;
-    box-shadow: inset 0 0 0 1px rgba(252,242,228,0.42), inset 0 0 7px rgba(58,10,4,0.4);
-  }
-  .sec-sub { margin-top: 2px; font-size: 12px; letter-spacing: 2px; color: var(--ink-soft); }
-  #sectBody .kv { display: flex; justify-content: space-between; gap: 10px; margin: 3px 0; font-size: 12.5px; }
-  #sectBody .kv .k { flex: 0 0 auto; letter-spacing: 2px; color: var(--ink-soft); }
-  #sectBody .kv .v { text-align: right; color: var(--ink); }
-  .sec-cap { margin-top: 6px; font-size: 11.5px; letter-spacing: 3px; color: var(--ink-faint); }
-  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-  .tag {
-    display: inline-flex; align-items: baseline; gap: 3px; padding: 1px 6px;
-    font-size: 11.5px; letter-spacing: 1px; color: rgba(70,58,44,0.92);
-    border: 1px solid rgba(150,128,96,0.45); border-radius: 2px;
-    background: linear-gradient(180deg, rgba(255,253,246,0.8), rgba(236,227,205,0.7));
-  }
-  .tag b { font-weight: 400; color: var(--seal); }
-  .sec-empty { padding: 12px 2px 8px; font-size: 12.5px; letter-spacing: 2px; color: var(--ink-faint); text-align: center; }
-
-  /* ---- 择宗菜单 (水墨卷轴) ---- */
-  #sectMenu {
-    display: none; position: absolute; left: 0; right: 0; top: calc(100% + 5px); z-index: 6;
-    max-height: 268px; overflow-y: auto; padding: 5px 0;
-    background: radial-gradient(130% 100% at 20% 0%, rgba(255,253,247,0.985), rgba(240,232,216,0.97));
-    filter: drop-shadow(0 6px 14px rgba(74,55,28,0.3));
-    clip-path: polygon(0.8% 0.6%, 99% 0.2%, 99.6% 99%, 0.4% 99.6%);
-  }
-  #sectMenu::before {
-    content: ''; position: absolute; inset: 0; pointer-events: none;
-    border: 1px solid rgba(120,98,66,0.42);
-    clip-path: polygon(0.8% 0.6%, 99% 0.2%, 99.6% 99%, 0.4% 99.6%);
-  }
-  #sectMenu.open { display: block; }
-  #sectMenu .mm-item {
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    padding: 5px 12px; font-size: 12.5px; letter-spacing: 1px;
-    cursor: pointer; color: var(--ink-soft);
-  }
-  #sectMenu .mm-item:hover { background: rgba(166,58,44,0.09); color: var(--seal); }
-  #sectMenu .mm-item.cur { color: var(--seal); }
-  #sectMenu .mm-item.cur .mm-nm::before { content: '「'; }
-  #sectMenu .mm-item.cur .mm-nm::after { content: '」'; }
-  #sectMenu .mm-d { font-size: 11.5px; color: var(--ink-faint); }
-  #sectMenu .mm-empty { padding: 9px 12px; font-size: 12px; letter-spacing: 2px; color: var(--ink-faint); }
-
-  /* ---- 信息面板 ---- */
+  /* ---- 信息面板 (#info · 山川志) ----
+     2026-11-24 用户: 「点击的时候的弹窗是可以拖动的而不是在左下角」。
+     旧版是钉在左下角、小地图正上方的固定板 (bottom 由 --mm-* 推出); 现在改成自由浮窗:
+       · position: fixed, left/top 由 main.js 写入 (视口坐标, clamp 在视口内);
+       · 标题栏 h3 是拖动把手 (pointer 事件, 自带 touch-action: none);
+       · 拖过的位置存 ZMStore('infoPos'), 刷新/下次打开仍在原处;
+       · 没拖过时, 每次点格子都在**点击处旁边**弹出 (旧版离点击处远, 是"不好用"的主因)。
+     内容顺序也改了: 先「此格之物」(宗门/聚落/建筑/灵脉/道路), 再「地土」(地貌/海拔等)。 */
   #info {
-    position: absolute;
-    /* R11: 左下角让给「山河小图」—— 山川志上移到它上方。
-       偏移量由 --mm-* 推出 (不再写死 230px: 画布高度一变就得手工跟着调)。 */
-    left: 16px; width: 228px; padding: 12px 14px;
-    bottom: calc(var(--mm-bottom) + var(--mm-h) + var(--mm-chrome) + var(--mm-gap));
+    position: fixed;
+    left: 0; top: 0;                 /* 占位初值, 打开前一定被 placeInfoAt() 覆盖 */
+    z-index: 45;                     /* 高于小地图 (auto) —— 拖到它头上时不被盖; 低于全屏层/设置弹窗 */
+    width: 236px; max-width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px); overflow-y: auto;
+    padding: 12px 14px;
     transition: opacity 0.2s;
   }
   #info.hidden { opacity: 0; pointer-events: none; }
-  #info h3 { font-size: 14px; letter-spacing: 3px; margin-bottom: 8px; display: flex; justify-content: space-between; }
+  #info.dragging { transition: none; }
+  /* 把手: 整条标题栏 (含空白) 都可拖; ✕ 单独命中, 不触发拖动 (见 main.js 判 e.target) */
+  #info h3 {
+    font-size: 14px; letter-spacing: 3px; margin-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center;
+    cursor: move; touch-action: none;
+  }
   #infoClose { cursor: pointer; color: var(--ink-soft); border: none; background: none; font-size: 14px; padding: 0 2px; letter-spacing: 0; }
   #infoClose:hover { color: var(--seal); }
-  #infoBody .row { display: flex; justify-content: space-between; margin: 3px 0; font-size: 12.5px; }
-  #infoBody .k { color: var(--ink-soft); letter-spacing: 2px; }
-  #infoBody .v { color: var(--ink); }
+  #infoBody .row { display: flex; justify-content: space-between; gap: 8px; margin: 3px 0; font-size: 12.5px; }
+  #infoBody .k { flex: 0 0 auto; color: var(--ink-soft); letter-spacing: 2px; }
+  #infoBody .v { text-align: right; color: var(--ink); }
   #infoBody .v.big { color: var(--seal); font-size: 15px; }
-  #infoBody .sep { border-top: 1px dashed var(--panel-border); margin: 6px 0; }
+  #infoBody .v.none { color: var(--ink-faint); letter-spacing: 2px; }
+  #infoBody .cap { margin: 2px 0 4px; font-size: 11.5px; letter-spacing: 4px; color: var(--ink-faint); }
+  #infoBody .sep { border-top: 1px dashed var(--panel-border); margin: 7px 0; }
+  #infoBody .sep:first-child { display: none; }
 
   /* ---- 小地图 (R11: 灵脉版 · 独立模块 minimap-vein.js) ----
      默认档贴屏幕左下角: 中心跟随主相机, 滚轮调「与大地图恒定的倍率」, 拖动转自由视角,
@@ -310,9 +254,6 @@
   #fatalMsg { color: var(--ink-soft); font-size: 14px; max-width: 560px; line-height: 1.7; }
 
   @media (max-width: 760px) {
-    #sectBox { width: 196px; }
-    .sec-name { font-size: 15px; letter-spacing: 2px; }
-    #titleBox h1 { font-size: 17px; letter-spacing: 3px; }
     /* 窄屏: 小地图铺满窗体宽度。
        原为左下角固定小卡 (画布 150×98): 头行「山河小图 归心 全屏 隐藏」与提示行的固有宽
        都是 188px, 绝对定位的收缩盒取最宽者 ⇒ 面板 204px, 画布只铺满 79.8%,
@@ -324,7 +265,7 @@
     #minimapBox { left: 10px; right: 10px; }
     #minimap { width: 100%; }
     #mmRestore { left: 10px; }
-    #info { left: 10px; }
+    /* #info 不再贴边: 位置由 main.js 放 (点击处旁 + clamp), 窄屏靠 max-width 收窄 */
   }
 </style>
 </head>
@@ -335,30 +276,14 @@
   </div>
 
   <div id="topbar">
-    <div id="hudLeft">
-      <div id="titleBox" class="panel">
-        <h1>宗门模拟器 <em>·</em> 山河图</h1>
-        <div class="sub"><span id="era">岁次甲辰 · 春</span><span id="eraRound"></span></div>
-      </div>
-      <div id="sectWrap">
-        <div id="sectBox" class="panel">
-          <div id="sectHead">
-            <span class="cap">宗门<b>录</b></span>
-            <button id="sectMenuBtn">择宗 ▾</button>
-          </div>
-          <div class="ink-rule"></div>
-          <div id="sectBody"><div class="sec-empty">山河初定，尚无所属</div></div>
-        </div>
-        <div id="sectMenu"></div>
-      </div>
-    </div>
     <div id="controls" class="panel">
       <button id="btnGear" title="设置 · 显示项 / 世界" aria-label="设置">⚙</button>
     </div>
   </div>
 
+  <!-- 山川志: 点地图任意格弹出。可拖 (整条标题栏是把手), 位置由 main.js 写 left/top。 -->
   <div id="info" class="panel hidden">
-    <h3><span>山川志</span><button id="infoClose">✕</button></h3>
+    <h3><span>山川志</span><button id="infoClose" title="关闭">✕</button></h3>
     <div id="infoBody"></div>
   </div>
 
@@ -444,6 +369,12 @@
        (两边都只读它; 全站唯一 eval / 唯一 init(seed) 点, 见文件头注释) -->
   <script src="js/engine-local.js"></script>
   <script src="js/minimap-vein.js"></script>
+  <!-- 小队 / 人物任务面板 (环世界式) —— 独立插件, 只加这两行即可挂载:
+       crew-model.js = 数据与规则 (无 DOM), crew-panel.js = 视图与交互 (自带 CSS 注入)。
+       ⚠ 与 main.js 零耦合: 它不调用面板, 面板也不读它的内部变量 —— 删掉这两行就干净移除。 -->
+  <script src="js/crew/crew-model.js"></script>
+  <script src="js/crew/crew-panel.js"></script>
+  <script src="js/crew/crew-bridge.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>

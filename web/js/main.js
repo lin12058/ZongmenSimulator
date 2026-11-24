@@ -135,19 +135,19 @@
         return r.json();
       });
   }
-  /* 把世界事实落到 UI 三处: 弹窗的轮次/种子/来历 + 题名下那行小字 + 齿轮 tooltip */
+  /* 把世界事实落到 UI: 弹窗的轮次/种子/来历 + 齿轮 tooltip
+     (题名牌下的「岁次…· 第 N 世」随题名牌一起删了, 2026-11-24) */
   function setWorldInfo(w) {
     worldRound = (w && w.round) ? w.round : 0;
     worldSrc = (w && w.src) ? w.src : ((w && w.kind) || '');
     var seed = (w && w.seed) || '-';
-    var rEl = $('setRound'), sEl = $('setSeed'), srcEl = $('setSeedSrc'), eEl = $('eraRound');
+    var rEl = $('setRound'), sEl = $('setSeed'), srcEl = $('setSeedSrc');
     if (rEl) rEl.textContent = worldRound ? ('第 ' + worldRound + ' 世') : '未入账';
     if (sEl) sEl.textContent = seed;
     if (srcEl) {
       srcEl.textContent = worldSrc === 'url' ? 'URL 覆盖 (未入账)'
         : ((w && w.persisted === false) ? '服务端 · 仅内存' : '服务端台账');
     }
-    if (eEl) eEl.textContent = worldRound ? (' · 第 ' + worldRound + ' 世') : '';
     var g = $('btnGear');
     if (g) g.title = '设置 · 显示项 / 世界' + (worldRound ? ('（第 ' + worldRound + ' 世 · 种子 ' + seed + '）') : '');
   }
@@ -215,15 +215,14 @@
     return new URLSearchParams(location.search).get('veinpt') === 'apex' ? 'apex' : 'center';
   })();
 
-  /* ---------- 宗门录 (左上角水墨面板) ----------
-     数据源: 地图实体层 settleCells 中 type==='sect' 的实体 (id/name/pop/tier/
-     styleName/buildings/resources), 不新增任何后端契约。
-     「掌门」一栏: 后端 mapgen 尚无归属系统 (owner 恒为空串, 见 mapgen.js 注释),
-     故由 seed+sect.id 确定性派生一个道号作演示 —— 事件系统接入后改为直接读 owner。
-     ⚠ 九版: **删除「随行·就近择宗」自动选择** —— 开局不再自动认领最近的一座宗门
-     (以前朱砂标记会随相机漂到最近的宗门上)。选中宗门只由玩家**主动**决定:
-     点击图上某一格 (若该格属某座宗门) 或从「择宗」菜单里点选。pinId 空 = 未择。 */
-  var sect = { pinId: '', pinEnt: null, curId: '', cur: null, items: [] };
+  /* ---------- 宗门录: 已按用户要求移除 (2026-11-24) ----------
+     用户: 「删除UI上的这几个, 因为不好用」—— 左上角的题名牌与整块「宗门录 + 择宗」
+     面板都删了 (web/index.html 里对应 DOM/CSS 同步移除)。
+     连带删掉的还有: sect 选中态 (pinId/pinEnt)、scanSects/collectSects/updateSectPanel、
+     sectBodyHTML/sectMenuHTML/openSectMenu、择宗菜单事件、__feat().sectPin 探针。
+     **点格子仍然画朱砂标记** (selectTile), 只是不再有任何"选中宗门"的概念 ——
+     该格上有何物, 现在统一由弹出的「山川志」(showInfo) 回答。
+     ⚠ 保留的通用工具 (esc/hash32/hexDist) 仍在本文件下方, 它们被渲染层/探针共用。 */
 
   var chunkData = new Map();        // 'ca,cb' -> {arrays, bbox}
   var regionCells = new Map();      // 'i,j'  -> {region, roads}   (图层1: 区域名+道路)
@@ -700,7 +699,6 @@
       settleVer++;              // R6b (B): 新聚落到货 → 归属缓存 (st._fac) 全部失效重算
       markStaticDirty();
       rebuildPropBlock();       // 建筑占地格变 → 覆盖格重算 (聚落内的树/山让位)
-      updateSectPanel(false);   // 实体层更新即刷新宗门录 (id 未变时内部直接返回)
     }
     if (resp.poi) {
       for (var pg = 0; pg < resp.poi.groups.length; pg++) {
@@ -2223,64 +2221,187 @@
     cam.tzoom = MC.clamp(cam.tzoom, minZoom, maxZoom);
   }
 
-  /* ---------- 信息面板 (后端单格详情) ---------- */
-  /* D6: 原实现用单一 panelBusy 布尔早退 —— 连点时新请求被静默丢弃 (面板停在旧格);
-     且 MC.tile 无超时, 请求挂住则「参详中…」可能永久滞留。
-     现改为「请求序号 + 最新者胜」: 每次请求带自增 rid, 回调里 rid != 最新则丢弃;
-     超时由 mapclient 侧的 AbortController 兜底 (8s)。 */
+  /* ---------- 山川志 (点格弹出 · 可拖动浮窗) ----------
+     D6: 原实现用单一 panelBusy 布尔早退 —— 连点时新请求被静默丢弃 (面板停在旧格);
+         且 MC.tile 无超时, 请求挂住则「参详中…」可能永久滞留。
+         现改为「请求序号 + 最新者胜」: 每次请求带自增 rid, 回调里 rid != 最新则丢弃;
+         超时由 mapclient 侧的 AbortController 兜底 (8s)。
+     U1 (2026-11-24 用户): 「点击的时候的弹窗是可以拖动的而不是在左下角」+「必须先显示
+         上面的有什么东西, 而不是只显示一个地皮的信息」。于是:
+           ① 位置不再钉在左下角 (旧版 bottom 由 --mm-* 推出, 正好压在小地图上方);
+              改为 position: fixed 的自由浮窗, 整条标题栏是拖动把手;
+           ② 没拖过 ⇒ 每次都在**点击处旁边**弹出; 拖过 ⇒ 记住位置 (ZMStore 'infoPos');
+           ③ 内容顺序: 「此格之物」在前 (宗门/聚落/建筑/灵脉/道路), 「地土」在后。 */
   var infoSeq = 0;
   /* R5: tile 详情请求 150ms 防抖 —— 连点多个格子时只发最后一次的请求 */
-  var infoTimer = null, infoPending = null;
-  function showInfo(tile) {
+  var infoTimer = null, infoPending = null, infoAt = null;
+  /* 记住的位置 (视口坐标); null = 从没拖过 ⇒ 每次跟随点击处 */
+  var infoPos = null;
+  var INFO_EDGE = 8;                 // 距视口边至少留 8px, 面板不会贴到屏幕外
+  var INFO_GAP = 16;                 // 点击处 → 面板左缘 / 上缘的偏移
+
+  function clampInfoPos(l, t) {
+    var el = els.info;
+    var w = el && el.offsetWidth ? el.offsetWidth : 236;
+    var h = el && el.offsetHeight ? el.offsetHeight : 120;
+    var maxL = Math.max(INFO_EDGE, window.innerWidth - w - INFO_EDGE);
+    var maxT = Math.max(INFO_EDGE, window.innerHeight - h - INFO_EDGE);
+    return {
+      l: Math.min(Math.max(INFO_EDGE, Math.round(l)), Math.round(maxL)),
+      t: Math.min(Math.max(INFO_EDGE, Math.round(t)), Math.round(maxT))
+    };
+  }
+  function applyInfoPos(p) {
+    if (!els.info || !p) return;
+    els.info.style.left = p.l + 'px';
+    els.info.style.top = p.t + 'px';
+  }
+  /* 没拖过 ⇒ 贴点击处右下弹出; 放不下就翻到左侧 / 上提 (仍在视口内)。
+     at 为空 (boot 兜底 / 键盘触发) ⇒ 绝不再回左下角 (那里是小地图):
+       · 宽屏: 右下角 (屏幕右下平时是空的);
+       · 窄屏 (<=760): 小地图铺满**整行**底部, 右下角必然压它 ⇒ 改放右上 (top 62, 让开齿轮)。 */
+  function placeInfoAt(x, y) {
+    var el = els.info;
+    var w = el && el.offsetWidth ? el.offsetWidth : 236;
+    var h = el && el.offsetHeight ? el.offsetHeight : 120;
+    var hasPt = (typeof x === 'number' && typeof y === 'number');
+    var narrow = window.innerWidth <= 760;
+    var l = hasPt ? x + INFO_GAP : window.innerWidth - w - INFO_GAP;
+    var t = hasPt ? y - 14 : (narrow ? 62 : window.innerHeight - h - 80);
+    if (hasPt && l + w > window.innerWidth - INFO_EDGE) l = x - w - INFO_GAP;   // 右边不够 → 左边
+    applyInfoPos(clampInfoPos(l, t));
+  }
+  function loadInfoPos() {
+    if (!S || !S.read) return null;
+    var p = S.read('infoPos', null);
+    if (!p || typeof p.l !== 'number' || typeof p.t !== 'number') return null;
+    return clampInfoPos(p.l, p.t);
+  }
+  /* 拖动: 整条标题栏 (h3) 是把手, ✕ 单独命中不拖。
+     用 pointer 事件 (鼠标/触摸/笔同一套), setPointerCapture 保证拖出窗口也不丢帧。 */
+  function bindInfoDrag() {
+    var el = els.info, grip = els.infoGrip;
+    if (!el || !grip) return;
+    /* ⚠ 变量名别用 st: frontend_smoke 会把「st 后接点号」的写法当成聚落实体字段读取来审计
+       (st = parsePlaceEntity 的产物), 这里的拖动状态不是那个东西 —— 用 dragSt 避开。 */
+    var dragSt = null;
+    grip.addEventListener('pointerdown', function (e) {
+      if (e.target && e.target.id === 'infoClose') return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      var r = el.getBoundingClientRect();
+      dragSt = { dx: e.clientX - r.left, dy: e.clientY - r.top, id: e.pointerId };
+      el.classList.add('dragging');
+      try { grip.setPointerCapture(e.pointerId); } catch (err) { /* 无 capture 也能拖, 只是出窗会丢 */ }
+      if (e.preventDefault) e.preventDefault();
+    });
+    grip.addEventListener('pointermove', function (e) {
+      if (!dragSt || e.pointerId !== dragSt.id) return;
+      applyInfoPos(clampInfoPos(e.clientX - dragSt.dx, e.clientY - dragSt.dy));
+    });
+    function endDrag(e) {
+      if (!dragSt || (e && e.pointerId !== dragSt.id)) return;
+      dragSt = null;
+      el.classList.remove('dragging');
+      var r = el.getBoundingClientRect();
+      infoPos = clampInfoPos(r.left, r.top);      // 拖过 ⇒ 从此固定在这
+      if (S && S.write) S.write('infoPos', infoPos);
+    }
+    grip.addEventListener('pointerup', endDrag);
+    grip.addEventListener('pointercancel', endDrag);
+  }
+
+  function showInfo(tile, atX, atY) {
     if (!tile) return;
     infoPending = tile;                        // 保留最近一次点击目标
+    infoAt = { x: atX, y: atY };
     if (infoTimer) clearTimeout(infoTimer);
     infoTimer = setTimeout(function () {
       infoTimer = null;
-      var t = infoPending; infoPending = null;
-      requestTileInfo(t);
+      var t = infoPending, at = infoAt;
+      infoPending = null; infoAt = null;
+      requestTileInfo(t, at);
     }, 150);
   }
-  function requestTileInfo(tile) {
+  /* 面板正文: 「此格之物」在前, 「地土」在后。
+     数据来源两条腿: 本地实体层 (placeAtTile/veinAtTile, 细) 优先;
+     块还没到货时退回服务端 /api/map/tile 给的聚合字段 (m.placeType/hasVein), 免得空窗。 */
+  function infoRowsHTML(m, q, r) {
+    var rows = [];
+    function row(k, v, cls) {
+      rows.push('<div class="row"><span class="k">' + k + '</span><span class="v' +
+        (cls ? ' ' + cls : '') + '">' + v + '</span></div>');
+    }
+    rows.push('<div class="cap">此 格 之 物</div>');
+    var any = false;
+    var hit = placeAtTile(q, r);
+    if (hit) {
+      var ent = hit.ent;
+      any = true;
+      row(TYPE_NAME[ent.type] || '地物', esc(ent.name || '无名'), 'big');
+      if (hit.bldg && hit.bldg.kind) row('此筑', esc(hit.bldg.kind));
+      if (ent.type !== 'poi' && ent.pop) row('生民', '约 ' + ent.pop.toLocaleString() + ' 口');
+      if (ent.type === 'poi') row('气数', '机缘未至, 探之莫测');
+    } else if (m.placeType) {
+      /* 实体层尚未到货 (或该格属聚落但不落在建筑/主格上) ⇒ 用服务端聚合值 */
+      any = true;
+      row(TYPE_NAME[m.placeType] || '地物', esc(m.placeName || '无名'), 'big');
+      if (m.placeType !== 'poi' && m.placePop) row('生民', '约 ' + m.placePop.toLocaleString() + ' 口');
+    }
+    var vh = veinAtTile(q, r);
+    if (vh) {
+      var v = vh.v;
+      any = true;
+      if (vh.core) {
+        row('灵脉', esc(veinLabel(v)), 'big');
+        row('灵根', v.variant ? esc(v.variant) + '灵根' : ((VEIN_EL[v.element] || '?') + '灵根'));
+        row('位份', v.level === 0 ? '大灵脉·七星' : v.level === 1 ? '中灵脉·七星' : '独立小灵脉');
+      } else {
+        row('属脉', esc(veinLabel(v)) + ' · 地盘');
+      }
+    } else if (m.hasVein) {
+      /* 本地群落包还没到 ⇒ 服务端已给这一格的灵脉事实 */
+      any = true;
+      row('灵脉', esc(m.veinName), 'big');
+      row('灵根', m.veinVariant ? esc(m.veinVariant) + '灵根 · 派自' + (VEIN_EL[m.veinElement] || '?')
+        : (VEIN_EL[m.veinElement] || '?') + '灵根');
+      row('位份', m.veinLevel === 0 ? '大灵脉·七星' : m.veinLevel === 1 ? '中灵脉·七星' : '独立小灵脉');
+    }
+    if (m.onRoad) { any = true; row('道路', '有墨路经此'); }
+    if (!any) row('此地', '空野 · 无地物', 'none');
+
+    rows.push('<div class="sep"></div>');
+    rows.push('<div class="cap">地 土</div>');
+    row('地界', esc(m.regionName || '未名'));
+    row('地貌', esc((geo.biomeMeta[m.disp] || {}).name || '未名'));
+    row('位次', (q < 0 ? '西 ' + (-q) : '东 ' + q) + ' · ' + (r < 0 ? '北 ' + (-r) : '南 ' + r));
+    row('海拔', (m.e * 300 | 0) + ' 丈');
+    row('润泽', (m.m * 100 | 0) + '%');
+    var wd = m.waterD;
+    row('去水', m.biome <= 1 ? '滨水' : wd >= 1 && wd <= 4 ? wd + ' 里' : '较远');
+    return rows.join('');
+  }
+  function requestTileInfo(tile, at) {
     if (!tile) return;
     var rid = ++infoSeq;
     els.infoBody.innerHTML = '<div class="row"><span class="k">山川志</span><span class="v">参详中…</span></div>';
+    /* 先定位再上屏: 拖过 ⇒ 用记住的位置; 没拖过 ⇒ 贴这次点击处。
+       显示前后各 clamp 一次 —— 「参详中」与正式内容的高度不同, 只 clamp 一次会漏底。 */
+    if (infoPos) applyInfoPos(infoPos);
+    else placeInfoAt(at && at.x, at && at.y);
     els.info.classList.remove('hidden');
+    if (infoPos) applyInfoPos(clampInfoPos(infoPos.l, infoPos.t));
     var gen = worldSeed, q = tile.q, r = tile.r;
     MC.tile(gen, q, r).then(function (m) {
       if (rid !== infoSeq) return;                 // 已被更晚的点击取代 → 静默丢弃
       if (gen !== worldSeed) return;
-      var rows = [];
-      /* D13: 服务端字符串一律过 esc() (与宗门录面板一致) —— 原实现直接拼进
-         innerHTML, 名称里含 < & 等字符就会破坏结构/注入。 */
-      if (m.placeType) {
-        rows.push('<div class="row"><span class="k">所在</span><span class="v">' +
-          esc(TYPE_NAME[m.placeType] || m.placeType) + '</span></div>');
-        rows.push('<div class="row"><span class="k">名号</span><span class="v big">' + esc(m.placeName) + '</span></div>');
-        if (m.placeType !== 'poi') rows.push('<div class="row"><span class="k">生民</span><span class="v">约 ' + m.placePop.toLocaleString() + ' 口</span></div>');
-        else rows.push('<div class="row"><span class="k">气数</span><span class="v">机缘未至, 探之莫测</span></div>');
-        rows.push('<div class="sep"></div>');
+      /* D13: 服务端字符串一律过 esc() —— 直接拼 innerHTML 会被名称里的 < & 破坏结构 */
+      els.infoBody.innerHTML = infoRowsHTML(m, q, r);
+      /* 内容变高后可能出视口 ⇒ 再收一次 */
+      if (infoPos) applyInfoPos(clampInfoPos(infoPos.l, infoPos.t));
+      else {
+        var r2 = els.info.getBoundingClientRect();
+        applyInfoPos(clampInfoPos(r2.left, r2.top));
       }
-      rows.push('<div class="row"><span class="k">地界</span><span class="v">' + esc(m.regionName) + '</span></div>');
-      rows.push('<div class="row"><span class="k">地貌</span><span class="v">' + esc((geo.biomeMeta[m.disp] || {}).name || '未名') + '</span></div>');
-      rows.push('<div class="row"><span class="k">位次</span><span class="v">' +
-        (q < 0 ? '西 ' + (-q) : '东 ' + q) + ' · ' + (r < 0 ? '北 ' + (-r) : '南 ' + r) + '</span></div>');
-      if (m.hasVein) {
-        rows.push('<div class="sep"></div>');
-        rows.push('<div class="row"><span class="k">灵脉</span><span class="v big">' + esc(m.veinName) + '</span></div>');
-        rows.push('<div class="row"><span class="k">灵根</span><span class="v">' +
-          (m.veinVariant ? esc(m.veinVariant) + '灵根 · 派自' + (VEIN_EL[m.veinElement] || '?')
-                         : (VEIN_EL[m.veinElement] || '?') + '灵根') + '</span></div>');
-        rows.push('<div class="row"><span class="k">位份</span><span class="v">' +
-          (m.veinLevel === 0 ? '大灵脉·七星' : m.veinLevel === 1 ? '中灵脉·七星' : '独立小灵脉') + '</span></div>');
-      }
-      rows.push('<div class="row"><span class="k">海拔</span><span class="v">' + (m.e * 300 | 0) + ' 丈</span></div>');
-      rows.push('<div class="row"><span class="k">润泽</span><span class="v">' + (m.m * 100 | 0) + '%</span></div>');
-      var wd = m.waterD;
-      rows.push('<div class="row"><span class="k">去水</span><span class="v">' +
-        (m.biome <= 1 ? '滨水' : wd >= 1 && wd <= 4 ? wd + ' 里' : '较远') + '</span></div>');
-      if (m.onRoad) rows.push('<div class="row"><span class="k">道路</span><span class="v">有墨路经此</span></div>');
-      els.infoBody.innerHTML = rows.join('');
     }).catch(function (err) {
       if (rid !== infoSeq) return;                 // 过期请求的失败不再覆盖面板
       console.error('格详情失败', err);
@@ -2288,24 +2409,11 @@
     });
   }
   function hideInfo() {
-    if (infoTimer) { clearTimeout(infoTimer); infoTimer = null; infoPending = null; }  // R5: 关闭面板取消挂起的防抖请求
+    if (infoTimer) { clearTimeout(infoTimer); infoTimer = null; infoPending = null; infoAt = null; }  // R5: 关闭面板取消挂起的防抖请求
     els.info.classList.add('hidden');
   }
 
   /* ---------- 世界重建 ---------- */
-  function seedEra(seedStr) {
-    var h = 2166136261 >>> 0;
-    for (var i = 0; i < seedStr.length; i++) {
-      h ^= seedStr.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    h >>>= 0;
-    var gan = '甲乙丙丁戊己庚辛壬癸'.charAt(h % 10);
-    var zhi = '子丑寅卯辰巳午未申酉戌亥'.charAt((h >>> 3) % 12);
-    var season = '春夏秋冬'.charAt((h >>> 7) % 4);
-    els.era.textContent = '岁次' + gan + zhi + ' · ' + season;
-  }
-
   function regenerate(seedString) {
     worldSeed = String(seedString);
     chunkData.forEach(function (_info, key) { renderer.dropChunk(key); });
@@ -2341,13 +2449,8 @@
     cam.tzoom = cam.zoom = 2.2;
     /* ⚠ 这里不再回填任何"种子输入框" —— 手输种子的 UI 已删 (2026-09-16 用户:
        「seed 由服务器统一产生, 不能通过前端产生」)。世界事实由 setWorldInfo 落 UI。 */
-    seedEra(worldSeed);
-    /* 世界重铸: 旧世界的宗门 id 全部失效 → 清掉选中宗门与点选标记 (九版无"随行"可回退,
-       重铸后回到"未择"状态, 由玩家重新点选) */
-    sect.pinId = ''; sect.pinEnt = null; sect.curId = ''; sect.curFp = ''; sect.cur = null;
+    /* 世界重铸: 点选标记与山川志的旧结果一并作废 (旧格详情属于上一世) */
     selMark = null;
-    openSectMenu(false);
-    updateSectPanel(true);
     hideInfo();
     forceStaticDirty();               // R1: 重铸需立即全量重绘 (清节流定时器) + 小地图 rev bump
   }
@@ -2361,11 +2464,7 @@
     els.stats.textContent = '已探明 宗门村镇 ' + st + ' · 墨路 ' + rd + ' · 灵脉 ' + veins;
   }
 
-  /* ---------- 宗门录: 数据整理 + 面板渲染 ---------- */
-  var MASTER_CH = '玄清太云素无孤寒沧离明虚重白赤青洞霄寂衍真澄空'.split('');
-  var MASTER_TAIL = ['真人', '上人', '道人', '散人', '老祖', '尊主'];
-  var TIER_NAME = ['', '下品宗门', '中品宗门', '上品宗门'];
-
+  /* ---------- 通用小工具 (渲染层 / 山川志 / 探针共用) ---------- */
   function hash32(str) {
     var h = 2166136261 >>> 0;
     for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -2381,208 +2480,69 @@
     var dq = q1 - q0, dr = r1 - r0;
     return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
   }
-  function tileDistFrom(wx, wy, q, r) {
-    var t = MC.pxToTile(wx, wy);
-    return Math.round(hexDist(q, r, t.q, t.r));
-  }
-  function masterOf(ent) {
-    if (ent.owner) return ent.owner;
-    var h = hash32(worldSeed + '#' + ent.id);
-    return MASTER_CH[h % MASTER_CH.length] +
-           MASTER_CH[(h >>> 6) % MASTER_CH.length] +
-           MASTER_TAIL[(h >>> 11) % MASTER_TAIL.length];
-  }
-  function regionNameAt(q, r) {
-    if (!geo) return '';
-    var pack = regionCells.get(cellKey(Math.floor(q / geo.regionM), Math.floor(r / geo.regionM)));
-    return pack && pack.region ? pack.region.name : '';
-  }
-  /* 最近灵脉: 遍历已加载的群落包 (随视野窗口有界, 无额外请求)。
-     VEIN_NEAR 格以外视为「未附」—— 免得写出一条几百格外的灵脉充数。 */
-  var VEIN_NEAR = 60;
-  function nearestVein(q, r) {
-    var best = null;
-    commCells.forEach(function (cm) {
-      if (!cm.exists || !cm.veins) return;
-      for (var i = 0; i < cm.veins.length; i++) {
-        var v = cm.veins[i];
-        var d = tileDistFrom(v.x, v.y, q, r);
-        if (!best || d < best.d) best = { v: v, d: d };
-      }
-    });
-    return best && best.d <= VEIN_NEAR ? best : null;
-  }
-  /* 视野内宗门, 按距相机中心的格距升序 */
-  function collectSects() {
-    var out = [], seen = {}, ct = MC.pxToTile(cam.x, cam.y);
-    settleCells.forEach(function (list) {
-      for (var i = 0; i < list.length; i++) {
-        var ent = list[i];
-        if (ent.type !== 'sect' || ent.state === 1) continue;   // 非宗门 / 已毁
-        if (seen[ent.id]) continue;                            // 邻块重复携带 → 去重
-        seen[ent.id] = true;
-        out.push({ ent: ent, d: Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)) });
-      }
-    });
-    out.sort(function (a, b) { return a.d - b.d; });
-    return out;
-  }
-  /* D14: 单遍 O(n) 扫描 (不排序、不建数组) —— 层指纹未变时用它回答
-     「选中的宗门还在不在、距离变没变」。
-     九版: 选中宗门**只由 pinId 决定** (点地图 / 择宗菜单), 「随行·就近择宗」已删 ⇒
-     这里不再有"最近宗门换了人"这回事, 只需找回 pinId 对应的实体。 */
-  function scanSects() {
-    var ct = MC.pxToTile(cam.x, cam.y);
-    var pin = null;
-    if (sect.pinId) {
-      settleCells.forEach(function (list) {
-        if (pin) return;
+  /* ---------- 山川志的数据来源: 这一格上到底站着什么 ----------
+     用户 2026-11-24: 「必须是……先显示上面的有什么东西, 而不是只显示一个地皮的信息」。
+     /api/map/tile 只给"地皮"(地貌/海拔/润泽) 与聚合的 placeType/placeName;
+     "格上之物"必须由前端**已加载**的实体层回答 (settleCells / poiCells / commCells),
+     不新增任何后端契约 —— 视野内的块本来就已经在内存里了。
+     · placeAtTile: 聚落/宗门/景点实体 + 命中的那座建筑
+                  (建筑只有 kind/terrain/tier, 没有独立名, 所以显示 kind)
+     · veinAtTile : 该格是否落在某灵脉占地内 (大 7 / 中 3 / 小 1), 并区分本格 / 从属格 */
+  function placeAtTile(q, r) {
+    var out = null;
+    function scan(map) {
+      if (out) return;
+      map.forEach(function (list) {
+        if (out) return;
         for (var i = 0; i < list.length; i++) {
           var ent = list[i];
-          if (ent.type === 'sect' && ent.state !== 1 && ent.id === sect.pinId) {
-            pin = { id: ent.id, d: Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)), ent: ent };
-            return;
+          if (!ent || ent.state === 1) continue;          // 已毁实体不报
+          var bl = ent.buildings || [], b = null;
+          for (var j = 0; j < bl.length; j++) {
+            if (bl[j].q === q && bl[j].r === r) { b = bl[j]; break; }
           }
+          /* 建筑命中优先于「实体主格」: 主格上一般也有建筑, 但要报的是那栋楼 */
+          if (b) { out = { ent: ent, bldg: b }; return; }
+          if (ent.q === q && ent.r === r) { out = { ent: ent, bldg: null }; return; }
         }
       });
     }
-    return { pin: pin };
+    scan(settleCells); scan(poiCells);
+    return out;
   }
-  /* 该格是否属于某座宗门的营建 (宗址格或它的山门建筑格) */
-  function tileInBuildings(ent, q, r) {
-    var bl = ent.buildings || [];
-    for (var i = 0; i < bl.length; i++) if (bl[i].q === q && bl[i].r === r) return true;
-    return false;
-  }
-  function sectAtTile(q, r) {
-    var hit = null;
-    settleCells.forEach(function (list) {
-      if (hit) return;
-      for (var i = 0; i < list.length; i++) {
-        var ent = list[i];
-        if (ent.type !== 'sect' || ent.state === 1) continue;
-        if ((ent.q === q && ent.r === r) || tileInBuildings(ent, q, r)) { hit = ent; return; }
-      }
+  /* 灵脉占地: 与地盘色环同口径 —— 偏移表问 VS.footOffsets (引擎就绪时它读 MG.veinFootKeep),
+     引擎缺席才用镜像表。先按 (q,r) 排序消除到达序依赖, 同格多峰时本格优先、其次 (q,r) 小者。 */
+  function veinAtTile(q, r) {
+    var best = null;
+    var MG = null;
+    try { var E = EL(); MG = (E && E.mapgen) ? E.mapgen() : null; } catch (e) { MG = null; }
+    var all = [];
+    commCells.forEach(function (cm) {
+      if (!cm.exists || !cm.veins) return;
+      for (var i = 0; i < cm.veins.length; i++) all.push(cm.veins[i]);
     });
-    return hit;
+    all.sort(function (a, b) {
+      var d = (a.q | 0) - (b.q | 0);
+      return d !== 0 ? d : ((a.r | 0) - (b.r | 0));
+    });
+    for (var i = 0; i < all.length; i++) {
+      var v = all[i];
+      var foot = (VS && VS.footOffsets) ? VS.footOffsets(v.level, MG) : [[0, 0]];
+      for (var f = 0; f < foot.length; f++) {
+        if (((v.q | 0) + foot[f][0]) !== q || ((v.r | 0) + foot[f][1]) !== r) continue;
+        var core = (foot[f][0] === 0 && foot[f][1] === 0);
+        if (!best || (core && !best.core)) best = { v: v, core: core };
+        if (core) return best;
+      }
+    }
+    return best;
   }
-  /* 点选一格 (2026-09-14 九版): 落朱砂标记; 若这一格属于某座宗门, 顺带把它设成
-     「宗门录」的选中宗门 —— 这是九版**唯一**的选宗途径之一 (另一条是择宗菜单)。 */
+  /* 点选一格: 落朱砂标记。2026-11-24 宗门录已删 —— 不再有「选中宗门」这回事,
+     这一格上有什么, 由弹出的山川志回答 (见 showInfo / infoRowsHTML)。 */
   function selectTile(t) {
     if (!t) return;
     var w = MC.tileToWorld(t.q, t.r);
     selMark = { q: t.q, r: t.r, x: w.x, y: w.y };
-    var ent = sectAtTile(t.q, t.r);
-    if (ent) {
-      sect.pinId = ent.id; sect.pinEnt = ent;
-      updateSectPanel(true);
-    }
-  }
-  function pickSectById(id) {
-    for (var i = 0; i < sect.items.length; i++)
-      if (sect.items[i].ent.id === id) return sect.items[i];
-    return null;
-  }
-  function updateSectPanel(force) {
-    if (!metaReady || !geo) return;
-    var fp = layerFingerprint();
-    var sc = scanSects();
-    /* 选中宗门已出视野/被卸载/被毁 → 退回最后一次实体 (sect.pinEnt): 面板不闪空,
-       距离继续按它算; 玩家再点到它时引用自会刷新。 */
-    var ent = sc.pin ? sc.pin.ent : sect.pinEnt;
-    if (sc.pin) sect.pinEnt = sc.pin.ent;
-    var id = ent ? ent.id : '';
-    var d = 0;
-    if (ent) {
-      if (sc.pin) d = sc.pin.d;
-      else { var ct = MC.pxToTile(cam.x, cam.y); d = Math.round(hexDist(ct.q, ct.r, ent.q, ent.r)); }
-    }
-    if (id !== sect.curId || fp !== sect.curFp || force) {
-      sect.curFp = fp;
-      sect.curId = id; sect.cur = ent;
-      els.sectBody.innerHTML = ent
-        ? sectBodyHTML({ ent: ent, d: d })
-        : '<div class="sec-empty">未择宗门 · 点击图上宗门</div>';
-      if (els.sectMenu.classList.contains('open')) openSectMenu(true);
-    } else if (ent) {
-      var dEl = els.sectBody.querySelector('.sec-dist');
-      if (dEl) dEl.textContent = d;      // 「距此」随相机移动, 由 1.5s 节拍刷新
-    }
-  }
-  function tagList(list) {
-    var h = '<div class="chips">';
-    for (var i = 0; i < list.length && i < 8; i++)
-      h += '<span class="tag">' + esc(list[i].name) + '<b>' + list[i].n + '</b></span>';
-    return h + '</div>';
-  }
-  function kindsOf(buildings) {
-    var c = {}, order = [];
-    for (var i = 0; i < buildings.length; i++) {
-      var k = buildings[i].kind || '屋舍';
-      if (c[k] == null) { c[k] = 0; order.push(k); }
-      c[k]++;
-    }
-    return order.map(function (k) { return { name: k, n: c[k] }; })
-                .sort(function (a, b) { return b.n - a.n; });
-  }
-  function sectBodyHTML(pick) {
-    var ent = pick.ent, row = [];
-    function kv(k, v) {
-      return '<div class="kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
-    }
-    row.push('<div class="sec-top"><div class="sec-name">' + esc(ent.name) + '</div>' +
-             '<div class="sec-seal">' + esc(String(ent.name).slice(0, 2)) + '</div></div>');
-    row.push('<div class="sec-sub">' + (TIER_NAME[ent.tier] || '宗门') +
-             (ent.styleName ? ' · ' + esc(ent.styleName) : '') + '</div>');
-    row.push('<div class="ink-rule"></div>');
-    row.push(kv('掌门', esc(masterOf(ent))));
-    row.push(kv('门人', (ent.pop || 0).toLocaleString() + ' 口'));
-    row.push(kv('地界', esc(regionNameAt(ent.q, ent.r) || '未探明')));
-    row.push(kv('位次', (ent.q < 0 ? '西 ' + (-ent.q) : '东 ' + ent.q) + ' · ' +
-                         (ent.r < 0 ? '北 ' + (-ent.r) : '南 ' + ent.r)));
-    row.push(kv('距此', '<span class="sec-dist">' + pick.d + '</span> 格'));
-    var nv = nearestVein(ent.q, ent.r);
-    row.push(kv('灵脉', nv
-      ? esc(veinLabel(nv.v)) + ' · ' + nv.d + ' 格'
-      : '未附灵脉'));
-    var bl = ent.buildings || [], rs = ent.resources || [];
-    if (bl.length) {
-      row.push('<div class="sec-cap">山门营建</div>');
-      row.push(tagList(kindsOf(bl)));
-    }
-    if (rs.length) {
-      row.push('<div class="sec-cap">岁入</div>');
-      row.push(tagList(rs.map(function (x) { return { name: x.resource, n: x.amount }; })));
-    }
-    return row.join('');
-  }
-  /* 择宗菜单 (九版): 删掉「随行 · 就近择宗」那一项 —— 自动择宗已按用户要求移除,
-     这里只剩"点名择宗"。空列表才显示空态。 */
-  function sectMenuHTML() {
-    var h = '';
-    for (var i = 0; i < sect.items.length && i < 30; i++) {
-      var it = sect.items[i];
-      h += '<div class="mm-item' + (it.ent.id === sect.pinId ? ' cur' : '') +
-           '" data-id="' + esc(it.ent.id) + '"><span class="mm-nm">' + esc(it.ent.name) +
-           '</span><span class="mm-d">' + it.d + ' 格</span></div>';
-    }
-    if (!sect.items.length) h += '<div class="mm-empty">此方地界，未闻宗门</div>';
-    return h;
-  }
-  function openSectMenu(open) {
-    /* 每次展开都重新收一遍视野内宗门 (按距相机中心升序) —— 原由 pickSect() 顺带刷新,
-       九版 pickSect 已删, 改在这里取。 */
-    if (open) { sect.items = collectSects(); els.sectMenu.innerHTML = sectMenuHTML(); }
-    els.sectMenu.classList.toggle('open', open);
-    els.sectMenuBtn.classList.toggle('on', open);
-  }
-  /* 每 1.5s (与统计/小地图同节拍) 刷新一次。
-     ★ 重建判据除「当前宗门 id 变化」外还必须含「图层规模变化」: 区块响应的
-       settle/region/comm 是分先后到达的, 宗门实体往往先到 → 首帧渲染时
-       regionCells/commCells 还是空的, 「地界/灵脉」会算成未探明/未附并**永久滞留**
-       (id 不再变化 → 不再重建)。加了规模指纹后数据补到即自动纠正。 */
-  function layerFingerprint() {
-    return settleCells.size + '|' + regionCells.size + '|' + commCells.size;
   }
 
   /* ---------- 输入 ---------- */
@@ -2629,8 +2589,9 @@
       if (mx < 0 || my < 0 || mx > rect.width || my > rect.height) return;
       var wpt = s2w(mx, my);
       selectedTile = MC.pxToTile(wpt.x, wpt.y);
-      selectTile(selectedTile);         // 九版: 点哪选哪 (朱砂圈 + 若是宗门则立选)
-      showInfo(selectedTile);
+      selectTile(selectedTile);         // 点哪选哪 (朱砂圈)
+      /* 传**视口坐标** (clientX/Y): 山川志是 position: fixed 的自由浮窗, 贴在点击处旁边弹出 */
+      showInfo(selectedTile, e.clientX, e.clientY);
     });
     app.addEventListener('wheel', function (e) {
       e.preventDefault();
@@ -2764,35 +2725,10 @@
         regenBusy(false);
       });
     });
-    /* 择宗菜单: 按钮开合 / 选项落定 / 点空白处收起 (九版: 不再有「随行」项) */
-    els.sectMenuBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      openSectMenu(!els.sectMenu.classList.contains('open'));
-    });
-    els.sectMenu.addEventListener('click', function (e) {
-      var it = e.target && e.target.closest ? e.target.closest('.mm-item') : null;
-      if (!it) return;
-      var id = it.getAttribute('data-id') || '';
-      var pick = id ? pickSectById(id) : null;
-      sect.pinId = pick ? id : '';
-      sect.pinEnt = pick ? pick.ent : null;
-      /* 选中即把朱砂圈也移过去 (与"点地图选宗"同一套标记) */
-      if (pick) {
-        var w = MC.tileToWorld(pick.ent.q, pick.ent.r);
-        selMark = { q: pick.ent.q, r: pick.ent.r, x: w.x, y: w.y };
-      } else {
-        selMark = null;
-      }
-      openSectMenu(false);
-      updateSectPanel(true);              // 立即重排面板
-    });
-    window.addEventListener('mousedown', function (e) {
-      if (!els.sectMenu.classList.contains('open')) return;
-      if (els.sectBox.contains(e.target) || els.sectMenu.contains(e.target)) return;
-      openSectMenu(false);
-    });
+    /* 2026-11-24: 择宗菜单随「宗门录」一起移除 (按钮/下拉/点空白收起三段事件全删) */
 
     $('infoClose').addEventListener('click', hideInfo);
+    bindInfoDrag();                        // 山川志: 标题栏拖动 + 位置记忆
     window.addEventListener('resize', onResize);
   }
 
@@ -2803,6 +2739,9 @@
     els.overlay.height = Math.round(vh * dpr);
     els.overlay.style.width = vw + 'px';
     els.overlay.style.height = vh + 'px';
+    /* 山川志是自由浮窗: 窗口变小后原来的位置可能出视口 ⇒ 收回来 (不改用户记住的 pos, 只挪本次) */
+    if (infoPos) applyInfoPos(clampInfoPos(infoPos.l, infoPos.t));
+    else if (!els.info.classList.contains('hidden')) placeInfoAt(null, null);
   }
 
   /* ---------- 主循环 ---------- */
@@ -2847,12 +2786,11 @@
       drawOverlay();
       frameCount++;
       /* R11: 小地图已完全交给独立模块 (自带 rAF + 节流), 主循环不再为它做任何事 ——
-         这里只剩「统计/宗门录」的 1.5s 节拍。 */
+         这里只剩「统计」的 1.5s 节拍 (宗门录已删, 「距此」不再需要随相机刷新)。 */
       statsTimer += dt;
       if (statsTimer > 1.5) {
         statsTimer = 0;
         updateStats();
-        updateSectPanel(false);     // 「距此」随相机移动, 与统计同节拍刷新
       }
     } catch (err) {
       showFatal('渲染循环异常: ' + err.message);
@@ -2869,16 +2807,16 @@
       overlayCtx: $('overlay').getContext('2d'),
       glcanvas: $('glcanvas'),
       minimap: $('minimap'),
-      era: $('era'),
-      eraRound: $('eraRound'),
       stats: $('stats'),
+      /* 山川志 (2026-11-24: 题名牌/宗门录已删, 它们的元素引用一并去掉) */
       info: $('info'),
       infoBody: $('infoBody'),
-      sectBox: $('sectBox'),
-      sectBody: $('sectBody'),
-      sectMenu: $('sectMenu'),
-      sectMenuBtn: $('sectMenuBtn')
+      infoGrip: document.querySelector('#info h3')
     };
+    /* 山川志的位置: 上次拖过就回到原处; 从没拖过 ⇒ 预置在右下 (绝不再落回左下角,
+       那里是小地图)。boot 就摆好, 免得第一次弹出时才从 (0,0) 跳过去。 */
+    infoPos = loadInfoPos();
+    if (!infoPos) placeInfoAt(null, null);
 
     try {
       renderer = new InkRenderer(els.glcanvas);
@@ -3159,10 +3097,14 @@
             veinRings: statVeinRingRows.slice(0, 80),
             bridges: statBridge, waterQuads: statWaterQuads,
             factionsOn: FAC_OK, settleVer: settleVer,
-            /* 九版点选态: headless 用 Input.dispatchMouseEvent 点一下, 再读这两项
-               即知「朱砂标记落在哪一格 / 宗门录选中的是哪一座」。无点击时为 null/''。 */
+            /* 点选态: headless 用 Input.dispatchMouseEvent 点一下, 再读 sel
+               即知朱砂标记落在哪一格 (宗门录已删, 不再有 sectPin)。无点击时为 null。 */
             sel: selMark ? [selMark.q, selMark.r] : null,
-            sectPin: sect.pinId ? String(sect.pinId) : '',
+            infoOpen: !!els.info && !els.info.classList.contains('hidden'),
+            infoPos: els.info ? (function () {
+              var r = els.info.getBoundingClientRect();
+              return [Math.round(r.left), Math.round(r.top)];
+            })() : null,
             zoom: +cam.zoom.toFixed(3), camTile: [Math.round(cam.x), Math.round(cam.y)]
           };
         };
