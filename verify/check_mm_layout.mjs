@@ -7,9 +7,12 @@
  *   固有宽度都是 188px; #minimapBox 是绝对定位的收缩包裹盒 (shrink-to-fit) ⇒
  *   取最宽者 188px, 面板 204px, 而画布只有 150px ⇒ 右侧留 38px 空白纸。
  *   桌面档 216=216 恰好相等, 所以只在窄屏暴露。
- * 修法: ① 面板几何参数化 (--mm-h/--mm-chrome/--mm-bottom/--mm-gap), #info 山川志的
- *         bottom 由变量推出 (原先写死 230px/168px, 改画布高度就会压住小地图);
- *       ② 窄屏 left/right 同时贴边 ⇒ 宽度确定, 画布 width:100% 才铺得满。
+ * 修法: ① 面板几何参数化 (--mm-h/--mm-chrome/--mm-bottom), 窄屏 left/right 同时贴边
+ *         ⇒ 宽度确定, 画布 width:100% 才铺得满;
+ *       ② ⚠ 2026-11-24 起 #info (山川志) **不再参与本契約的几何推导** —— 用户要求
+ *         「弹窗可以拖动而不是在左下角」, 它已改成自由浮窗 (position: fixed, 位置由
+ *         main.js 写 left/top)。这里的断言随之改为「在视口内 + 默认不压小地图」,
+ *         旧版的「#info bottom 由 --mm-* 推出、必须停在小地图上方」已作废。
  *
  * 本脚本不靠「看图」: 把 index.html 装进各档宽度的 iframe, 量真实布局盒, 逐条断言。
  *
@@ -113,7 +116,20 @@ const PROBE = `<!DOCTYPE html>
                    overflowPx: r1(hb.right - cb.right) } : null,
       hint: nb ? { w: r1(nb.width), h: r1(nb.height), scrollW: hint.scrollWidth,
                    clientW: hint.clientWidth } : null,
-      infoGap: info ? r1(bb.top - info.getBoundingClientRect().bottom) : null,
+      info: info ? (function () {
+        var ir = info.getBoundingClientRect();
+        /* 与左下角那块小地图面板是否相交 —— 默认位置 (右下) 必须不压它 */
+        var overlap = !(ir.right <= bb.left || ir.left >= bb.right ||
+                        ir.bottom <= bb.top || ir.top >= bb.bottom);
+        return {
+          x: r1(ir.x), y: r1(ir.y), w: r1(ir.width), h: r1(ir.height),
+          inView: (ir.left >= -0.5 && ir.top >= -0.5 &&
+                   ir.right <= win.innerWidth + 0.5 && ir.bottom <= win.innerHeight + 0.5),
+          overMinimap: overlap,
+          vpRightGap: r1(win.innerWidth - ir.right),
+          vpBottomGap: r1(win.innerHeight - ir.bottom)
+        };
+      })() : null,
       gapRight: r1(contentW - cb.width),
       fillPct: r1(100 * cb.width / contentW),
       vpRightGap: r1(win.innerWidth - bb.right),
@@ -217,7 +233,7 @@ const bad = (x) => x.err;
 
 const fmt = (v, n = 1) => (v === null || v === undefined ? '-' : Number(v).toFixed(n));
 if (VERBOSE || rows.length !== WIDTHS.length) {
-  console.log(' 视口 | 窄 | 面板 WxH      | 内容宽 | 画布 WxH      | 右空白 | 铺满% | 头行溢 | 提示溢 | 山川志净距');
+  console.log(' 视口 | 窄 | 面板 WxH      | 内容宽 | 画布 WxH      | 右空白 | 铺满% | 头行溢 | 提示溢 | 山川志 xy');
   for (const x of rows) {
     if (bad(x)) { console.log('  ' + x.tag + '  ✘ ' + x.err); continue; }
     console.log([
@@ -230,7 +246,7 @@ if (VERBOSE || rows.length !== WIDTHS.length) {
       String(fmt(x.fillPct)).padStart(6),
       String(fmt(x.head && x.head.overflowPx)).padStart(6),
       String(fmt((x.hint && x.hint.scrollW - x.hint.clientW) || 0)).padStart(6),
-      String(fmt(x.infoGap)).padStart(10),
+      x.info ? (x.info.x + ',' + x.info.y) : '缺失',
     ].join(' | '));
   }
 }
@@ -285,9 +301,17 @@ judge('头行/提示行都不溢出面板 (按钮不被截)', (x) => {
   return '';
 });
 
-judge('山川志 (#info) 停在小地图上方, 不重叠 (净距 >= 6px)', (x) => {
-  if (x.infoGap === null) return '#info 缺失';
-  return x.infoGap < 6 ? ('净距 ' + x.infoGap + 'px ⇒ 压住了小地图') : '';
+judge('山川志 (#info) 完整落在视口内 (可拖动浮窗: 位置由 JS 写, 拖到哪都不许出界)', (x) => {
+  if (!x.info) return '#info 缺失';
+  if (!x.info.inView) return ('rect ' + x.info.x + ',' + x.info.y + ' ' + x.info.w + 'x' + x.info.h +
+                             ' ⇒ 超出视口 ' + x.vw + 'x' + x.vh);
+  return '';
+});
+
+judge('山川志默认位置不压小地图 (宽屏右下 / 窄屏右上, 见 main.js placeInfoAt)', (x) => {
+  if (!x.info) return '#info 缺失';
+  return x.info.overMinimap ? ('与 #minimapBox 重叠 (右下留白 ' + x.info.vpRightGap + '/' +
+                               x.info.vpBottomGap + 'px)') : '';
 });
 
 judge('画布外框不出视口', (x) => {

@@ -138,13 +138,17 @@ async function main() {
       return JSON.stringify({
         metaStatus: metaStatus,
         data: window.__data ? window.__data() : null,
-        sectName: (document.querySelector('#sectBody .sec-name') || {}).textContent || '',
-        sectRows: (document.querySelectorAll('#sectBody .kv') || []).length,
-        sectTags: (document.querySelectorAll('#sectBody .tag') || []).length,
+        /* 2026-11-24: 题名牌/宗门录已删 —— 探针只留当前还存在的 HUD 元素 */
+        infoOpen: !document.getElementById('info').classList.contains('hidden'),
+        infoRect: (function () {
+          var r = document.getElementById('info').getBoundingClientRect();
+          return Math.round(r.left) + ',' + Math.round(r.top) + ',' +
+                 Math.round(r.width) + ',' + Math.round(r.height);
+        })(),
         /* HUD 几何: 面板错位/被压这类问题在缩放图上肉眼看不准, 直接报边框 */
         hud: (function () {
           var out = [];
-          var ids = ['titleBox', 'sectBox', 'controls', 'minimapBox', 'info'];
+          var ids = ['controls', 'minimapBox', 'info'];
           for (var i = 0; i < ids.length; i++) {
             var el = document.getElementById(ids[i]);
             if (!el) { out.push(ids[i] + ':absent'); continue; }
