@@ -1,5 +1,6 @@
 using Zongmen;
 using Zongmen.Services;
+using Zongmen.Storage;
 using Zongmen.Web;
 
 /* ============================================================
@@ -29,6 +30,11 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{options.Port}");
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton(new MapWorldService(options, contentRoot));
 
+/* 小队存档: 独立 Crew 表 (不塞 Data(Key,Value) —— 会被 PruneExcept 静默清掉,
+   与 WorldLedger 同一个坑)。PersistEnabled=false 时降级为仅内存。 */
+builder.Services.AddSingleton(new CrewStore(
+    options.PersistEnabled ? ZongmenPaths.ResolveDbPath(options, contentRoot) : null));
+
 var app = builder.Build();
 
 /* 前端代理在前, /api/* 与 /ws/* 自动放行给端点 */
@@ -36,6 +42,8 @@ app.UseMiddleware<StaticWebMiddleware>(webDir);
 app.UseMiddleware<ApiRateLimitMiddleware>();   // R6: per-IP 限流, 保护 tile/fields 即时计算不被钉死
 app.UseWebSockets();                           // WebSocket 单块接口 (设计 §三/§五)
 MapEndpoints.Map(app, app.Services.GetRequiredService<MapWorldService>());
+/* 小队数据 (/api/crew): GET 取 / PUT 全量覆盖 / POST patch 增量 / DELETE 清空 */
+CrewEndpoints.Map(app, app.Services.GetRequiredService<CrewStore>());
 /* R11: 引擎脚本目录一并交给 WS 处理器 —— 前端按 seed 自算地形需要
    noise/mapgen-config/mapgen 三件套, 由 WS 下发 (单真源, 见 MapWsHandler.HandleScriptAsync)。 */
 MapWsHandler.Map(app, app.Services.GetRequiredService<MapWorldService>(),
