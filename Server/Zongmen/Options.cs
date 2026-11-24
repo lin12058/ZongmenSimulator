@@ -14,8 +14,32 @@ public sealed class ZongmenOptions
     public int MaxSeeds { get; set; } = 4;
     public bool PersistEnabled { get; set; } = true;
 
+    /// <summary>每人每世可立的宗门数上限 (P0 = 1, 方案 §六「一世 1 个」)。
+    /// ⚠ 口径是**按账号**而非按世界: demo 鉴权下"任意非空账号即登录", 若按世界限制,
+    ///   第一个进入的玩家就把整世锁死了 —— 显然不是本意。</summary>
+    public int PlayerSectMaxPerAccount { get; set; } = 1;
+
+    /// <summary>每座宗门可带**附属城镇**数上限; 0 = 不限 (默认)。
+    /// 用户 2026-09-23: 「先不限制, 后续会根据等级来限制」⇒ 这就是那个钩子:
+    ///   判定目前是 `CountTowns(account, round) >= PlayerTownMaxPerSect` (0 = 短路放行);
+    ///   将来改成 `>= f(本宗 tier)` 时, 存储层已按 (Account,Round,Id) + SectId 支持多行,
+    ///   结构不用再动。距离/地形/领地三条硬判据**不在这里** —— 它们在引擎里
+    ///   (EXPAND_R / placeCheckJson), 本条只是"还能不能再建一座"的数量闸。</summary>
+    public int PlayerTownMaxPerSect { get; set; }
+
     /// <summary>js 沙箱脚本目录 (noise.js/mapgen.js/mapgen-server.js)。</summary>
     public string? EngineJsDir { get; set; }
+
+    /// <summary>城市迭代子系统的 js 目录 (city-evo.js)。
+    /// 2026-10-11 目录重构: 该脚本随 City 子系统搬到 Subsystems/City/js,
+    /// 不再是引擎公共目录的一员。留空则自动定位 Subsystems/City/js。</summary>
+    public string? CityJsDir { get; set; }
+    /// <summary>
+    /// 世界时钟与 Tick 演化框架配置 (appsettings.json "Zongmen:Tick" 节)。
+    /// 详见 <see cref="Time.TickOptions"/> 与 docs/游戏时钟与Tick演化框架方案.md。
+    /// ⚠ 总开关默认 true, 但**只有绑定世界后才真正开始推进** —— 未绑定时泵只空转。
+    /// </summary>
+    public Time.TickOptions Tick { get; set; } = new();
 }
 
 /// <summary>静态解析器: 定位工程根 / web / 引擎脚本 / 数据库。</summary>
@@ -47,6 +71,27 @@ public static class ZongmenPaths
         var cand = Path.Combine(root, "Server", "Zongmen", "Engine", "js");
         if (Directory.Exists(cand)) return cand;
         return Path.Combine(contentRoot, "Engine", "js");
+    }
+
+    /// <summary>城市迭代子系统的 js 目录 (city-evo.js)。见 <see cref="ZongmenOptions.CityJsDir"/>。</summary>
+    public static string ResolveCityJsDir(ZongmenOptions o, string contentRoot)
+    {
+        if (!string.IsNullOrEmpty(o.CityJsDir) && Directory.Exists(o.CityJsDir))
+            return o.CityJsDir!;
+        var root = FindRoot(contentRoot);
+        var cand = Path.Combine(root, "Server", "Zongmen", "Subsystems", "City", "js");
+        if (Directory.Exists(cand)) return cand;
+        return Path.Combine(contentRoot, "Subsystems", "City", "js");
+    }
+
+    /// <summary>角色子系统目录 (Subsystems/Characters; 内含 js/chargen-core.js 与
+    /// data/cultivation-base.json)。跑法见 Subsystems/Characters/README.md。</summary>
+    public static string ResolveCharactersDir(ZongmenOptions o, string contentRoot)
+    {
+        var root = FindRoot(contentRoot);
+        var cand = Path.Combine(root, "Server", "Zongmen", "Subsystems", "Characters");
+        if (Directory.Exists(cand)) return cand;
+        return Path.Combine(contentRoot, "Subsystems", "Characters");
     }
 
     public static string ResolveDbPath(ZongmenOptions o, string contentRoot)

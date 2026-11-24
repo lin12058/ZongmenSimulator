@@ -218,6 +218,15 @@ function judge(name, fn) {
 const pick = (tag) => rows.find((x) => x.tag === tag) || {};
 const hy = pick('hybrid'), sv = pick('server'), abm = pick('ab');
 
+/* 掩码期望值 —— 由 PB.MASK 位定义推导，**不再硬编码 30/31**：
+     ALL=63, CHUNK=1, PEOPLE=32;
+     基础世界层 = ALL & ~PEOPLE = 31（热力图默认关 ⇒ 前端剔掉 PEOPLE 位）;
+     本地算档再去 CHUNK 位 ⇒ 30。
+   ⚠ 旧写法把 30 / 31 当字面量，只在「people 开关默认关」下侥幸成立；
+     一旦默认打开（或测试里打开热力图）立刻假红。 */
+const MASK_BASE = 63 & ~32;         // 31: ALL & ~PEOPLE
+const MASK_LOCAL = MASK_BASE & ~1;  // 30: 再去 CHUNK
+
 /* ① 三档都必须把块落到 chunkData (否则后面全是空断言) */
 judge('三档都真的加载了地形块 (chunksLocal >= 6)', (x) => {
   if (x.err) return x.err;
@@ -225,25 +234,25 @@ judge('三档都真的加载了地形块 (chunksLocal >= 6)', (x) => {
   return x.probe.chunksLocal >= 6 ? '' : ('只落了 ' + x.probe.chunksLocal + ' 块');
 });
 
-/* ② hybrid: 引擎就绪 + 本地算生效 + **实际**请求掩码 = 30 */
-judge('hybrid 档: 引擎就绪, 本地算生效, 实际请求掩码 = 30 (去掉 CHUNK 位)', (x) => {
+/* ② hybrid: 引擎就绪 + 本地算生效 + **实际**请求掩码 = MASK_LOCAL */
+judge('hybrid 档: 引擎就绪, 本地算生效, 实际请求掩码 = ' + MASK_LOCAL + ' (去掉 CHUNK 位)', (x) => {
   if (x.tag !== 'hybrid') return '';
   if (x.err) return x.err;
   const p = x.probe;
   if (!p) return '__calcProbe 缺失';
   if (!p.local) return 'CALC.local = false (引擎未就绪或指纹漂移)';
-  if (p.maskEff !== 30) return 'maskEff = ' + p.maskEff + ' (期望 30)';
+  if (p.maskEff !== MASK_LOCAL) return 'maskEff = ' + p.maskEff + ' (期望 ' + MASK_LOCAL + ')';
   if (!p.calc || !p.calc.ready) return '引擎未 ready';
   if (!p.calc.seed) return '引擎 seed 未应用';
   return '';
 });
-judge('server 档: 未启用本地算, 实际请求掩码 = 31 (老链路一行不改)', (x) => {
+judge('server 档: 未启用本地算, 实际请求掩码 = ' + MASK_BASE + ' (老链路一行不改)', (x) => {
   if (x.tag !== 'server') return '';
   if (x.err) return x.err;
   const p = x.probe;
   if (!p) return '__calcProbe 缺失';
   if (p.local) return 'CALC.local = true (server 档不该启用)';
-  if (p.maskEff !== 31) return 'maskEff = ' + p.maskEff + ' (期望 31)';
+  if (p.maskEff !== MASK_BASE) return 'maskEff = ' + p.maskEff + ' (期望 ' + MASK_BASE + ')';
   return '';
 });
 
@@ -269,8 +278,8 @@ judge('server 档对照: 服务端照旧下发 (chunkPkts > 0, 证明计数有�
 judge('真页面逐位比对: 至少 3 块, 0 处差异 (本地数组 ≡ PB.chunkToArrays 结果)', (x) => {
   if (x.tag !== 'ab') return '';
   if (x.err) return x.err;
-  if (x.probe && x.probe.maskEff !== 31) {
-    return 'maskEff = ' + x.probe.maskEff + ' —— 对拍档须带 CHUNK 位才拿得到服务端块';
+  if (x.probe && x.probe.maskEff !== MASK_BASE) {
+    return 'maskEff = ' + x.probe.maskEff + ' —— 对拍档须带 CHUNK 位才拿得到服务端块 (期望 ' + MASK_BASE + ')';
   }
   const ab = x.probe && x.probe.ab;
   if (!ab) return 'ab 段缺失';

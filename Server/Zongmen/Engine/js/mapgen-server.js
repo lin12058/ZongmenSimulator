@@ -180,6 +180,17 @@
         if (MG.hexDist(ri.q, ri.r, ccq, ccr) <= reach) regions.push([i, j]);
       }
     }
+    /* ⚠ 玩家宗门 (ext) 的归属格可能落在本几何判据**之外** (它的区域中心离块中心 > reach,
+       而实体本身就在块里) —— 不补这一笔, 玩家宗门**永远画不出来** (无异常、无日志)。
+       ext 数量 = 每账号每世一座, 代价可忽略。 */
+    var exr = MG.externalRegionsWithin(ccq, ccr, reach + MG.REGION_M);
+    for (var xr = 0; xr < exr.length; xr++) {
+      var dup = false;
+      for (var rq = 0; rq < regions.length; rq++) {
+        if (regions[rq][0] === exr[xr][0] && regions[rq][1] === exr[xr][1]) { dup = true; break; }
+      }
+      if (!dup) regions.push(exr[xr]);
+    }
     var k0 = Math.floor((ccq - CL) / CL) - 1, k1 = Math.floor((ccq + CL) / CL) + 1;
     var l0 = Math.floor((ccr - CL) / CL) - 1, l1 = Math.floor((ccr + CL) / CL) + 1;
     var comms = [];
@@ -267,9 +278,204 @@
       seaLevel: MG.SEA_LEVEL, biomeMeta: MG.BIOME_META,
       /* 五行/异灵根配色: 与 biomeMeta 同理交给客户端 (前端曾各自复制一份字面量,
          必须人工同步 —— 改色板时极易漂移。现由 meta 单点下发) */
-      elementRGB: MG.ELEMENT_RGB, variantRGB: MG.VARIANT_RGB
+      elementRGB: MG.ELEMENT_RGB, variantRGB: MG.VARIANT_RGB,
+      /* 领地半径表 (DOMAIN_R) + 最小间距 + 足迹半径: 前端画「领地圈」和做落点预览
+         都必须用**服务端这一份**, 不许自己复制字面量 (同 elementRGB 的教训)。
+         ⚠ 这张表在 C# 侧**没有**镜像 —— 判定只在引擎里做 (domainCheck), 表也只从这里
+           下发。check_domain_radius.mjs 断言「全仓库只有一处 DOMAIN_R 字面量」。 */
+      domainR: MG.CFG.DOMAIN_R, settleMinDist: MG.CFG.SETTLE_MIN_DIST, townR: MG.CFG.TOWN_R,
+      /* 城市扩张 (附属城镇): 辖域半径 + 允许的聚落类型 —— 同 domainR 口径, 只从这里下发。
+         前端用它画「本宗辖域环」(外圈) 与档位下拉 (镇/村); 判定仍在引擎 (expandCheck)。 */
+      expandR: MG.CFG.EXPAND_R, expandTypes: MG.CFG.EXPAND_TYPES
     };
     return JSON.stringify(meta);
+  }
+
+  /* ============================================================
+   * 玩家宗门放置 (2026-09-23 方案 §3.3) —— 服务端编排出口
+   * ------------------------------------------------------------
+   * 与地图数据出口的区别: 这里是**写操作**, 会改 VM 内的 ext 层与 roadCache。
+   * 因此三条硬约束:
+   *   ① 一次提交必须在**同一个 V8 门闩调用**里做完 (清缓存 → 重算路 → 版本号 +1),
+   *      否则「路已重算但版本号未前进」的中间态会被并发请求看见;
+   *   ② roadVer **只能 +1, 绝不归零** (宿主 ObserveRoadVer 单调取大 ⇒ 归零 = 路永远送不出去);
+   *   ③ 返回的 blocks = 客户端必须重拉的块 —— 前端对**已加载**的块不会自动重拉
+   *      (updateStreaming 的队列条件含 `!chunkData.has(key)`), 所以这份名单是必需的。
+   * ============================================================ */
+
+  /* 脏区块集合 (矩形包围盒 + 余量)。
+     为什么是「包围盒 + 大余量」而不是精确反查: 一个块请求会带上「与块中心距离
+     ≤ CHUNK_SCAN + REGION_M (=33) 的区域格」, 而区域格中心本身可离它的代表格 ~10 格
+     ⇒ 区块中心的容差 ≈ 43 格 ≈ 2 个区块间距 (21); 再留 2 环余量 ⇒ PAD = 4。
+     ⚠ 宁可多标 (多标只是让客户端多拉一次内容相同的块), 绝不漏标 (漏标 = 画面永久陈旧)。 */
+  var DIRTY_BLOCK_PAD = 4;
+  function dirtyBlocksFor(tiles) {
+    var minCa = 1e18, maxCa = -1e18, minCb = 1e18, maxCb = -1e18;
+    for (var n = 0; n < tiles.length; n++) {
+      var cc = MG.chunkOfTile(tiles[n][0], tiles[n][1]);
+      if (cc.ca < minCa) minCa = cc.ca;
+      if (cc.ca > maxCa) maxCa = cc.ca;
+      if (cc.cb < minCb) minCb = cc.cb;
+      if (cc.cb > maxCb) maxCb = cc.cb;
+    }
+    if (minCa > maxCa) return [];
+    var out = [];
+    for (var ca = minCa - DIRTY_BLOCK_PAD; ca <= maxCa + DIRTY_BLOCK_PAD; ca++)
+      for (var cb = minCb - DIRTY_BLOCK_PAD; cb <= maxCb + DIRTY_BLOCK_PAD; cb++)
+        out.push([ca, cb]);
+    return out;
+  }
+
+  var REGION_ROAD_BUDGET0 = REGION_ROAD_BUDGET;
+
+  /* 落点校验 (悬停即问): 一次调用把 §2.3 判据链 5~7 全部算完, 免得前端每 150ms
+     灌一串 V8 往返。⚠ 判据 1/2/3/9 (seed 新鲜度 / 登录 / 配额 / 名字) 是**服务端
+     自身状态**, 不在这里 —— 服务端拿到本结果后再叠上去 (见 MapWorldService.PlaceCheck)。
+
+     modeJson (第 4 参, 可空): { type, aq, ar, maxR } —— 「拓土/扩张」档。
+       · type = 'sect'(默认, 立宗) 或 EXPAND_TYPES 白名单里的 town/village;
+       · aq/ar = **锚点**(本宗中心), maxR = 扩张半径 (>0 = 扩张档)。
+       ⚠ 锚点与半径由**服务端**从 PlayerSect 台账推出来再传进来, 不接受前端直传的
+         坐标 —— 前端那份只是画圈用的显示口径 (同 DOMAIN_R: 判定永不信任客户端)。 */
+  function placeCheckJson(q, r, excludeId, modeJson) {
+    q = q | 0; r = r | 0;
+    var mode = {};
+    if (modeJson) {
+      try { mode = typeof modeJson === 'string' ? JSON.parse(modeJson) : modeJson; }
+      catch (e) { mode = {}; }
+    }
+    var type = mode.type ? String(mode.type) : 'sect';
+    var maxR = mode.maxR | 0;
+    var aq = mode.aq == null ? null : (mode.aq | 0);
+    var ar = mode.ar == null ? null : (mode.ar | 0);
+    var f = MG.fields(q, r);
+    var vn = MG.veinNear(q, r);
+    var veinD = vn ? vn.d : 99;
+    var rs = MG.regionSeedOf(q, r);
+    var dom = MG.domainCheck(q, r, excludeId || '');
+    var ex = MG.expandCheck(q, r, aq, ar, maxR);
+    var deep = f.biome === MG.BIOME.DEEP;
+    var onVein = !!f.vein;
+    var veinNearEnough = veinD >= (MG.CFG.SETTLE_VEIN_FOOT_PAD | 0);
+    var spirit = MG.spiritAt(q, r);
+    var spOk = spirit >= MG.CFG.SEA_SETTLE_MIN_SPIRIT;
+    /* 类型白名单: 扩张档只认 EXPAND_TYPES; 立宗档只认 'sect' */
+    var typeOk = (maxR > 0) ? MG.isExpandType(type) : (type === 'sect');
+    /* 判据优先级 (单一 reason, 取第一条命中的):
+       bad_type → too_far → 深海 → 灵脉 → 领地 → 灵机。
+       为什么 too_far 排在深海/灵脉**之前**: 扩张档下「超出本宗辖域」是最强解释 ——
+       半径 10 之外满地都是, 若让深海/灵脉先命中, 悬停到 50 格外只会看到「深海之上
+       不可立」这种跟本次动作无关的提示。半径之内的格 dist<=maxR ⇒ too_far 恒不命中,
+       故深海/灵脉/领地三条的原有语义**一格都没被遮挡**。 */
+    var reason = '';
+    if (!typeOk) reason = 'bad_type';
+    else if (!ex.ok) reason = 'too_far';
+    else if (deep) reason = 'deep_water';
+    else if (onVein) reason = 'on_vein';
+    else if (!veinNearEnough) reason = 'on_vein';
+    else if (!dom.ok) reason = 'too_close';
+    else if (!spOk) reason = 'spirit_too_low';
+    return JSON.stringify({
+      ok: 1, q: q, r: r,
+      can: reason === '',
+      reason: reason,
+      type: type,
+      deep: deep, onVein: onVein, veinD: veinD,
+      spirit: spirit, spiritMin: MG.CFG.SEA_SETTLE_MIN_SPIRIT,
+      biome: f.biome, elev: f.e,
+      regionI: rs.i, regionJ: rs.j,
+      blocker: dom.blocker,
+      /* 扩张档: 距本宗的实测距离 + 上限 (前端画「辖域环」与文案都用这两个数) */
+      expand: { dist: ex.dist, maxR: ex.maxR },
+      anchor: aq == null ? null : { q: aq, r: ar },
+      /* 前端画「领地圈」用: 附近聚落的中心 + 领地半径 (含它们自己也是候选障碍) */
+      near: nearbyDomains(q, r),
+      /* 自己已有的宗门 (用于「原地重建」时豁免) */
+      excludeId: excludeId || ''
+    });
+  }
+
+  /* 附近聚落的 {q,r,tier,type,need,dist} —— 供前端画圈与落点预览。
+     范围 = 12 格 (最大 DOMAIN_R = 8, 留 4 格余量给"圈画得出来")。 */
+  function nearbyDomains(q, r) {
+    var M = MG.REGION_M;
+    var ci = Math.floor(q / M), cj = Math.floor(r / M);
+    var out = [], seen = {};
+    for (var di = -1; di <= 1; di++) {
+      for (var dj = -1; dj <= 1; dj++) {
+        var arr = MG.settlementsFor(ci + di, cj + dj);
+        for (var n = 0; n < arr.length; n++) {
+          var st = arr[n];
+          if (seen[st.id]) continue;
+          seen[st.id] = 1;
+          var d = MG.hexDist(q, r, st.q, st.r);
+          if (d > 12) continue;
+          var need = MG.domainRadiusOf(st);
+          if (need <= 0) continue;
+          out.push({ id: st.id, type: st.type, tier: st.tier | 0, q: st.q, r: st.r,
+                     dist: d, need: need, name: st.name || '' });
+        }
+      }
+    }
+    out.sort(function (a, b) { return a.dist - b.dist; });
+    return out;
+  }
+
+  /* 提交落点 —— 方案 §3.3 的七步同步序列 (在 V8 门闩内一次做完)。
+     optsJson: { type, tier, name, owner, aq, ar, maxR } —— aq/ar/maxR 只在扩张档有值。
+     ⚠ 步 0 的**二次校验不是冗余**: 服务端 PlaceCommit 会重跑 CheckCore (含 placeCheckJson),
+       但那条链依赖调用方把同一份 aq/ar/maxR 传对; 这里独立再判一次, 让「传错了参数」
+       表现为明确的 { ok:0, reason } 而不是默默按无锚点落一座 (无异常无日志)。 */
+  function commitPlace(q, r, optsJson) {
+    var t0 = Date.now();
+    var opts = {};
+    if (optsJson) {
+      try { opts = typeof optsJson === 'string' ? JSON.parse(optsJson) : optsJson; }
+      catch (e) { opts = {}; }
+    }
+    /* 步 0: 类型白名单 + 扩张半径 (在动引擎状态之前拒 —— 别把坏落点写进 ext 层) */
+    var type = opts.type ? String(opts.type) : 'sect';
+    var maxR = opts.maxR | 0;
+    var aq = opts.aq == null ? null : (opts.aq | 0);
+    var ar = opts.ar == null ? null : (opts.ar | 0);
+    if (!((maxR > 0) ? MG.isExpandType(type) : (type === 'sect')))
+      return JSON.stringify({ ok: 0, reason: 'bad_type', type: type });
+    var ex = MG.expandCheck(q, r, aq, ar, maxR);
+    if (!ex.ok)
+      return JSON.stringify({ ok: 0, reason: 'too_far', dist: ex.dist, maxR: ex.maxR });
+    /* 步 1: 引擎侧放置 (id 由引擎按 {区域i}_{区域j}_u{n} 生成) */
+    var st = MG.placeSettlement(q, r, opts);
+    var rs = MG.regionSeedOf(st.q, st.r);
+    /* 步 2: 清派生状态 (需求边 / 骨架 / 道路 / roadFail / 足迹) —— 五个坑的正面处理 */
+    var clr = MG.clearRoadSideFor(rs.i, rs.j, 0, [st.id]);
+    /* 步 3: 同步重算受影响区域的**全部**道路 (预算 = 无上限, 与区域包同口径)。
+       实测 25 个区域格 ≈ 400~450ms (热地形) —— 这就是用户要的「放下去时附近直接重算」。 */
+    var tiles = [[st.q, st.r]];
+    for (var n = 0; n < clr.regions.length; n++) {
+      var ri = MG.regionInfo(clr.regions[n][0], clr.regions[n][1]);
+      tiles.push([ri.q, ri.r]);
+    }
+    for (var n2 = 0; n2 < clr.regions.length; n2++)
+      MG.roadsNear(clr.regions[n2][0], clr.regions[n2][1], REGION_ROAD_BUDGET0);
+    /* 步 4: 统计本次真正挂在玩家宗门上的道路 (新路) */
+    function onSt(k) { var ids = k.split('|'); return ids[0] === st.id || ids[1] === st.id; }
+    var nRoad = 0;
+    MG.roadCache.forEach(function (_v, k) { if (onSt(k)) nRoad++; });
+    /* 步 5: 道路版本号 +1 (必须在道路重算**之后** —— 先建后报) */
+    var ver = MG.bumpRoadVer();
+    /* 步 6: 脏区块 (客户端必须重拉的那些块) */
+    var blocks = dirtyBlocksFor(tiles);
+    return JSON.stringify({
+      ok: 1, ms: Date.now() - t0,
+      st: settlementJson(st),
+      regionI: rs.i, regionJ: rs.j,
+      roadVer: ver,
+      regions: clr.regions,
+      cross: clr.cross,
+      blocks: blocks,
+      nRoad: nRoad,
+      cleared: clr.n
+    });
   }
 
   global.MapGenServer = {
@@ -284,7 +490,165 @@
     metaJson: metaJson,
     /* 道路版本号: tile 缓存新鲜度校验用 (roadCache 新增道路即 +1) */
     roadVersion: function () { return MG.roadVersion(); },
+    /* ---- 玩家宗门放置 (2026-09-23 方案 §2.4/§3.3) ----
+       ⚠ 每一个新出口都必须在 JsEngineHost.Call 的 switch 白名单里加 case ——
+       漏了就是 `InvalidOperationException: 未知 JS 函数` (运行时才炸, 编译期不报)。 */
+    placeCheckJson: placeCheckJson,
+    commitPlace: commitPlace,
+    setExternalSettlements: function (json) {
+      var list = [];
+      if (json) { try { list = typeof json === 'string' ? JSON.parse(json) : json; } catch (e) { list = []; } }
+      var r = MG.setExternalSettlements(list);
+      return JSON.stringify(r);
+    },
+    externalSettlementsJson: function () {
+      return JSON.stringify({ list: MG.externalSettlements() });
+    },
+    removeExternalSettlement: function (id) {
+      return JSON.stringify({ ok: MG.removeExternalSettlement(String(id)) ? 1 : 0 });
+    },
+    domainCheckJson: function (q, r, excludeId) {
+      return JSON.stringify(MG.domainCheck(q | 0, r | 0, excludeId || ''));
+    },
+    /* 扩张判据 (距本宗 <= maxR) —— 与 domainCheckJson 对称的只读出口, 验证脚本用 */
+    expandCheckJson: function (q, r, aq, ar, maxR) {
+      return JSON.stringify(MG.expandCheck(q | 0, r | 0, aq | 0, ar | 0, maxR | 0));
+    },
+    domainRadius: function (type, tier) {
+      return MG.domainRadiusOf({ type: String(type), tier: tier | 0 });
+    },
+    archetypeOf: function (type, tier) {
+      return MG.archetypeOf({ type: String(type), tier: tier | 0 });
+    },
+    /* 道路版本号强制前进 (拆除/外部改动后手工推进时用) */
+    bumpRoadVer: function () { return MG.bumpRoadVer(); },
+    /* ---- P2 城市迭代演化器 (city-evo.js · global.CityEvo) ----
+       ⚠ 同上铁律: 每个出口都要在 JsEngineHost.Call 加 case。
+       ⚠ 这里**不能**在赋值时就读 global.CityEvo —— bundle 序是
+         `… mapgen-server.js, city-evo.js`, 本文件求值那一刻 CityEvo 还不存在。
+         用 getter 延迟到**首次取用**再校验 (缺文件时给清晰错误, 而不是 C# 侧 NullReference)。 */
+    get CityEvo() {
+      var CE = global.CityEvo;
+      if (!CE) throw new Error('city-evo.js 未加载 (bundle 序应为 noise, mapgen-config, mapgen, mapgen-server, city-evo)');
+      return CE;
+    },
     /* 统计/自检钩子 */
-    _countVeins: function () { return JSON.stringify({ n: MG.countVeins() }); }
+    _countVeins: function () { return JSON.stringify({ n: MG.countVeins() }); },
+    /* ---- 地图人物分布 (2026-10-11 · 方案 `待办事项/地图人物分布-实施方案.md` v2) ----
+       只回答「谁在哪一格 / 这一格几个人」; 「是谁 / 多少战力」由角色子系统 (独立 V8) 现算。 */
+    peopleBlockJson: function (ca, cb) {
+      return JSON.stringify({ ca: ca | 0, cb: cb | 0, tiles: peopleBlockTiles(ca | 0, cb | 0) });
+    },
+    peopleAtJson: peopleAtJson
+  };
+
+  /* ============================================================
+   * 地图人物分布 —— 落人格 (派生在核心 VM: 这里有骨架 + 地形)
+   * ------------------------------------------------------------
+   * ★ 为什么不在角色 VM 里做: 落人格要知道「哪些格是聚落 / 哪些格是陆地」——
+   *   那是本模块 (settlementsFor / fields) 的知识; 角色 VM 是纯数据模块
+   *   (不载 mapgen-server.js, AcceptsExternalSettlements=false)。两个 V8 各管一段。
+   *
+   * ★ 纯派生: 同一 (seed, ca, cb) ⇒ 逐字节一致; **绝不落库**, 也不进 chunk/region 包
+   *   (一旦落库, 淘汰后 ReadSqlBackfill 会把旧包捞回来 ⇒ 「人一会儿跳回原样」)。
+   *
+   * ★ 属主分派: 每格只由「它自己的区块」(chunkOfTile) 上报。若按扫描半径 R 上报,
+   *   相邻两块的覆盖区重叠 ⇒ 同一格被两块各报一次 (客户端要么双画, 要么得先去重)。
+   * ============================================================ */
+  var _seedStr = '';
+  var PPL_PER_HEAD = 120;    // 每 120 人口 ⇒ 格上 1 个人
+  var PPL_CAP = 64;          // 单格人数硬上限 (被 personIndexOf 的 6 位槽位绑定, 改必同步)
+  var PPL_SCATTER_P = 0.03;  // 陆地散修格占比 (Q1「小部分随机分布」)
+
+  /* 纯函数哈希 (与 chargen-core.js 同族: FNV-1a 32bit)。seed 参与 ⇒ 换世即换分布。 */
+  function pplHash() {
+    var s = '', i;
+    for (i = 0; i < arguments.length; i++) s += (i ? '|' : '') + String(arguments[i]);
+    var h = 0x811c9dc5;
+    for (i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+    return (h >>> 0) / 4294967296;
+  }
+
+  /** 该 (q,r) 上第 k 个人的全局角色索引 —— **双射** (不同格必得不相交区间)。
+   *  值域 ≈ 2^46 < 2^53 ⇒ 前端 varint/JSON 都不溢出。k ∈ [0,64), 与 PPL_CAP 绑定。 */
+  function personIndexOf(q, r, k) {
+    return (((q + 524288) * 1048576) + (r + 524288)) * 64 + k;
+  }
+
+  /** 聚落人口 → 格上人数 (Q1 主聚集口径)。 */
+  function pplCountOf(st) {
+    var n = Math.round((st.pop || 0) / PPL_PER_HEAD);
+    if (n < 0) n = 0;
+    return n > PPL_CAP ? PPL_CAP : n;
+  }
+
+  /** 本块 (区块格 ca,cb) 的落人格: [{q,r,n,base}]。base = 该格第 0 人的索引。 */
+  function peopleBlockTiles(ca, cb) {
+    var ccq = ca * S, ccr = cb * S;
+    var R = MG.CHUNK_SCAN, M = MG.REGION_M, reach = R + M;
+    var out = [], seen = Object.create(null), i, j, s, dq, dr;
+    /* 1) 主聚集: 本块属主格上的聚落 (含 ext 玩家宗门) */
+    var i0 = Math.floor((ccq - reach) / M) - 1, i1 = Math.floor((ccq + reach) / M) + 1;
+    var j0 = Math.floor((ccr - reach) / M) - 1, j1 = Math.floor((ccr + reach) / M) + 1;
+    for (i = i0; i <= i1; i++) {
+      for (j = j0; j <= j1; j++) {
+        var sts = MG.settlementsFor(i, j);
+        for (s = 0; s < sts.length; s++) {
+          var st = sts[s];
+          if (st.type === 'poi') continue;
+          var oc = MG.chunkOfTile(st.q, st.r);
+          if (oc.ca !== ca || oc.cb !== cb) continue;      // 属主不是本块 ⇒ 交给那一块
+          var n = pplCountOf(st);
+          if (n <= 0) continue;
+          var key = st.q + ',' + st.r;
+          if (seen[key]) continue;
+          seen[key] = 1;
+          out.push({ q: st.q, r: st.r, n: n, base: personIndexOf(st.q, st.r, 0) });
+        }
+      }
+    }
+    /* 2) 副散布: 属主格为陆地且在阈值内的散修 (Q1「小部分随机分布」) */
+    for (dq = -R; dq <= R; dq++) {
+      for (dr = -R; dr <= R; dr++) {
+        if (MG.hexDist(dq, dr, 0, 0) > R) continue;
+        var q = ccq + dq, r = ccr + dr, ck = q + ',' + r;
+        if (seen[ck]) continue;
+        var oc2 = MG.chunkOfTile(q, r);
+        if (oc2.ca !== ca || oc2.cb !== cb) continue;      // 只报属主格 (天然不重叠)
+        var f = MG.fields(q, r);
+        if (!f || f.biome < 2) continue;                   // biome 0/1 = 深海 / 浅海
+        if (pplHash(_seedStr, 'sc', q, r) >= PPL_SCATTER_P) continue;
+        seen[ck] = 1;
+        out.push({ q: q, r: r, n: 1, base: personIndexOf(q, r, 0) });
+      }
+    }
+    return out;
+  }
+
+  /** 单格落人格 (点击详情用)。⚠ 必须与 peopleBlockTiles 同口径 —— 同格的 n 必须一致,
+   *  否则「热力图人数」与「点开看到的小队人数」对不上 (静默不一致)。 */
+  function peopleAtJson(q, r) {
+    q = q | 0; r = r | 0;
+    var n = 0, kind = 'none', s;
+    var rs = MG.regionSeedOf(q, r);
+    var sts = MG.settlementsFor(rs.i, rs.j);
+    for (s = 0; s < sts.length; s++) {
+      if (sts[s].q === q && sts[s].r === r) {
+        if (sts[s].type !== 'poi') { n = pplCountOf(sts[s]); if (n > 0) kind = 'settle'; }
+        break;
+      }
+    }
+    if (n <= 0) {
+      var f = MG.fields(q, r);
+      if (f && f.biome >= 2 && pplHash(_seedStr, 'sc', q, r) < PPL_SCATTER_P) { n = 1; kind = 'scatter'; }
+    }
+    return JSON.stringify({ q: q, r: r, n: n, base: personIndexOf(q, r, 0), kind: kind });
+  }
+
+  /* 记下 seed (散布哈希要用) —— 包一层 init, 不改上面的字面量 (同文件一次一条 Edit 的纪律)。 */
+  var _pplOrigInit = global.MapGenServer.init;
+  global.MapGenServer.init = function (seed) {
+    _seedStr = String(seed);
+    return _pplOrigInit(seed);
   };
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));

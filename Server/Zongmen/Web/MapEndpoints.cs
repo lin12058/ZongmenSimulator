@@ -41,6 +41,24 @@ public static class MapEndpoints
             Results.Text(svc.WorldListJson(n is > 0 and <= 200 ? n.Value : 20), "application/json; charset=utf-8"));
     }
 
+    /* ---- 世界时钟 (docs/游戏时钟与Tick演化框架方案.md v2.1) ----
+       ⚠ 时钟与种子同级, 是**服务端资产**: 前端只能读, **绝不回落前端自造**
+         (对齐既有「种子绝不回落前端造」的规矩 —— 自造时钟 = 每个标签页一个时间线)。
+       ⚠ 每秒一帧推 WS 会与 Tile 响应抢带宽 ⇒ 本端点给「基准值」, 客户端**本地插值**
+         (`tick + elapsed/1000`), 每 10 tick 校准一次。 */
+    public static void MapClock(WebApplication app, Zongmen.Time.TickPump pump)
+    {
+        app.MapGet("/api/clock", () =>
+            Results.Text(
+                System.Text.Json.JsonSerializer.Serialize(pump.Snapshot()),
+                "application/json; charset=utf-8"));
+
+        app.MapGet("/api/clock/stats", () =>
+            Results.Text(
+                System.Text.Json.JsonSerializer.Serialize(pump.Stats()),
+                "application/json; charset=utf-8"));
+    }
+
     /* 调试钩子: 接收前端自截图 PNG, 保存到 verify/capture.png 供自动化截图验证 */
     public static void MapDebug(WebApplication app, string savePath)
     {

@@ -25,7 +25,7 @@ public static class MapWsHandler
        适配层 (落库/JSON 出口), 浏览器侧不需要, 故不下发。 */
     private static readonly string[] EngineScriptOrder = ["noise.js", "mapgen-config.js", "mapgen.js"];
 
-    public static void Map(WebApplication app, MapWorldService svc, string engineJsDir)
+    public static void Map(WebApplication app, MapWorldService svc, string engineJsDir, Zongmen.Time.TickPump? pump = null)
     {
         app.MapGet("/ws/map", async (HttpContext ctx) =>
         {
@@ -53,7 +53,7 @@ public static class MapWsHandler
                     switch (type)
                     {
                         case WsFrame.Login:
-                            await HandleLoginAsync(ws, session, recvBuf, count, ctx.RequestAborted);
+                            await HandleLoginAsync(ws, svc, session, recvBuf, count, ctx.RequestAborted);
                             break;
 
                         case WsFrame.Tile:
@@ -68,6 +68,20 @@ public static class MapWsHandler
                             await HandleScriptAsync(ws, engineJsDir, recvBuf, count, ctx.RequestAborted);
                             break;
 
+                        /* ---- 玩家宗门放置 (方案 §4.1) ---- */
+                        case WsFrame.PlaceCheck:
+                            await HandlePlaceCheckAsync(ws, svc, session, recvBuf, count, ctx.RequestAborted);
+                            break;
+
+                        case WsFrame.PlaceCommit:
+                            await HandlePlaceCommitAsync(ws, svc, session, recvBuf, count, ctx.RequestAborted);
+                            break;
+
+                        /* ---- Tick 框架: 世界时钟 (方案 §10 接线点 #6) ---- */
+                        case WsFrame.ClockQuery:
+                            await HandleClockAsync(ws, pump, recvBuf, count, ctx.RequestAborted);
+                            break;
+
                         default:
                             /* 未知类型: 忽略 (前向兼容) */
                             break;
@@ -80,7 +94,7 @@ public static class MapWsHandler
     }
 
     private static async Task HandleLoginAsync(
-        WebSocket ws, WsSession session, byte[] buf, int count, CancellationToken ct)
+        WebSocket ws, MapWorldService svc, WsSession session, byte[] buf, int count, CancellationToken ct)
     {
         LoginRequest req;
         try
@@ -104,8 +118,28 @@ public static class MapWsHandler
         session.Account = req.Account.Trim();
         session.Authed = true;
         Console.WriteLine($"[ws/map] 登录 account={session.Account}");
+        /* 「我的聚落」(主宗 + 附属城镇) 随登录回填 —— 前端靠它决定显示「卜居」还是「拓土」、
+           本宗面板画什么。放在登录响应里而不是新开一帧: 这正是需要它的那一刻 (见 DTO 注释)。
+           ⚠ 查询异常一律吞掉 (回一个空列表): 登录本身不该因为读台账失败而失败 ——
+             前端拿不到记录时表现为「尚未择地立宗」, 而落子路径仍会重新校验配额,
+             不会因此写出第二座宗门。 */
+        List<SettlementDto> places = [];
+        var townMax = 0;
+        try
+        {
+            var mine = svc.MyPlaces(session.Account);
+            places = mine.Places;
+            townMax = mine.TownMax;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[ws/map] 登录回填我的聚落失败: " + ex.Message);
+        }
         await SendFrameAsync(ws, WsFrame.Login,
-            ProtoCodec.SerToByte(new LoginResponse { Ok = true, Account = session.Account }), ct, gzip: false);
+            ProtoCodec.SerToByte(new LoginResponse
+            {
+                Ok = true, Account = session.Account, MyPlaces = places, TownMax = townMax,
+            }), ct, gzip: false);
     }
 
     private static async Task HandleTileAsync(
@@ -136,7 +170,9 @@ public static class MapWsHandler
                - 被剔除的位记入 DeniedMask 回显, 且只针对本次真正请求的位
                  (避免「仅 rev 未变」被误报为 denied)。 */
             uint reqMask = req.Mask == 0 ? (uint)TileMask.All : req.Mask & (uint)TileMask.All;
-            const uint entityMask = (uint)(TileMask.Settle | TileMask.Poi | TileMask.Comm);
+            /* 实体层 = 需要登录才放行的图层。人物分布 (People) 与聚落/景点/灵脉同口径:
+               它由聚落人口派生, 属「世界实体信息」而非公开地貌。 */
+            const uint entityMask = (uint)(TileMask.Settle | TileMask.Poi | TileMask.Comm | TileMask.People);
             uint allowedMask = session.Authed ? reqMask : reqMask & ~entityMask;
 
             /* C6: 块构建是「全同步」管线 (V8 门闩 + A* + gzip), 直接内联 await 会占着
@@ -222,8 +258,155 @@ public static class MapWsHandler
         await SendFrameAsync(ws, WsFrame.Script, ProtoCodec.SerToByte(pack), ct);
     }
 
-    /* ---- 帧收发 ---- */
+    /* ============================================================
+     * 玩家宗门放置 (2026-09-23 方案 §4.1/§4.2)
+     * ------------------------------------------------------------
+     * 帧 5 = PlaceCheck (只读, 悬停即问); 帧 6 = PlaceCommit (写, 含同步重算 ~450ms)。
+     * 载荷恒**明文** protobuf (与 Login/Pong 同口径, 不做按大小切换 —— 客户端按帧类型
+     * 判别压缩, 混用会解错)。
+     * ⚠ 限流必须在这里做: ApiRateLimitMiddleware 是 HTTP 中间件, 对 WS 帧**完全无效**。
+     *   PlaceCheck 是悬停驱动的高频路径 (前端 ≥150ms 节流), 不设闸的话单条连接就能把
+     *   V8 门闩钉死, 把整台服务拖住 (Chunk/Region 也走同一把门闩)。
+     * ⚠ 两条载荷都必须先过「seed 非空 + 已登录」的粗筛, 再进 V8。
+     * ============================================================ */
 
+    /// <summary>悬停校验稳态速率 (次/秒) 与突发额度。</summary>
+    private const double CheckRatePerSec = 8;
+    private const double CheckBurst = 8;
+
+    private static async Task HandlePlaceCheckAsync(
+        WebSocket ws, MapWorldService svc, WsSession session, byte[] buf, int count, CancellationToken ct)
+    {
+        PlaceCheckRequest req;
+        try
+        {
+            req = ProtoCodec.DesFromByte<PlaceCheckRequest>(buf.AsSpan(1, count - 1).ToArray());
+        }
+        catch (Exception ex)
+        {
+            await SendPlaceAsync(ws, WsFrame.PlaceCheck,
+                new PlaceCheckResponse { Err = "PlaceCheck 解析失败: " + ex.Message }, ct);
+            return;
+        }
+        if (!session.AllowCheck())
+        {
+            await SendPlaceAsync(ws, WsFrame.PlaceCheck,
+                new PlaceCheckResponse { Q = req.Q, R = req.R, Seq = req.Seq, Err = "落点校验过于频繁" }, ct);
+            return;
+        }
+        try
+        {
+            var resp = await Task.Run(() => svc.PlaceCheck(
+                req.Seed, session.Account, session.Authed, req.Q, req.R, req.ExcludeId, req.Type, req.Seq), ct)
+                .WaitAsync(ct);
+            await SendPlaceAsync(ws, WsFrame.PlaceCheck, resp, ct);
+        }
+        catch (OperationCanceledException) { /* 客户端断开 */ }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[ws/map] PlaceCheck 异常: " + ex);
+            try
+            {
+                await SendPlaceAsync(ws, WsFrame.PlaceCheck,
+                    new PlaceCheckResponse { Q = req.Q, R = req.R, Seq = req.Seq, Err = "落点校验失败: " + ex.Message }, ct);
+            }
+            catch { /* 套接字已失效 */ }
+        }
+    }
+
+    private static async Task HandlePlaceCommitAsync(
+        WebSocket ws, MapWorldService svc, WsSession session, byte[] buf, int count, CancellationToken ct)
+    {
+        PlaceCommitRequest req;
+        try
+        {
+            req = ProtoCodec.DesFromByte<PlaceCommitRequest>(buf.AsSpan(1, count - 1).ToArray());
+        }
+        catch (Exception ex)
+        {
+            await SendPlaceAsync(ws, WsFrame.PlaceCommit,
+                new PlaceCommitResponse { Err = "PlaceCommit 解析失败: " + ex.Message }, ct);
+            return;
+        }
+        /* ⚠ 提交**不**在传输层限流 —— 传输层看到的是「同一请求重发」, 而幂等回放正是
+           为这种重发设计的 (廉价、不碰 V8)。在这里设闸会把重放一起挡掉, 表现为
+           「狂点确认键 → 第二下报频繁」。真正的闸在 MapWorldService.PlaceCommit 里,
+           且只卡**贵的那条路** (回放与配额拒绝都不经它)。 */
+        try
+        {
+            /* ⚠ 同步重算 ~450ms, 必须放线程池 + 允许断开时放弃等待 (同 Tile 的 C6 理由):
+               直接内联 await 会占着请求线程池线程跑完整条 A* 流水线。 */
+            var resp = await Task.Run(() => svc.PlaceCommit(
+                req.Seed, session.Account, session.Authed, req.Q, req.R, req.Name, req.Tier,
+                req.Type, req.IdemKey, req.Seq), ct)
+                .WaitAsync(ct);
+            await SendPlaceAsync(ws, WsFrame.PlaceCommit, resp, ct);
+            if (resp.Ok)
+                Console.WriteLine($"[ws/map] {(string.IsNullOrEmpty(req.Type) || req.Type == "sect" ? "卜居" : "拓土")} " +
+                                  $"account={session.Account} at ({req.Q},{req.R}) " +
+                                  $"id={resp.Sect?.Id} type={resp.Sect?.Type} roads={resp.Roads} " +
+                                  $"blocks={resp.Blocks.Count} ms={resp.Ms}");
+        }
+        catch (OperationCanceledException) { /* 客户端断开 */ }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[ws/map] PlaceCommit 异常: " + ex);
+            try
+            {
+                await SendPlaceAsync(ws, WsFrame.PlaceCommit,
+                    new PlaceCommitResponse { Seq = req.Seq, IdemKey = req.IdemKey, Err = "卜居失败: " + ex.Message }, ct);
+            }
+            catch { /* 套接字已失效 */ }
+        }
+    }
+
+    /// <summary>放置帧的发送口 (恒明文; 与 Tile 的 gzip 约定区分开 = 客户端按帧类型判别)。</summary>
+    private static Task SendPlaceAsync<T>(WebSocket ws, byte type, T msg, CancellationToken ct)
+        => SendFrameAsync(ws, type, ProtoCodec.SerToByte(msg), ct, gzip: false);
+
+    /* ============================================================
+     * Tick 框架: 世界时钟 (2026-09-26 方案 §10 接线点 #6)
+     * ------------------------------------------------------------
+     * 帧 7 = ClockQuery (请求) / ClockPush (响应同号)。
+     * ⚠ **恒明文, 不 gzip**: 包 < 64 B, 压缩净亏; 且帧类型即压缩约定不可混用。
+     * ⚠ **不鉴权**: 时钟是「世界公开事实」(没登录也该能看到现在是第几年),
+     *   而且它不泄露任何实体数据。未绑定世界时回 tick=0 + Err, 不抛。
+     * ⚠ 读 Snapshot() 是**无锁只读** (读一个 volatile long), 高频轮询也不碰 V8 门闩。
+     * ============================================================ */
+    private static async Task HandleClockAsync(
+        WebSocket ws, Zongmen.Time.TickPump? pump, byte[] buf, int count, CancellationToken ct)
+    {
+        uint seq = 0;
+        try
+        {
+            if (count > 1)
+                seq = ProtoCodec.DesFromByte<ClockQueryRequest>(buf.AsSpan(1, count - 1).ToArray()).Seq;
+        }
+        catch { /* 载荷损坏/为空: 照样回当前时钟, seq=0 */ }
+
+        ClockQueryResponse resp;
+        if (pump is null)
+        {
+            resp = new ClockQueryResponse { Seq = seq, Err = "时钟未启用" };
+        }
+        else
+        {
+            var s = pump.Snapshot();
+            resp = new ClockQueryResponse
+            {
+                Seq = seq,
+                Tick = s.Tick,
+                Year = s.Year, Month = s.Month, Day = s.Day, Season = s.Season,
+                SeasonName = s.SeasonName, MonthName = s.MonthName, Desc = s.Desc,
+                RatePerSecond = s.RatePerSecond,
+                MonoMs = Zongmen.Time.GameClock.NowMonoMs(),
+                Pending = s.Pending,
+            };
+        }
+        await SendFrameAsync(ws, WsFrame.ClockPush, ProtoCodec.SerToByte(resp), ct, gzip: false);
+    }
+
+    /* ---- 帧收发 ---- */
     private static async Task SendFrameAsync(
         WebSocket ws, byte type, byte[]? payload, CancellationToken ct, bool gzip = false)
     {
@@ -263,5 +446,25 @@ public static class MapWsHandler
     {
         public bool Authed { get; set; }
         public string Account { get; set; } = "";
+
+        /* ---- 令牌桶 (WS 帧不走 HTTP 限流中间件, 见 HandlePlaceCheckAsync 头注释) ---- */
+        private double _checkTokens = CheckBurst;
+        private long _checkRefillAt;
+
+        /// <summary>悬停校验令牌桶: 稳态 CheckRatePerSec 次/秒, 突发 CheckBurst 次。</summary>
+        public bool AllowCheck()
+        {
+            var now = Environment.TickCount64;
+            if (_checkRefillAt == 0) _checkRefillAt = now;
+            var dt = (now - _checkRefillAt) / 1000.0;
+            if (dt > 0)
+            {
+                _checkTokens = Math.Min(CheckBurst, _checkTokens + dt * CheckRatePerSec);
+                _checkRefillAt = now;
+            }
+            if (_checkTokens < 1) return false;
+            _checkTokens -= 1;
+            return true;
+        }
     }
 }

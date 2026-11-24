@@ -39,6 +39,14 @@
         chunkScan: meta.chunkScan, regionM: meta.regionM,
         commCl: meta.commCl, commR: meta.commR, seaLevel: meta.seaLevel,
         biomeMeta: meta.biomeMeta,
+        /* 玩家宗门放置 (方案 §2.1): 规模 → 领地半径。真源是服务端 CFG.DOMAIN_R,
+           前端只读不推 —— 老服务端无此字段时为空对象, 领地圈自然不画 (静默降级)。 */
+        domainR: meta.domainR || null,
+        settleMinDist: meta.settleMinDist, townR: meta.townR,
+        /* 城市扩张 (附属城镇): 辖域半径 + 允许类型。同 domainR —— 真源在引擎, 前端只读,
+           老服务端无此字段时 expandR = 0 ⇒ 不画辖域环、不显示「拓土」(静默降级)。 */
+        expandR: meta.expandR || 0,
+        expandTypes: meta.expandTypes || null,
         /* 色板由 meta 单点下发 (缺失时由调用方字面兜底, 见 main.js) */
         elementRGB: meta.elementRGB, variantRGB: meta.variantRGB,
         /* S4: 引擎指纹 (服务端下发给前端的三个 js 的哈希; 老服务端无此字段 = undefined) */
@@ -116,7 +124,7 @@
       sock = s;
       s.onopen = function () {
         /* 连接即登录 (设计 §五): demo 账号 guest */
-        var login = PB.encodeLogin({ account: 'guest', token: 'demo' });
+        var login = PB.encodeLogin({ account: lastAccount, token: 'demo' });
         var frame = new Uint8Array(1 + login.length);
         frame[0] = PB.FRAME.LOGIN;
         frame.set(login, 1);
@@ -153,6 +161,30 @@
       try { reLoginHooks[i](); } catch (e) { console.warn('reconnect 钩子异常', e); }
     }
   }
+  /* 城市扩张 (2026-09-23): 登录钩子 —— **每次**登录成功都触发 (含首次), 载荷 = 登录响应,
+     里面带着「我的聚落」(主宗 + 附属城镇)。
+     ⚠ 与 onReconnect 分开: 那个只在「重连」时触发 (首次不触发, 因为 boot 已取过 meta);
+       而「我的聚落」在**首次**登录时同样需要 —— 它决定按钮显示哪一个。
+     ⚠ 这也是换世后前端能刷新资产的唯一通路: 换世不走断开重连 (socket 没断),
+       所以 regenerate() 必须显式调 loginAgain() 主动重取一次。 */
+  var loginHooks = [];
+  function onLogin(fn) { if (typeof fn === 'function') loginHooks.push(fn); }
+  function fireLogin(lr) {
+    for (var i = 0; i < loginHooks.length; i++) {
+      try { loginHooks[i](lr); } catch (e) { console.warn('login 钩子异常', e); }
+    }
+  }
+  /* 主动重登 (只发一个 Login 帧; 连接未就绪时静默跳过 —— 下次 connect 的 onopen 会带上)。
+     用途: ① 换世后刷新「我的聚落」② onReconnect 钩子里重取 meta 之外的资产。 */
+  function loginAgain(account) {
+    if (!sock || sock.readyState !== 1) return false;
+    var login = PB.encodeLogin({ account: (account || lastAccount || 'guest'), token: 'demo' });
+    var frame = new Uint8Array(1 + login.length);
+    frame[0] = PB.FRAME.LOGIN;
+    frame.set(login, 1);
+    return wsSend(frame);
+  }
+  var lastAccount = 'guest';
 
   /* D8: 容错扫描 —— 在 TileResponse 顶层找 field 6 (seq, varint)。
      仅在「正常解码已失败」时调用, 用途是把失败精确归到某一条在途请求,
@@ -202,11 +234,13 @@
       var lr = PB.decodeLoginResponse(payload);
       if (lr.ok) {
         reconnectDelay = 500;                  // 连接恢复 → 退避重置
+        if (lr.account) lastAccount = lr.account;
         if (sockReadyRes) { sockReadyRes(lr); sockReadyRes = null; sockReadyRej = null; }
         /* S4: 「重连」而非首次登录才触发钩子 —— 页面长开期间服务端可能已升级引擎。
            (首次登录不做任何额外请求: meta 已在 boot 取过) */
         if (everLogged) fireReconnect();
         everLogged = true;
+        fireLogin(lr);                         // 每次登录都发: 载荷里的「我的聚落」是 UI 的输入
       }
       else {
         if (sockReadyRej) { sockReadyRej(new Error('登录失败: ' + lr.err)); sockReadyRej = null; sockReadyRes = null; }
@@ -228,6 +262,44 @@
         var w = scriptWaiters; scriptWaiters = [];
         for (var i = 0; i < w.length; i++) { clearTimeout(w[i].timer); w[i].resolve(scriptPack); }
       }, function (err) { failScript(new Error('引擎脚本解压失败: ' + err.message)); });
+      return;
+    }
+    /* 帧 7: 世界时钟 (Tick 框架 §10 接线点 #6)。
+       ⚠ 载荷恒**明文** protobuf, 绝不 gunzip (与 Login/Pong/Place 同口径)。
+       ⚠ 解码失败必须 reject 在途请求 —— 否则时钟 Promise 永久悬挂。 */
+    if (type === PB.FRAME.CLOCK_PUSH) {
+      var cr;
+      try { cr = PB.decodeClockQueryResponse(payload); }
+      catch (e) {
+        console.error('时钟响应解码失败', e);
+        failAllClockWaiters(new Error('时钟响应解码失败: ' + e.message));
+        return;
+      }
+      var cw = clockWaiters; clockWaiters = [];
+      for (var k = 0; k < cw.length; k++) { clearTimeout(cw[k].timer); cw[k].resolve(cr); }
+      return;
+    }
+    /* 帧 5/6: 落点校验 / 落定 (方案 §4.1)。
+       ⚠ 载荷恒**明文** protobuf —— 服务端 SendPlaceAsync 固定 `gzip: false`
+       (与 Login/Pong 同口径), 这里绝不能再套 gunzip: 解出来的是明文, 套了必炸。 */
+    if (type === PB.FRAME.PLACE_CHECK || type === PB.FRAME.PLACE_COMMIT) {
+      var pr;
+      try {
+        pr = (type === PB.FRAME.PLACE_CHECK)
+          ? PB.decodePlaceCheckResponse(payload)
+          : PB.decodePlaceCommitResponse(payload);
+      } catch (e) {
+        /* ⚠ 解码异常必须 reject 在途请求 —— 否则 Promise 永久悬挂 (UI 卡在「落定中…」,
+           且 pending 表只增不减)。载荷边界已不可知 ⇒ 只能全拒 (同 TileResponse 的规矩)。 */
+        console.error('放置响应解码失败', e);
+        failAllPending(new Error('放置响应解码失败: ' + e.message));
+        return;
+      }
+      var pp = pending.get(pr.seq);
+      if (!pp) return;                          // 重连前的迟到响应: 丢弃
+      pending.delete(pr.seq);
+      clearTimeout(pp.timer);
+      pp.resolve(pr);
       return;
     }
     if (type === PB.FRAME.TILE) {
@@ -261,9 +333,10 @@
            该图层(聚落/景点/灵脉)永久缺失。 */
         if (resp.revs && resp.revs.length) {
           var k2 = resp.i + ',' + resp.j;
-          var next = (revs.get(k2) || [0, 0, 0, 0, 0]).slice(0, 5);
-          var bits = [PB.MASK.CHUNK, PB.MASK.REGION, PB.MASK.SETTLE, PB.MASK.POI, PB.MASK.COMM];
-          for (var b = 0; b < 5; b++) {
+          var next = (revs.get(k2) || [0, 0, 0, 0, 0, 0]).slice(0, 6);
+          var bits = [PB.MASK.CHUNK, PB.MASK.REGION, PB.MASK.SETTLE, PB.MASK.POI,
+                      PB.MASK.COMM, PB.MASK.PEOPLE];
+          for (var b = 0; b < 6; b++) {
             if ((resp.mask & bits[b]) !== 0 && b < resp.revs.length) next[b] = resp.revs[b];
           }
           revs.set(k2, next);
@@ -331,6 +404,47 @@
     });
   }
 
+  /* ============================================================
+   * 帧 7: 世界时钟 (Tick 框架 §10 接线点 #6)
+   *   —— 服务端权威 tick; 客户端纪律 (设计 §6): **别每 tick 一问**,
+   *      每 ~10 tick 校一次绝对 tick, 之间靠 `ratePerSecond` 本地插值。
+   *   —— 未登录也能查 (时钟是世界公开事实, 不含实体数据)。
+   * ============================================================ */
+  var clockWaiters = [];           // [{resolve, timer}]  (查询是「取最新值」, 无需 reject)
+  var CLOCK_TIMEOUT = 5000;
+
+  function failAllClockWaiters(err) {
+    var w = clockWaiters; clockWaiters = [];
+    for (var i = 0; i < w.length; i++) { clearTimeout(w[i].timer); if (w[i].reject) w[i].reject(err); }
+  }
+
+  function clock() {
+    return connect().then(function () {
+      return new Promise(function (resolve, reject) {
+        if (!sock || sock.readyState !== 1) { reject(new Error('WS 未就绪')); return; }
+        var body = PB.encodeClockQuery({ seq: ++seq });
+        var frame = new Uint8Array(1 + body.length);
+        frame[0] = PB.FRAME.CLOCK_QUERY;
+        frame.set(body, 1);
+        var w = {
+          resolve: resolve, reject: reject,
+          timer: setTimeout(function () {
+            var i = clockWaiters.indexOf(w);
+            if (i >= 0) clockWaiters.splice(i, 1);
+            reject(new Error('时钟查询超时'));
+          }, CLOCK_TIMEOUT)
+        };
+        clockWaiters.push(w);
+        if (!wsSend(frame)) {
+          var j = clockWaiters.indexOf(w);
+          if (j >= 0) clockWaiters.splice(j, 1);
+          clearTimeout(w.timer);
+          reject(new Error('WS 发送失败'));
+        }
+      });
+    });
+  }
+
   /* 请求一个块 (rev 增量)。主块坐标 = 区块格 (i,j) = (ca,cb)。
      mask 缺省 = 全量 (老行为); S3「地形块前端自算」起主视图传 `ALL & ~CHUNK`(=30):
      服务端 needChunk 分支本就按 mask 出包 ⇒ 少算 chunkJson、不落块缓存、不传输整块地形。
@@ -370,6 +484,54 @@
      而客户端已无该块数据 (设计 §四 rev 失效的正确性前提) */
   function blockForget(key) { revs.delete(key); }
   function blockForgetAll() { revs.clear(); }
+
+  /* ---------- 放置宗门 (帧 5/6, 方案 §4.1/§4.2) ----------
+     与 block() 共用同一条连接与同一张 pending/seq 表 —— 帧类型不同, 且 seq 全局自增,
+     故不会串号。**不写 revs 记账**: 这两条请求不改图层 rev; 真正的失效由 commit
+     响应里的 blocks 列表驱动 (上层负责 blockForget + 重拉, 见 main.js onPlaced)。 */
+  var PLACE_TIMEOUT = 20000;      // 提交是**同步**重算 (实测 118~450ms), 但要排在 V8 门闩之后
+  function placeCall(frameType, body) {
+    return connect().then(function () {
+      return new Promise(function (resolve, reject) {
+        if (!sock || sock.readyState !== 1) { reject(new Error('WS 未就绪')); return; }
+        var sseq = ++seq;
+        body.seq = sseq;
+        var u8 = (frameType === PB.FRAME.PLACE_CHECK)
+          ? PB.encodePlaceCheck(body) : PB.encodePlaceCommit(body);
+        var frame = new Uint8Array(1 + u8.length);
+        frame[0] = frameType;
+        frame.set(u8, 1);
+        var entry = {
+          resolve: resolve, reject: reject,
+          timer: setTimeout(function () {
+            pending.delete(sseq);
+            reject(new Error('放置请求超时'));
+          }, PLACE_TIMEOUT)
+        };
+        pending.set(sseq, entry);
+        if (!wsSend(frame)) {
+          pending.delete(sseq);
+          clearTimeout(entry.timer);
+          reject(new Error('WS 发送失败'));
+        }
+      });
+    });
+  }
+  /* excludeId: 排除某座自己的宗门 —— 立宗后再悬停校验时, 别把自己算成"障碍"。
+     ⚠ 服务端**不会**因前端传了它就放行: 写路径 (PlaceCommit) 重跑全套判据。
+     type: 'sect'(空) = 立宗; 'town'/'village' = 拓土。⚠ 扩张档**绝不能**传 excludeId
+     (= 本宗): 本宗的领地正是那条间距约束的来源, 豁免了就能贴着自己的宗门建。 */
+  function placeCheck(seed, q, r, excludeId, type) {
+    return placeCall(PB.FRAME.PLACE_CHECK,
+      { seed: seed, q: q, r: r, excludeId: excludeId || '', type: type || '' });
+  }
+  /* idemKey: 幂等键 —— 同键重发由服务端回放首次响应 (同步重算期间狂点确认键的兜底)。
+     调用方用**确定性**键 (类型+落点+名字), 重复点击即回放, 不会立两座。 */
+  function placeCommit(seed, q, r, name, tier, idemKey, type) {
+    return placeCall(PB.FRAME.PLACE_COMMIT,
+      { seed: seed, q: q, r: r, name: name, tier: tier | 0, idemKey: idemKey || '',
+        type: type || '' });
+  }
 
   /* ---------- 单格详情 / 字段网格 (保留 HTTP) ---------- */
   function getProto(url, signal) {
@@ -414,8 +576,16 @@
     blockForgetAll: blockForgetAll,
     reconnectDue: reconnectDue,
     onReconnect: onReconnect,
+    /* 城市扩张: 「我的聚落」登录钩子 + 主动重登 (换世后刷新资产) */
+    onLogin: onLogin,
+    loginAgain: loginAgain,
     /* R11: 引擎脚本 (WS 下发, 前端按 seed 自算地形) */
     requestScript: requestScript,
+    /* Tick 框架: 世界时钟 (帧 7) */
+    clock: clock,
+    /* 玩家宗门放置 (帧 5/6) */
+    placeCheck: placeCheck,
+    placeCommit: placeCommit,
     /* HTTP 辅助接口 */
     tile: tile
   };

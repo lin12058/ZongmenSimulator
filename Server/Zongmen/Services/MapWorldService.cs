@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Text;
 using System.Text.Json;
 using Zongmen.Domain;
 using Zongmen.Engine;
 using Zongmen.Protocol;
 using Zongmen.Storage;
+using Zongmen.Subsystems;
 
 namespace Zongmen.Services;
 
@@ -34,12 +36,18 @@ namespace Zongmen.Services;
 public sealed class MapWorldService : IDisposable
 {
     private readonly ZongmenOptions _opt;
-    private readonly JsEngineHost _host;
+    private readonly JsVmPool _host;
+    /* ★ 子系统注册表 (2026-10-11): Core 通过它回调子系统 (换世清空 / 渲染叠加),
+       **不引用任何具体子系统类型** —— 加第二个子系统时这里一个字都不用改。 */
+    private readonly SubsystemRegistry _subsystems;
     private readonly MemoryVirtualContext _mem;
     private readonly SqliteVirtualContext? _sql;
     /* W (2026-09-16): 世界种子台账 —— 种子的唯一来源。前端不再自造 seed
        (旧口径 `Date.now()%1e8` 刷新即换界), 只向服务端 "领当前世 / 换下一世"。 */
     private readonly WorldLedger _ledger;
+    /* P (2026-09-23, 玩家宗门放置): 玩家宗门台账 —— 独立表 PlayerSect (见其头注释:
+       塞进 Data(Key,Value) 会被后台 PruneExcept 静默删掉)。 */
+    private readonly PlayerSectStore _sects;
     private string? _metaCache;
     private readonly object _metaLock = new();
     /* S4: 引擎指纹 —— 对**下发给前端的那三个脚本**按拼接顺序取 SHA256 前 16 位。
@@ -66,9 +74,21 @@ public sealed class MapWorldService : IDisposable
        包对象只读 (response 组装只搬运引用, 序列化后即丢) ⇒ 可安全共享。 */
     private readonly LruCache<RegionPack> _regionPackCache = new(PackCacheCap);
     private readonly LruCache<SettlePack> _settlePackCache = new(PackCacheCap);
+    /* 地图人物分布 (2026-10-11 方案 v2): 每块 { 每格人数, 战力总和 }。
+       ⚠ **只进进程内 LRU, 绝不落 SQLite/_mem** —— 它是 (seed, 区块) 的纯派生,
+         不是「世界内容」; 一旦落库, 淘汰后 ReadSqlBackfill 会把旧包捞回来。 */
+    private readonly LruCache<PeopleData> _peopleCache = new(1024);
 
-    /// <summary>tile 缓存条目: 值 + 生成时的 VM 道路版本号 (T4)。</summary>
-    private sealed record TileEntry(byte[] Gz, long RoadVer);
+    /// <summary>tile 缓存条目: 值 + 生成时的 VM 道路版本号 (T4) + 服务端落点世代 (P)。</summary>
+    private sealed record TileEntry(byte[] Gz, long RoadVer, int PlaceVer);
+
+    /* P (2026-09-23, 玩家宗门放置) —— 服务端「落点世代」。
+       病根: tileJson 的结果同时依赖 ① 聚落集合 (place 字段) ② roadCache (onRoad),
+       而 roadVer 只在**新增道路**时前进。于是「落点只让旧路消失、没让新路出现」
+       (roadFail 翻转 / 被 RNG 支配裁掉) 或「四周本来就有路」时 roadVer 不动
+       ⇒ 旧 tile 缓存被误判新鲜 ⇒ 点开那格看到的还是「无宗门」。
+       用一个独立单调计数器把 tile 缓存与**任何一次落点**绑定 (比扫 1024 条 key 便宜)。 */
+    private int _placeVer;
 
     /// <summary>service 层最近观测到的 roadVer (按 seed 前缀)。
     /// roadVer 只在区域包生成(内含 A*)时前进, 故 tile 缓存命中时比对这里即可免抢 V8 门闩。
@@ -91,15 +111,123 @@ public sealed class MapWorldService : IDisposable
     private readonly CancellationTokenSource _maintCts = new();
     private readonly Task _maintTask;
 
-    public MapWorldService(ZongmenOptions opt, string contentRoot)
+    /* T4 (2026-09-27): 世界时钟与 Tick 演化框架的挂点。
+       ⚠ 用**延迟绑定**而不是构造注入: MapWorldService 在 TickPump 之前构造 (DI 顺序),
+         直接构造注入会形成循环依赖 (TickPump 将来要读世界状态)。
+         而 TickPump 绑定世界只需两个东西: seed 与 round —— 都来自 _ledger。
+       ⚠ 未绑定时泵只空转 (不会崩), 所以即使这里一直没挂上也只是「时间不走」。 */
+    private Time.TickPump? _tickPump;
+
+    /* P2: 「应该有哪些 job」的短时缓存 (见 ProvideExpectedJobs 的注释) */
+    private readonly object _expectedGate = new();
+    private IReadOnlyList<(string EntityId, Time.TickJobKind Kind)>? _expectedCache;
+    private long _expectedAtMs;
+
+    /// <summary>挂上时钟泵 (Program.cs 在 DI 装配完成后调用)。挂上即**立即绑定当前世**。</summary>
+    public void AttachTickPump(Time.TickPump pump)
+    {
+        _tickPump = pump;
+        /* ★ P2 依赖倒置: 泵不知道「本世有哪些城」, 由本类提供。
+           ⚠ 只在挂载时注册一次; provider 内部自有缓存与节流。 */
+        pump.ExpectedJobsProvider = ProvideExpectedJobs;
+        BindCurrentWorldToTick();
+    }
+
+    /// <summary>P2: 城市演化台账 => 已迁到 <see cref="Subsystems.City.CitySubsystem.Store"/>。
+    /// ⚠ Core 不再持有它: 「本子系统状态由本子系统自己管」是这次目录重构的核心约束
+    ///   (原先 Core 直接 new 出 CityStateStore ⇒ Core 编译期就认识 City)。</summary>
+
+    /// <summary>P2: 提供「本世应该有哪些 job」= 演化窗口内每座聚落 × {TownEvolve, TradeEdge}。
+    /// ⚠ 这是**对账**的输入 ⇒ 必须是全集: 少给一类, 那一类的全部 job 会被判定为「不该有」
+    ///   而被 Remove (静默停止演化)。故这里枚举**两个** kind, 不做任何「按需省略」。
+    /// ⚠ 结果做短时缓存 (默认 60s): 对账每 360 tick 才跑一次, 但枚举会扫窗口内全部区域格;
+    ///   缓存对**对账**安全 (只增删 job 集合, 不重置其 NextTick/Phase), 城变多时也稳。</summary>
+    private IReadOnlyList<(string EntityId, Time.TickJobKind Kind)> ProvideExpectedJobs(string seed, int round, long tick)
+    {
+        var now = Environment.TickCount64;
+        lock (_expectedGate)
+        {
+            if (_expectedCache != null && now - _expectedAtMs < 60_000) return _expectedCache;
+        }
+        var list = new List<(string, Time.TickJobKind)>();
+        try
+        {
+            var span = Math.Max(1, _opt.Tick.EvolveSpanRegions);
+            using var lease = World(seed);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (var i = -span; i <= span; i++)
+            {
+                for (var j = -span; j <= span; j++)
+                {
+                    string json;
+                    /* ⚠ 必须用 citySettlementsJson (带 type) 而不是 settleJson (不带 type):
+                       这里靠 type 过滤 poi, 用 settleJson 会因 type=="" 而不过滤 ⇒
+                       给秘境也排演化 job (白跑, 且秘境没有足迹/资源 ⇒ 逻辑上无意义)。 */
+                    try { json = lease.Vm.Call("citySettlementsJson", i, j); }
+                    catch { continue; }
+                    using var d = JsonDocument.Parse(json);
+                    if (!d.RootElement.TryGetProperty("settlements", out var towns) ||
+                        towns.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var t in towns.EnumerateArray())
+                    {
+                        var id = t.TryGetProperty("id", out var idv) ? idv.GetString() ?? "" : "";
+                        if (id.Length == 0 || !seen.Add(id)) continue;
+                        var type = t.TryGetProperty("type", out var tyv) && tyv.ValueKind == JsonValueKind.String
+                            ? tyv.GetString() ?? "" : "";
+                        if (type == "poi") continue;      // 秘境不演化 (v2 Q3)
+                        list.Add((id, Time.TickJobKind.TownEvolve));
+                        list.Add((id, Time.TickJobKind.TradeEdge));
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[tick] ExpectedJobs 枚举失败: {ex.GetType().Name}: {ex.Message}");
+            return _expectedCache ?? Array.Empty<(string, Time.TickJobKind)>();
+        }
+        lock (_expectedGate) { _expectedCache = list; _expectedAtMs = Environment.TickCount64; }
+        return list;
+    }
+
+    /// <summary>
+    /// 把**当前世**绑定到时钟泵 (启动 / 换世后都要调)。
+    /// ⚠ 拿不到当前世 ⇒ 什么都不做 (不造一个假世界)。时钟是服务端资产, 与种子同级。
+    /// </summary>
+    public void BindCurrentWorldToTick()
+    {
+        var pump = _tickPump;
+        if (pump is null) return;
+        try
+        {
+            var cur = _ledger.Current();
+            /* ★ 换世清空各子系统的世态 (依赖倒置: Core 不认识 City, 由注册表遍历)。
+               ⚠ 清的是「上一世」的状态 —— 与新世的实体 id 可能同名
+                 (城 id 是 `{区域i}_{区域j}_u{n}`, 跨世会重复!) ⇒ 不清就是**跨世串味**:
+                 新世第 0 天的一座城带着上一世演化了几十年的人口继续跑。
+               ⚠ 各子系统必须实现「只删该轮次」而不是全清 —— 万一将来支持
+                 同时保留多世 (回看/回滚), 全清会误删别的世。 */
+            var removed = _subsystems.ClearWorld(cur.Round);
+            if (removed > 0)
+                Console.WriteLine($"[tick] 换世清空子系统世态: 第 {cur.Round} 世 {removed} 行 (避免跨世串味)");
+            lock (_expectedGate) { _expectedCache = null; _expectedAtMs = 0; }
+            pump.BindWorld(cur.Seed, cur.Round);
+        }
+        catch (Exception ex)
+        {
+            /* ⚠ 不让时钟绑定失败拖垮 HTTP 装配 —— 但必须**留下痕迹**,
+               否则「时间不走」会变成一个无声的谜。 */
+            Console.Error.WriteLine($"[tick] 绑定当前世失败: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    public MapWorldService(ZongmenOptions opt, string contentRoot, SubsystemRegistry subsystems)
     {
         _opt = opt;
+        _subsystems = subsystems;
         var jsDir = ZongmenPaths.ResolveEngineJsDir(opt, contentRoot);
+        var cityJsDir = ZongmenPaths.ResolveCityJsDir(opt, contentRoot);
         _engineHash = ComputeEngineHash(jsDir);
-        /* C1: 传淘汰回调 —— VM 被 LRU 淘汰时清掉「按 seed 前缀」的 roadVer 观测值,
-           否则新 VM 的 roadVer 从 0 重新计数会与旧观测值冲突 (tile 缓存判新鲜失准)。 */
-        _host = new JsEngineHost(jsDir, opt.MaxSeeds,
-            seed => { _roadVerCache.TryRemove(WorldKeys.SeedPrefix(seed), out _); });
         _mem = new MemoryVirtualContext();
         if (opt.PersistEnabled)
             _sql = new SqliteVirtualContext(ZongmenPaths.ResolveDbPath(opt, contentRoot));
@@ -107,7 +235,70 @@ public sealed class MapWorldService : IDisposable
            不同表 ⇒ 后台 PruneExcept(只清 Data 表的非活跃 seed 前缀) 够不着它 (见 WorldLedger 头注释)。
            持久化关闭时传 null ⇒ 台账退回仅内存 (世界仍是服务端产生, 只是重启即归零)。 */
         _ledger = new WorldLedger(opt.PersistEnabled ? ZongmenPaths.ResolveDbPath(opt, contentRoot) : null);
+        /* P: 玩家宗门台账 —— 同样必须独立成表 (理由见 PlayerSectStore 头注释)。
+           ⚠ 必须在 _host 之前构造: _host 的 onCreated 回调会读它 (虽然回调到运行时才触发,
+             但先建好更不容易出错)。 */
+        _sects = new PlayerSectStore(
+            opt.PersistEnabled ? ZongmenPaths.ResolveDbPath(opt, contentRoot) : null,
+            opt.PlayerSectMaxPerAccount,
+            opt.PlayerTownMaxPerSect);
+        /* ★ P2 城市演化台账**不在这里**了 —— 它归 Subsystems/City 所有 (见 CitySubsystem)。
+           本类只在换世时经注册表回调 ClearWorld, 在渲染时回调 OverlayJson。 */
+        /* C1: 传淘汰回调 —— VM 被 LRU 淘汰时清掉「按 seed 前缀」的 roadVer 观测值,
+           否则新 VM 的 roadVer 从 0 重新计数会与旧观测值冲突 (tile 缓存判新鲜失准)。
+           P: 再传**新建回调** —— VM 重建后必须把本世的玩家宗门重放回引擎 ext 层,
+           否则「服务端重启 / 换世 / VM 被 LRU 淘汰」之后玩家的宗门就消失了。 */
+        /* ★ VM 池: 世界层 + 各子系统各一个**独立 V8 实例** (Scope 为键)。
+           ⚠ 容量 = MaxSeeds × Scope 数 —— 一个 seed 要占 N 个 VM, 按 MaxSeeds 配
+             会把同一 seed 的其它 Scope 立刻淘汰 (「建了又杀」, 100% 拿到已 Dispose 的实例)。 */
+        var worldModule = new WorldModule(jsDir, cityJsDir);
+        var modules = new List<JsvmModule> { worldModule };
+        modules.AddRange(_subsystems.Modules);
+        _host = new JsVmPool(modules, Math.Max(1, opt.MaxSeeds) * modules.Count,
+            seed => { _roadVerCache.TryRemove(WorldKeys.SeedPrefix(seed), out _); },
+            (vm, _) => InjectPlayerSects(vm, vm.Seed));
         _maintTask = Task.Run(MaintenanceLoopAsync);
+    }
+
+    /// <summary>P: 把本世的玩家宗门记录重放进引擎 ext 层 (VM 新建时调用一次)。
+    /// ⚠ 每个 **Scope** 各有一份 ext (世界层 / 城市层是两个独立 V8) ⇒ 本回调会被
+    ///   每个 Scope 各调一次 —— 这正是我们要的 (两份必须一致)。
+    /// ⚠ 失败必须**抛** —— 宁可这一次请求失败, 也不要一个"丢了玩家资产"的世界悄悄服役。 </summary>
+    private void InjectPlayerSects(JsVm vm, string seed)
+    {
+        /* ⚠ 只有载了 mapgen-server.js 的世界/城市 VM 才有 setExternalSettlements。
+           纯数据子系统 (如 characters) 没有该出口 ⇒ 若在此无条件调用, 建 VM 即抛
+           「未知 JS 函数」⇒ 该子系统所有请求失败 (且只在首次建 VM 时暴露, 极易漏测)。 */
+        if (!vm.Module.AcceptsExternalSettlements) return;
+        var e = _ledger.Find(seed);
+        var json = e == null ? "[]" : _sects.JsonArrayForRound(e.Round);
+        var r = vm.Call("setExternalSettlements", json);
+        if (e != null && e.Round > 0)
+        {
+            using var d = JsonDocument.Parse(r);
+            Console.WriteLine($"[MapWorldService] 世界 {seed} (第 {e.Round} 世) 重放玩家宗门 " +
+                              d.RootElement.GetProperty("n").GetInt32() + $" 座 [{vm.Scope}]");
+        }
+    }
+
+    /// <summary>★ ext (玩家宗门) 变了 ⇒ 把新清单推给**所有已存在的 Scope VM**。
+    /// 病根: 世界层 VM 的 ext 由引擎 commitPlace 在内部自更新, 但**子系统 VM 不会**
+    ///   (它们是独立实例) —— 漏了这一步, City VM 的骨架产出 (growTownFootprint) 与
+    ///   渲染层看到的骨架会漂移, 表现为「演化算出的足迹与画出来的不一样」(不报错)。
+    /// ⚠ 不新建 VM: 尚未创建的 Scope 会在创建时经 onCreated 拿到最新 ext。</summary>
+    private void ReinjectExternalSettlements(string seed)
+    {
+        var e = _ledger.Find(seed);
+        var json = e == null ? "[]" : _sects.JsonArrayForRound(e.Round);
+        _host.ForEachExisting(seed, vm =>
+        {
+            try { vm.Call("setExternalSettlements", json); }
+            catch (Exception ex)
+            {
+                /* 期间被淘汰 ⇒ ObjectDisposedException, 无害 (重建时会重新注入)。留痕不静默。 */
+                Console.Error.WriteLine($"[subsys] ext 重注入失败 [{vm.Scope}]: {ex.GetType().Name}: {ex.Message}");
+            }
+        });
     }
 
     /// <summary>C2: 观测到 roadVer 后写入 (单调取大, 不覆盖更新的值)。</summary>
@@ -122,10 +313,68 @@ public sealed class MapWorldService : IDisposable
 
     /// <summary>C1: 借出世界 VM (借出期内在途计数 >0, LRU 不会 Dispose 它)。
     /// ⚠ 调用方必须用 using 包住整个使用期, 否则容量会短暂超标。</summary>
-    private JsEngineHost.VmLease World(string seed)
+    private JsVmPool.VmLease World(string seed)
     {
         _seenSeedPrefixes.TryAdd(WorldKeys.SeedPrefix(seed), 0);   // P3: 登记已用过的世界
-        return _host.Lease(seed);
+        return _host.Lease(WorldModule.WorldScope, seed);
+    }
+
+    /* ---------------- P2: 城市演化执行器 (TickVmPoolExecutor) 的公开接入面 ----------------
+       执行器**不是**本类的成员 (它在 Time/ 下), 但世界 VM 的所有权在这里 ⇒ 它必须经本类
+       借出 VM。这里只开**最小**的三件事, 不给执行器任何绕过缓存纪律的通道:
+         ① LeaseWorld    —— 借用 VM (与 using 配套; 期间 LRU 不淘汰);
+         ② CurrentSeed/Round —— 当前世的身份 (执行器据此决定往哪张账上写);
+         ③ MarkLayersDirty —— 演化改动了某块的内容后**必须**通知 (见下 ⚠)。
+       ⚠ 为什么不能只靠 BumpBlockRev: 世界内容有三条路径送出去 —— chunk(区块)/region(区域)/
+         settle(聚落) —— 演化改的是 settle 层。少了这一步, 客户端带旧 lastRevs 重拉会被
+         判「未变化」⇒ **永久陈旧** (不报错, 只是画面上人口永远不变)。 */
+
+    /// <summary>当前世的 seed (无当前世时返回 null)。</summary>
+    public string? CurrentSeed()
+    {
+        try { return _ledger.Count() == 0 ? null : _ledger.Current().Seed; }
+        catch { return null; }
+    }
+
+    /// <summary>当前世的轮次 (无当前世时返回 0)。</summary>
+    public int CurrentRound()
+    {
+        try { return _ledger.Count() == 0 ? 0 : _ledger.Current().Round; }
+        catch { return 0; }
+    }
+
+    /// <summary>借出某 Scope 的 VM。**世界层之外的调用者一律走这里** ——
+    /// 子系统执行器要的就是「自己那一个独立 V8」, 而不是世界层那把被人类请求占着的门闩。
+    /// ⚠ 与 <see cref="World"/> 同样登记 seed 前缀 (PruneExcept 按它判定活跃世界)。</summary>
+    public JsVmPool.VmLease LeaseScope(string scope, string seed)
+    {
+        _seenSeedPrefixes.TryAdd(WorldKeys.SeedPrefix(seed), 0);
+        return _host.Lease(scope, seed);
+    }
+
+    /// <summary>借出世界层 VM (供 TickPump 侧 / 判据宿主用; 新代码优先用 LeaseScope)。</summary>
+    public JsVmPool.VmLease LeaseWorld(string seed) => World(seed);
+
+    /// <summary>读某区域格的聚落列表 (演化器遍历世界用)。
+    /// ⚠ 只在**世界层** VM 上可用 (citySettlementsJson 归 WorldModule)。</summary>
+    public string SettlementsForJson(JsVm vm, int i, int j)
+        => vm.Call("settleJson", i, j);
+
+    /// <summary>演化改动了某区域格的聚落层 ⇒ 作废该区域的**落库** settle/region 包 + 推进脏块 rev。
+    /// ⚠ 只用 BumpBlockRev 是**不够**的 (与 ApplyPlaceChange 同理): settle 包是落库的,
+    ///   不清 _mem/SQLite 会在缓存淘汰后经 ReadSqlBackfill 把**旧人口**的包捞回来,
+    ///   画面上表现为「演化一会儿又跳回原值」。故这里复用同一套 EvictWithGate + Bump。
+    /// ⚠ 必须由**调用方**保证在 tick 泵线程外调用时的线程安全 (EvictWithGate 自带 per-key 门闩)。</summary>
+    public void MarkSettleDirty(string seed, int i, int j)
+    {
+        EvictWithGate(seed, i, j);
+        BumpBlockRev(seed, i, j, TileMask.Settle | TileMask.Poi);
+        /* ★ 图层5（人物分布）的**第二处**钩子：它以 (seed, 区块) 缓存在进程内 _peopleCache 里，
+           而它的输入（聚落人口）**会随 tick 演化** ⇒ 光作废落库包是不够的，进程内 LRU 也必须清，
+           否则热力图永远显示旧人数（BumpBlockRev 只解决「客户端带旧 rev 重拉」，服务端 Get
+           仍会命中旧 LRU 包）。区块格与区域格不是一一对应（无 O(1) 逆映射）⇒ 无法按键精确失效，
+           这里整清（容量仅 1024，且只有用户开热力图时才有热度，重建按需懒发生）。 */
+        _peopleCache.Clear();
     }
 
     /* ---------------- 区块 ---------------- */
@@ -145,7 +394,7 @@ public sealed class MapWorldService : IDisposable
         });
     }
 
-    private byte[] BuildChunk(JsWorldVm vm, int ca, int cb)
+    private byte[] BuildChunk(JsVm vm, int ca, int cb)
     {
         var json = vm.Call("chunkJson", ca, cb);
         using var d = JsonDocument.Parse(json);
@@ -208,7 +457,7 @@ public sealed class MapWorldService : IDisposable
         return gz;
     }
 
-    private byte[] BuildRegion(JsWorldVm vm, int i, int j)
+    private byte[] BuildRegion(JsVm vm, int i, int j)
     {
         var json = vm.Call("regionJson", i, j);
         using var d = JsonDocument.Parse(json);
@@ -295,7 +544,7 @@ public sealed class MapWorldService : IDisposable
         });
     }
 
-    private byte[] BuildComm(JsWorldVm vm, int ci, int cj)
+    private byte[] BuildComm(JsVm vm, int ci, int cj)
     {
         var json = vm.Call("commJson", ci, cj);
         using var d = JsonDocument.Parse(json);
@@ -345,15 +594,21 @@ public sealed class MapWorldService : IDisposable
         return BuildOnce(key, () =>
         {
             using var lease = World(seed);
-            var gz = BuildSettle(lease.Vm, i, j);
+            var gz = BuildSettle(lease.Vm, seed, i, j);
             Store(key, gz);
             return gz;
         });
     }
 
-    private byte[] BuildSettle(JsWorldVm vm, int i, int j)
+    private byte[] BuildSettle(JsVm vm, string seed, int i, int j)
     {
-        using var d = JsonDocument.Parse(vm.Call("settleJson", i, j));
+        /* ★ b 方案 (2026-10-10): 城镇足迹 = **骨架 ⊕ 建筑计划**。
+           计划由引擎按 (pop/tier/state) 纯派生 —— 人口涨则建筑增多/升级, 人口跌或
+           灾荒则外圈建筑消失。overlay 为空 (无演化台账) 时引擎原样吐骨架 ⇒ 与旧的
+           settleJson 逐字节等同 (未演化世界零变化)。
+           ⚠ 复用同一解析器: citySettlePlanJson 的输出结构与 settleJson 逐字段相同。 */
+        var overlay = SettleOverlayJson(i, j);
+        using var d = JsonDocument.Parse(vm.Call("citySettlePlanJson", i, j, overlay));
         var root = d.RootElement;
         var pack = new SettlePack
         {
@@ -375,6 +630,19 @@ public sealed class MapWorldService : IDisposable
         return GZipCodec.Compress(ProtoCodec.SerToByte(pack));
     }
 
+    /// <summary>为某区域格 (i,j) 的聚落构造「建筑计划 overlay」: `{"&lt;id&gt;":{pop,tier,state}}`。
+    /// ★ 实现已**下移到子系统** (CitySubsystem.RenderOverlayJson): 台账归 City 所有,
+    ///   让 Core 直接读它就是「Core 编译期认识 City」—— 那正是这次重构要拆掉的耦合。
+    /// ⚠ 无当前世 / 无子系统贡献 ⇒ 返回空串 ⇒ 引擎原样吐骨架 (零变化路径)。</summary>
+    private string SettleOverlayJson(int i, int j)
+    {
+        int round;
+        try { round = _ledger.Count() == 0 ? 0 : _ledger.Current().Round; }
+        catch { return ""; }
+        if (round <= 0) return "";
+        return _subsystems.OverlayJson(round, i, j);
+    }
+
     private static List<BuildingDto> ReadBuildings(JsonElement e, string name)
     {
         var list = new List<BuildingDto>();
@@ -393,6 +661,7 @@ public sealed class MapWorldService : IDisposable
                 Terrain = b.TryGetProperty("terrain", out var te) && te.ValueKind == JsonValueKind.String
                     ? te.GetString() ?? "" : "",
                 Tier = b.TryGetProperty("tier", out var ti) ? ti.GetInt32() : 0,
+                Lv = b.TryGetProperty("lv", out var lv) ? lv.GetInt32() : 0,
             });
         }
         return list;
@@ -443,10 +712,10 @@ public sealed class MapWorldService : IDisposable
      * 未来建筑事件只需 BumpBlockRev 后让客户端重拉该块即可。 */
     private sealed class BlockRevs
     {
-        public int Chunk = 1, Region = 1, Settle = 1, Poi = 1, Comm = 1;
+        public int Chunk = 1, Region = 1, Settle = 1, Poi = 1, Comm = 1, People = 1;
         public int ByBit(int bit) => bit switch
         {
-            0 => Chunk, 1 => Region, 2 => Settle, 3 => Poi, _ => Comm
+            0 => Chunk, 1 => Region, 2 => Settle, 3 => Poi, 4 => Comm, _ => People
         };
         public void Bump(uint mask)
         {
@@ -457,6 +726,11 @@ public sealed class MapWorldService : IDisposable
             if ((mask & (uint)TileMask.Settle) != 0) System.Threading.Interlocked.Increment(ref Settle);
             if ((mask & (uint)TileMask.Poi) != 0) System.Threading.Interlocked.Increment(ref Poi);
             if ((mask & (uint)TileMask.Comm) != 0) System.Threading.Interlocked.Increment(ref Comm);
+            /* 人物层: 它的输入（聚落人口）会随 tick 演化 ⇒ MarkSettleDirty 已在那一侧同时清掉
+               进程内 _peopleCache（**rev + LRU 两处都要挂才算闭环**：只 Bump rev 只解决「客户端
+               带旧 rev 重拉」，服务端 Get 仍会命中旧 LRU 包）。此处保留位号以便将来前端改为
+               「按 rev 变化重拉已加载块」时再补 Bump。 */
+            if ((mask & (uint)TileMask.People) != 0) System.Threading.Interlocked.Increment(ref People);
         }
     }
 
@@ -492,7 +766,7 @@ public sealed class MapWorldService : IDisposable
         mask &= (uint)TileMask.All;
         var revs = _blockRev.GetOrAdd("blk:" + WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j,
                                       _ => new BlockRevs());
-        int[] revArr = [revs.Chunk, revs.Region, revs.Settle, revs.Poi, revs.Comm];
+        int[] revArr = [revs.Chunk, revs.Region, revs.Settle, revs.Poi, revs.Comm, revs.People];
         var resp = new TileResponse { I = i, J = j, Mask = mask, Revs = [.. revArr] };
 
         /* 图层是否需要下发: mask 命中 且 (客户端未持有 或 rev 已变化) */
@@ -504,7 +778,14 @@ public sealed class MapWorldService : IDisposable
         }
         bool needChunk = Need(0), needRegion = Need(1), needSettle = Need(2),
              needPoi = Need(3), needComm = Need(4);
-        if (!needChunk && !needRegion && !needSettle && !needPoi && !needComm)
+        /* 图层5 人物分布 = (seed,块) 的**纯函数**, 内容永不变化 ⇒ **不走 rev 去重**:
+           只要 mask 要它, 每一发都带上。理由: 该层在前端是「热力图开关」的临时数据 ——
+           关掉开关客户端就丢数据, 但 lastRevs[5] 仍记着旧 rev ⇒ 再次打开时服务端按
+           rev「未变化」缺省下发 ⇒ 热力图**第二次打开永久空白** (且不报错)。
+           代价 = 每块一次 LRU 命中 + 小载荷; 且仅在用户开启热力图时发生 (mask 不带该位
+           则一个字节都不算 —— Need 之外再单独判 mask, 见下)。 */
+        bool wantPeople = (mask & (uint)TileMask.People) != 0;
+        if (!needChunk && !needRegion && !needSettle && !needPoi && !needComm && !wantPeople)
             return resp;   // 全层 rev 未变: 最小响应 (验收 §8.6)
 
         /* C1: 借出覆盖整个块构建期 (期间本 VM 不会被 LRU 淘汰; 内层各 GetXxxBytes
@@ -580,7 +861,84 @@ public sealed class MapWorldService : IDisposable
             foreach (var (ci, cj) in layers!.Value.comms)
                 resp.Comms.Add(UnwrapCached(WorldKeys.Comm(seed, ci, cj), GetCommBytes(seed, ci, cj)));
         }
+
+        /* 图层5: 地图人物分布 (纯派生, 不落库; 不走 rev 去重 —— 见上方 wantPeople 注释) */
+        if (wantPeople)
+            resp.People = BuildPeopleLayer(seed, i, j);
         return resp;
+    }
+
+    /* ============================================================
+     * 图层5: 地图人物分布 (2026-10-11 方案 v2)
+     * ------------------------------------------------------------
+     * 两段拼接 (**两个独立 V8**, 刻意不合并):
+     *   ① 落人格「谁在哪一格 / 这一格几个人」→ 核心 VM (有骨架 + 地形)
+     *   ② 战力合计「这一格有多少战力」       → characters VM (有六维与资源)
+     * ⚠ 纯派生 ⇒ **绝不落库、绝不进 _mem/SQLite** (落库后淘汰回读会把旧包捞回来);
+     *   只进进程内 LRU, 键含 seed 前缀。
+     * ⚠ 抛异常就让它抛 —— 吞成空层会被客户端当成「这地方本来就没人才」(静默错误)。
+     * ============================================================ */
+    private PeopleData BuildPeopleLayer(string seed, int ca, int cb)
+    {
+        /* ⚠ 本文件唯一一处与子系统的**字符串耦合**: 人物战力归 characters 子系统
+           (只有它的 V8 载了 chargen-core.js)。值 = CharactersModule.CharactersScope。
+           为什么不写类型引用: Core(Services) 不许引用具体子系统类型 (ISubsystem 契约)。 */
+        const string CharactersVmScope = "characters";
+
+        var key = "ppl:" + WorldKeys.SeedPrefix(seed) + ":" + ca + ":" + cb;
+        var hit = _peopleCache.Get(key);
+        if (hit != null) return hit;
+
+        string tilesJson;
+        using (var core = LeaseScope(WorldModule.WorldScope, seed))
+            tilesJson = core.Vm.Call("peopleBlockJson", ca, cb);
+
+        var tiles = new List<PeopleTileDto>();
+        var pairs = new List<long>();      // 扁平 [base,n, base,n, …]
+        using (var d = JsonDocument.Parse(tilesJson))
+        {
+            foreach (var t in d.RootElement.GetProperty("tiles").EnumerateArray())
+            {
+                var n = t.GetProperty("n").GetInt32();
+                tiles.Add(new PeopleTileDto
+                {
+                    Q = t.GetProperty("q").GetInt32(),
+                    R = t.GetProperty("r").GetInt32(),
+                    N = n,
+                });
+                pairs.Add(t.GetProperty("base").GetInt64());
+                pairs.Add(n);
+            }
+        }
+
+        if (tiles.Count > 0)
+        {
+            /* 传扁平数组而不是 [[base,n],…] 嵌套: 字符串拼接最省事, JS 侧按 2 步长解。
+               ⚠ 这里**不超发**: 只有 tiles.Count>0 才去借 characters VM (纯海区块零开销)。 */
+            var sb = new StringBuilder("[");
+            for (var i = 0; i < pairs.Count; i += 2)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append('[').Append(pairs[i]).Append(',').Append(pairs[i + 1]).Append(']');
+            }
+            sb.Append(']');
+
+            string sumsJson;
+            using (var ch = LeaseScope(CharactersVmScope, seed))
+                sumsJson = ch.Vm.Call("powerSumsJson", seed, sb.ToString());
+
+            using var sd = JsonDocument.Parse(sumsJson);
+            var si = 0;
+            foreach (var s in sd.RootElement.GetProperty("sums").EnumerateArray())
+            {
+                if (si >= tiles.Count) break;
+                tiles[si++].Ps = s.GetInt64();
+            }
+        }
+
+        var data = new PeopleData { Tiles = tiles };
+        _peopleCache.Set(key, data);
+        return data;
     }
 
     private static PlaceEntity ToEntity(SettlementDto s) => new()
@@ -595,7 +953,7 @@ public sealed class MapWorldService : IDisposable
     /* 块归属映射: (regions[], comms[]) — JS 权威 (blockLayersJson)
        结果仅依赖 (seed,i,j) 且内容确定 (region/comm 归属映射与事件无关),
        故按 seedprefix:i:j 加 LRU, 免每次块请求重跑 V8 + JSON 解析。 */
-    private ((int, int)[] regions, (int, int)[] comms) GetBlockLayers(JsWorldVm vm, string seed, int i, int j)
+    private ((int, int)[] regions, (int, int)[] comms) GetBlockLayers(JsVm vm, string seed, int i, int j)
     {
         var key = WorldKeys.SeedPrefix(seed) + ":" + i + ":" + j;
         var cached = _blockLayersCache.Get(key);
@@ -681,8 +1039,11 @@ public sealed class MapWorldService : IDisposable
     public byte[] GetTileBytes(string seed, int q, int r)
     {
         var cacheKey = "t:" + WorldKeys.SeedPrefix(seed) + ":" + q + ":" + r;
+        /* P: 落点世代先取样 —— 生成的中间态若恰好跨过一次落点, 旧世代号会让它
+           在下次请求被判"过期"而重算 (用**取样时**的世代号盖章, 不用生成后的)。 */
+        var pv0 = Volatile.Read(ref _placeVer);
         var cached = _tileCache.Get(cacheKey);
-        if (cached != null)
+        if (cached != null && cached.PlaceVer == pv0)
         {
             /* P1: 命中路径优先比对 service 层 roadVer (区域包生成时刷新), 免每次
                抢 V8 门闩取 RoadVersion — tile 是高频路径(小地图轮询+点击连发)。
@@ -748,7 +1109,7 @@ public sealed class MapWorldService : IDisposable
         var proto = ProtoCodec.SerToByte(tq);
         var gz = GZipCodec.Compress(proto);
 
-        _tileCache.Set(cacheKey, new TileEntry(gz, ver));
+        _tileCache.Set(cacheKey, new TileEntry(gz, ver, pv0));
         return gz;
     }
 
@@ -851,14 +1212,460 @@ public sealed class MapWorldService : IDisposable
         _sql?.Flush();
         return System.Text.Json.JsonSerializer.Serialize(new
         {
-            liveSeeds = _host.LiveSeeds,
+            liveSeeds = _host.Count,       // 跨 Scope 的活跃 VM 总数
             maxSeeds = _opt.MaxSeeds,      // 便于验证 appsettings.json 是否真的生效
+            /* ⚠ liveSeeds 的上界是「池容量 = MaxSeeds × Scope 数」, **不是** MaxSeeds ——
+               一个 seed 现在占多个 VM (世界层 + 各子系统各一个独立 V8)。w2 的
+               「LRU 有界」判据必须拿这个比, 否则会假红。 */
+            poolCapacity = _host.Capacity,
             dbRows = _sql?.Count() ?? 0,
             memRows = _mem.Count(),
             /* W: 台账对账用 —— ⚠ 只读 Count(), 不调 Current(): 别让一次探活就把第一世开出来 */
             worldRounds = _ledger.Count(),
             ledgerPersisted = _ledger.Persisted,
+            /* P: 玩家宗门对账 (验证脚本用) */
+            playerSects = _ledger.Count() == 0 ? 0 : _sects.CountRound(_ledger.Current().Round),
+            /* P2-α (城市扩张): 主宗数 / 附属城镇数分开报 —— 验证脚本的「本世是否干净」闸要它 */
+            playerTowns = _ledger.Count() == 0 ? 0 : _sects.CountTownsRound(_ledger.Current().Round),
+            placeVer = Volatile.Read(ref _placeVer),
+            /* T4 (世界时钟): 时钟指标。⚠ 时钟与种子同级是服务端资产 ——
+               /stats 是它唯一的对账出口 (前端另有 /api/clock 只读端点)。
+               ⚠ 未绑定时 tick=-1, 不该被误读成「世界第 -1 天」。 */
+            tick = _tickPump?.CurrentTick ?? -1,
+            tickPendingJobs = _tickPump?.Scheduler.PendingCount ?? 0,
+            tickIncomplete = _tickPump?.Metrics.IncompleteTicks ?? 0,
+            tickMsP50 = _tickPump is null ? 0 : Math.Round(_tickPump.Metrics.P50Ms, 3),
+            tickMsP95 = _tickPump is null ? 0 : Math.Round(_tickPump.Metrics.P95Ms, 3),
+            tickExecutor = _tickPump?.Snapshot().Executor ?? "",
         });
+    }
+
+    /* ============================================================
+     * 玩家宗门放置 (2026-09-23 方案 §2.3 判据链 / §3.3 七步同步序列 / §4.3 落库)
+     * ------------------------------------------------------------
+     * 分工:
+     *   判据 1/2/3/4/9 (本世 / 登录 / 配额 / 坐标 / 名字) —— 服务端自身状态, 在此;
+     *   判据 5/6/7 (深海 / 灵脉 / 领地)           —— 引擎 (placeCheckJson / domainCheck)。
+     * ⚠ PlaceCommit 必须**重新跑**一遍全部判据: 前端的 PlaceCheck 只是给用户看的提示,
+     *   它可被篡改/过期 (用户在别处又放了一座, 或世界换了)。写路径绝不信客户端结论。
+     * ============================================================ */
+
+    /// <summary>坐标合法范围。世界半径 = SPIRIT_R_TILES(500) × 2 ≈ 1000 格,
+    /// 取 2000 足够宽松; 真正的作用是把 int 极值挡在引擎之外 (A* / 缓存 key 会溢出)。</summary>
+    private const int PlaceCoordMax = 2000;
+
+    /// <summary>名字长度上限 (1~12 字符, 按 UTF-16 单元计)。</summary>
+    private const int PlaceNameMax = 12;
+
+    /// <summary>两次「贵的提交」之间的最小间隔 (ms)。一次 = ~450ms 同步 A* (25 区域格),
+    /// 700ms 意味着稳态吞吐 ≤1.5 次/秒 (V8 占用 ≤70%), 已足够宽裕。</summary>
+    private const int PlaceCommitMinGapMs = 700;
+
+    /// <summary>上次真正进引擎的提交时刻 (TickCount64)。0 = 从未提交过。</summary>
+    private long _lastPlaceCommitMs;
+
+    public PlaceCheckResponse PlaceCheck(
+        string seed, string? account, bool authed, int q, int r, string? excludeId,
+        string? type, uint seq)
+    {
+        var cur = _ledger.Current();
+        return CheckCore(cur, seed, account, authed, q, r, excludeId, type, seq);
+    }
+
+    /// <summary>归一化聚落类型: null/空 = "sect" (立宗), 其余转小写原样返回。
+    /// ⚠ **不在 C# 里做白名单校验** —— 「town/village 才是合法的扩张类型」这条规则
+    ///   的真源是引擎 mapgen-config.js 的 EXPAND_TYPES (判定只在一处; 同 DOMAIN_R 的规矩)。
+    ///   引擎对非白名单类型回 reason='bad_type'。</summary>
+    private static string NormalizeKind(string? type)
+    {
+        var t = (type ?? "").Trim().ToLowerInvariant();
+        return t.Length == 0 ? "sect" : t;
+    }
+
+    /// <summary>扩张半径 (格; 引擎 CFG.EXPAND_R)。惰性从引擎 meta 读一次并缓存 ——
+    /// C# 侧**不镜像**这个常数, 这里只做搬运 (引擎改了配置, 重启即生效)。
+    /// 0 = 该引擎版本没有这个概念 ⇒ 一切都退化为「立宗档」(不发锚点)。</summary>
+    private int _expandR = -1;
+    private int ExpandR(string seed)
+    {
+        if (_expandR >= 0) return _expandR;
+        int v;
+        using (var lease = World(seed))
+        using (var d = JsonDocument.Parse(lease.Vm.Call("metaJson")))
+            v = d.RootElement.TryGetProperty("expandR", out var el) ? el.GetInt32() : 0;
+        _expandR = v;
+        return v;
+    }
+
+    /* ⚠ account 必须可空: 未登录会话走的就是 null 这条路 (判据 2 拦它)。
+       判据 2 之后编译器已把 account 收窄为非空 (IsNullOrEmpty 带 NotNullWhen(false))。 */
+    private PlaceCheckResponse CheckCore(
+        WorldEntry cur, string seed, string? account, bool authed,
+        int q, int r, string? excludeId, string? type, uint seq)
+    {
+        var kind = NormalizeKind(type);
+        /* 扩张档 = 不是立宗。锚点 (本宗) 与半径都从**服务端状态**推出来:
+           前端只报"我想建哪种", 不报坐标 —— 否则改一个数字就能把附属城镇甩到天边。 */
+        var expand = !string.Equals(kind, "sect", StringComparison.Ordinal);
+        var resp = new PlaceCheckResponse
+        {
+            Q = q, R = r, Seq = seq, Type = kind,
+            QuotaMax = _sects.MaxPerAccount, TownMax = _sects.TownMaxPerSect,
+        };
+
+        /* 判据 1: 必须是**当前世** (世界可按 seed 确定性重建, 但玩家资产按「第几世」记 ——
+           在已退场的一世里大兴土木, 记录会永远读不回来) */
+        if (!string.Equals(seed, cur.Seed, StringComparison.Ordinal))
+        {
+            resp.Reason = "world_stale";
+            resp.Err = "该世界已退场, 请刷新后领当前世";
+            return resp;
+        }
+        if (!authed || string.IsNullOrEmpty(account))                  // 判据 2: 登录
+        {
+            resp.Reason = "need_login";
+            resp.Err = "卜居需要先登录";
+            return resp;
+        }
+        if (Math.Abs((long)q) > PlaceCoordMax || Math.Abs((long)r) > PlaceCoordMax)   // 判据 4: 坐标
+        {
+            resp.Reason = "bad_coord";
+            return resp;
+        }
+        /* 判据 3: 配额 —— **分两档** (立宗按账号数, 拓土按附属数), 且拓土必须有本宗当锚点 */
+        if (expand)
+        {
+            var main = _sects.Find(account, cur.Round);
+            resp.Towns = _sects.CountTowns(account, cur.Round);
+            resp.Quota = resp.Towns;
+            resp.QuotaMax = _sects.TownMaxPerSect;
+            if (main == null)
+            {
+                resp.Reason = "no_sect";
+                resp.Err = "尚未立宗, 无处拓土";
+                return resp;
+            }
+            resp.AnchorQ = main.Q;
+            resp.AnchorR = main.R;
+            resp.HasAnchor = true;
+            if (_sects.TownMaxPerSect > 0 && resp.Towns >= _sects.TownMaxPerSect)
+            {
+                resp.Reason = "quota_exceeded";
+                resp.Err = "附属城镇已达上限";
+                return resp;
+            }
+        }
+        else
+        {
+            var used = _sects.CountOf(account, cur.Round);
+            resp.Quota = used;
+            resp.QuotaMax = _sects.MaxPerAccount;
+            resp.Towns = _sects.CountTowns(account, cur.Round);
+            if (used >= _sects.MaxPerAccount)
+            {
+                resp.Reason = "quota_exceeded";
+                resp.Err = "此世已立宗门";
+                return resp;
+            }
+        }
+        /* 判据 5/6/7 + 扩张: 引擎 (深海 / 灵脉 / 领地 / 距本宗太远) —— 一次 V8 往返全算完 */
+        var modeJson = expand
+            ? JsonSerializer.Serialize(new { type = kind, aq = resp.AnchorQ, ar = resp.AnchorR, maxR = ExpandR(seed) })
+            : JsonSerializer.Serialize(new { type = kind });
+        string json;
+        using (var lease = World(cur.Seed))
+            json = lease.Vm.Call("placeCheckJson", q, r, excludeId ?? "", modeJson);
+        using var d = JsonDocument.Parse(json);
+        var rt = d.RootElement;
+        if (rt.TryGetProperty("expand", out var exEl))
+        {
+            resp.MaxR = exEl.TryGetProperty("maxR", out var mr) ? mr.GetInt32() : 0;
+            /* 引擎在「不设上限」时回 dist = -1 ⇒ 夹到 0 (哨兵语义见 DTO 注释: 不用 -1) */
+            var dv = exEl.TryGetProperty("dist", out var dd) ? dd.GetInt32() : 0;
+            resp.AnchorDist = dv > 0 ? dv : 0;
+        }
+        resp.RegionI = rt.GetProperty("regionI").GetInt32();
+        resp.RegionJ = rt.GetProperty("regionJ").GetInt32();
+        resp.Deep = rt.GetProperty("deep").GetBoolean();
+        resp.OnVein = rt.GetProperty("onVein").GetBoolean();
+        resp.VeinD = rt.GetProperty("veinD").GetInt32();
+        resp.Spirit = F(rt, "spirit");
+        resp.SpiritMin = F(rt, "spiritMin");
+        resp.Biome = rt.GetProperty("biome").GetInt32();
+        resp.Elev = F(rt, "elev");
+        if (rt.TryGetProperty("blocker", out var bl) && bl.ValueKind == JsonValueKind.Object)
+        {
+            resp.Blocker = new PlaceBlockDto
+            {
+                Id = bl.GetProperty("id").GetString() ?? "",
+                Type = bl.GetProperty("type").GetString() ?? "",
+                Tier = bl.GetProperty("tier").GetInt32(),
+                Q = bl.GetProperty("q").GetInt32(),
+                R = bl.GetProperty("r").GetInt32(),
+                Dist = bl.GetProperty("dist").GetInt32(),
+                Need = bl.GetProperty("need").GetInt32(),
+            };
+        }
+        if (rt.TryGetProperty("near", out var near) && near.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var n in near.EnumerateArray())
+            {
+                resp.Near.Add(new PlaceDomainDto
+                {
+                    Id = n.GetProperty("id").GetString() ?? "",
+                    Type = n.GetProperty("type").GetString() ?? "",
+                    Tier = n.GetProperty("tier").GetInt32(),
+                    Q = n.GetProperty("q").GetInt32(),
+                    R = n.GetProperty("r").GetInt32(),
+                    Dist = n.GetProperty("dist").GetInt32(),
+                    Need = n.GetProperty("need").GetInt32(),
+                    Name = n.TryGetProperty("name", out var nm) && nm.ValueKind == JsonValueKind.String
+                        ? nm.GetString() ?? "" : "",
+                });
+            }
+        }
+        resp.Ok = rt.GetProperty("can").GetBoolean();
+        resp.Reason = resp.Ok ? "" : (rt.GetProperty("reason").GetString() ?? "too_close");
+        return resp;
+    }
+
+    public PlaceCommitResponse PlaceCommit(
+        string seed, string? account, bool authed, int q, int r, string? name, int tier,
+        string? type, string? idemKey, uint seq)
+    {
+        var resp = new PlaceCommitResponse { Seq = seq, IdemKey = idemKey ?? "" };
+        var cur = _ledger.Current();
+        var kind = NormalizeKind(type);
+        var expand = !string.Equals(kind, "sect", StringComparison.Ordinal);
+
+        /* 判据 1: 本世 */
+        if (!string.Equals(seed, cur.Seed, StringComparison.Ordinal))
+        {
+            resp.Reason = "world_stale";
+            resp.Err = "该世界已退场, 请刷新后领当前世";
+            return resp;
+        }
+        /* 本账号在本世的**主宗** —— 扩张档它是锚点, 立宗档它是"原地重建"的豁免对象。 */
+        var main = _sects.Find(account ?? "", cur.Round);
+        /* 幂等: 同 IdemKey 直接回放上次响应 —— 同步重算 ~450ms 期间用户狂点确认键的兜底。
+           ⚠ 必须放在**任何写动作之前**: 否则第二次提交会把第一座的配额/落点又算一遍。
+           ⚠ v2 起一个账号有多行 ⇒ 按 (Account,Round,IdemKey) 在**全部行**里找,
+             不能再拿 (Account,Round) 当唯一键 (那会把附属城镇的回放记到主宗头上)。 */
+        if (!string.IsNullOrEmpty(idemKey))
+        {
+            var replayRow = _sects.FindByIdemKey(account ?? "", cur.Round, idemKey);
+            if (replayRow != null && !string.IsNullOrEmpty(replayRow.Resp))
+            {
+                try
+                {
+                    var replay = JsonSerializer.Deserialize<PlaceCommitResponse>(replayRow.Resp);
+                    if (replay != null) { replay.Seq = seq; return replay; }
+                }
+                catch { /* 回放失败则照常重做 */ }
+            }
+        }
+
+        /* 判据 2~7: 与 check 同一份实现 (不做两套判据!)
+           ⚠ excludeId 只在**立宗档**传 (原地重建时豁免自己那座);
+             扩张档**必须为空** —— 本宗正是那条"领地"约束的来源, 豁免了就等于
+             "可以贴着自己的宗门建", 10 格辖域会退化成"哪都能建"。 */
+        var chk = CheckCore(cur, seed, account, authed, q, r,
+                            expand ? null : main?.Id, kind, seq);
+        if (!chk.Ok)
+        {
+            resp.Reason = chk.Reason;
+            resp.Err = chk.Err;
+            return resp;
+        }
+        /* 判据 9: 名字 1~12 字 (在动引擎之前判 —— 别把坏名字写进 ext 层) */
+        var n2 = (name ?? "").Trim();
+        if (n2.Length < 1 || n2.Length > PlaceNameMax)
+        {
+            resp.Reason = "bad_name";
+            resp.Err = $"{KindLabel(kind)}名需 1~{PlaceNameMax} 字";
+            return resp;
+        }
+        var t2 = Math.Clamp(tier, 1, 3);
+
+        /* ⑧ 全局提交闸 (只卡**贵的那条路**)。
+           为什么是全局而非每账号: demo 鉴权下「任意非空账号即登录」⇒ 每账号限流挡不住
+           「换账号刷」; 而这条路的成本是 ~450ms 的**同步 A*** —— 一次几座就会把 V8 门闩
+           占满, 连带 Chunk/Region 请求全部排队。
+           为什么放在这里而不是传输层: 上面的幂等回放与配额拒绝都**不碰 V8**, 不该被闸
+           误伤 (放传输层会把「狂点确认键」的第二次也挡掉)。
+           ⚠ 用 Interlocked 而不是 lock: 高频失败路径上不要引入争用。 */
+        var nowMs = Environment.TickCount64;
+        var last = Interlocked.Read(ref _lastPlaceCommitMs);
+        if (last != 0 && nowMs - last < PlaceCommitMinGapMs)
+        {
+            resp.Reason = "too_frequent";
+            resp.Err = "卜居过于频繁, 请稍候再试";
+            return resp;
+        }
+        Interlocked.Exchange(ref _lastPlaceCommitMs, nowMs);
+
+        /* 步 1~6: 引擎侧落点 + 清派生状态 + 同步重算受影响区域道路 + roadVer+1
+           (一次 V8 调用, 全程持锁 —— 见 mapgen-server.js commitPlace 的头注释)
+           ⚠ 扩张档的 aq/ar/maxR 由服务端填 (取自上面那份台账), 前端给不了;
+             引擎侧 commitPlace 的步 0 还会**独立复判**一次 (白名单 + 半径)。 */
+        var optsJson = expand
+            ? JsonSerializer.Serialize(new
+            {
+                type = kind, tier = 1, name = n2, owner = account ?? "",
+                aq = main!.Q, ar = main!.R, maxR = ExpandR(seed),
+            })
+            : JsonSerializer.Serialize(new
+            {
+                type = "sect", tier = t2, name = n2, owner = account ?? "", maxR = 0,
+            });
+        string json;
+        using (var lease = World(seed))
+            json = lease.Vm.Call("commitPlace", q, r, optsJson);
+        using var d = JsonDocument.Parse(json);
+        var rt = d.RootElement;
+        /* 引擎侧的二次校验可能否掉本次 (too_far / bad_type) ⇒ 必须显式处理,
+           否则会把 null 当成功继续往下走 (静默落库一条不存在的聚落)。 */
+        if (!rt.TryGetProperty("ok", out var okEl) || okEl.GetInt32() != 1)
+        {
+            resp.Reason = rt.TryGetProperty("reason", out var rEl)
+                ? (rEl.GetString() ?? "bad_type") : "bad_type";
+            resp.Err = "落点未通过引擎复判";
+            return resp;
+        }
+        var stEl = rt.GetProperty("st");
+        var st = new SettlementDto
+        {
+            Id = stEl.GetProperty("id").GetString() ?? "",
+            Type = stEl.GetProperty("type").GetString() ?? "sect",
+            Q = stEl.GetProperty("q").GetInt32(),
+            R = stEl.GetProperty("r").GetInt32(),
+            X = F(stEl, "x"),
+            Y = F(stEl, "y"),
+            Name = stEl.GetProperty("name").GetString() ?? "",
+            Pop = stEl.GetProperty("pop").GetInt32(),
+            Owner = stEl.TryGetProperty("owner", out var ow) && ow.ValueKind == JsonValueKind.String
+                ? ow.GetString() ?? "" : "",
+            Tier = stEl.GetProperty("tier").GetInt32(),
+            State = stEl.GetProperty("state").GetInt32(),
+            ExpireTs = stEl.GetProperty("expireTs").GetInt64(),
+        };
+        var regions = ReadPairs(rt.GetProperty("regions"));
+        var blocks = ReadPairs(rt.GetProperty("blocks"));
+        var roadVer = rt.GetProperty("roadVer").GetInt64();
+        var ms = rt.GetProperty("ms").GetInt32();
+        var nRoad = rt.GetProperty("nRoad").GetInt32();
+
+        /* 步 7: 落库 (独立表 PlayerSect, 见 PlayerSectStore 头注释)
+           SectId: 主宗自己留空; 附属城镇记住它挂在哪座主宗上 —— 将来「按宗门等级限制
+           附属数量」要用它数, 而这正是**唯一正确**的口径 (per-宗 而不是 per-账号)。 */
+        var row = new PlayerSectEntry
+        {
+            Account = account ?? "", Round = cur.Round, IdemKey = idemKey ?? "",
+            Id = st.Id, Type = st.Type, Q = st.Q, R = st.R, Name = st.Name,
+            Pop = st.Pop, Owner = st.Owner, Tier = st.Tier, State = st.State, ExpireTs = st.ExpireTs,
+            SectId = expand ? (main?.Id ?? "") : "",
+        };
+        row.Json = PlayerSectStore.BuildJson(row);
+        _sects.Put(row);
+
+        /* 缓存失效 + 脏块 Bump + roadVer 观测 + tile 世代前进 */
+        ApplyPlaceChange(seed, regions, blocks, roadVer);
+
+        resp.Ok = true;
+        resp.Sect = st;
+        resp.RegionI = rt.GetProperty("regionI").GetInt32();
+        resp.RegionJ = rt.GetProperty("regionJ").GetInt32();
+        resp.RoadVer = roadVer;
+        resp.Ms = ms;
+        resp.Roads = nRoad;
+        resp.Towns = _sects.CountTowns(account ?? "", cur.Round);
+        resp.Places = _sects.CountOf(account ?? "", cur.Round) + resp.Towns;
+        foreach (var (ca, cb) in blocks) resp.Blocks.Add(new BlockRef { Ca = ca, Cb = cb });
+
+        /* 幂等回放记录 (放最后: 只有真正成功才记; 按**这一座**的 id 落, 见 store 注释) */
+        try { _sects.PutResp(account ?? "", cur.Round, st.Id, idemKey ?? "",
+                             JsonSerializer.Serialize(resp)); }
+        catch (Exception ex) { Console.Error.WriteLine("[MapWorldService] 幂等响应落库失败: " + ex.Message); }
+        return resp;
+    }
+
+    /// <summary>类型 → 中文标签 (只用于文案; 白名单校验不在这里)。</summary>
+    private static string KindLabel(string kind) => kind switch
+    {
+        "town" => "城镇",
+        "village" => "村落",
+        "fishing" => "渔村",
+        _ => "宗门",
+    };
+
+    /// <summary>登录时回填「我的聚落」(主宗 + 附属城镇) —— 见 LoginResponse.MyPlaces 的注释。
+    /// 无持久化 / 该账号在本世还没立宗 ⇒ 空列表 (前端照常显示「尚未择地立宗」)。
+    /// ⚠ 只回**当前世**的资产: 退场世的数据绝不能漏出去 (前端会当真)。</summary>
+    public (List<SettlementDto> Places, int TownMax) MyPlaces(string? account)
+    {
+        var outList = new List<SettlementDto>();
+        if (!string.IsNullOrEmpty(account))
+        {
+            var cur = _ledger.Current();
+            foreach (var e in _sects.ByAccount(account, cur.Round))
+            {
+                outList.Add(new SettlementDto
+                {
+                    Id = e.Id, Type = e.Type, Q = e.Q, R = e.R,
+                    Name = e.Name, Pop = e.Pop, Owner = e.Owner, Tier = e.Tier,
+                    State = e.State, ExpireTs = e.ExpireTs,
+                });
+            }
+        }
+        return (outList, _sects.TownMaxPerSect);
+    }
+
+    /// <summary>一次落点的服务端缓存失效 (方案 §3.4/§3.6 明确要求的那一套)。
+    /// ⚠ 四件事缺一不可, 少任何一件都是**静默故障** (不报错、只表现为"放下去没反应"):
+    ///   ① 区域包 / 足迹包按键作废 (内存三级 + **SQLite** —— settle 包是落库的,
+    ///      只清 _mem 会在被淘汰后经 ReadSqlBackfill 把旧包捞回来);
+    ///   ② blockLayersJson 结果整表作废 (它现在依赖 ext 层, 见 mapgen-server 的同名注释);
+    ///   ③ 脏块 BumpBlockRev (让下次请求携带旧 rev ⇒ 服务端重发可变图层);
+    ///   ④ roadVer 观测 + tile 世代前进 (tileJson 的 onRoad/place 都变了)。
+    /// ⚠ **只做 ③ 是不够的**: 前端对**已加载**的块不会自动重拉 (main.js updateStreaming
+    ///   的入队条件是 `!chunkData.has(key)`), 所以PlaceCommitResponse.Blocks 也必须回给前端。 </summary>
+    private void ApplyPlaceChange(
+        string seed, (int, int)[] regions, (int, int)[] blocks, long roadVer)
+    {
+        foreach (var (i, j) in regions)
+        {
+            EvictWithGate(seed, i, j);
+        }
+        _blockLayersCache.Clear();
+
+        const TileMask hot = TileMask.Region | TileMask.Settle | TileMask.Poi | TileMask.Comm;
+        foreach (var (ca, cb) in blocks) BumpBlockRev(seed, ca, cb, hot);
+
+        ObserveRoadVer(WorldKeys.SeedPrefix(seed), roadVer);
+        Interlocked.Increment(ref _placeVer);
+    }
+
+    /* 按键作废 + 与 BuildOnce 的 per-key 门闩互斥:
+       若此刻正有一条 GetRegionBytes 在算这个 key, 我们**等它算完再删** ——
+       否则它的产物会在我们删完之后被写回缓存 (旧包复活)。 */
+    private void EvictWithGate(string seed, int i, int j)
+    {
+        var rk = WorldKeys.Region(seed, i, j);
+        var sk = WorldKeys.Settle(seed, i, j);
+        foreach (var key in new[] { rk, sk })
+        {
+            var gate = _buildGates.GetOrAdd(key, _ => new object());
+            lock (gate)
+            {
+                _regionHot.Remove(key);
+                _regionPackCache.Remove(key);
+                _settlePackCache.Remove(key);
+                _mem.DeleteByKey(key);
+                _sql?.DeleteDeferred(key);
+            }
+            /* ⚠ 刻意**不** TryRemove 这个 gate: 留着它作为「后续 build 的会合点」,
+               下一次 BuildOnce 用同一把锁, 就与本次作废形成全序。 */
+        }
     }
 
     /* T3: 后台维护 — 周期排空写队列 + 清理「非活跃 seed」的历史缓存行
@@ -873,7 +1680,7 @@ public sealed class MapWorldService : IDisposable
                 try
                 {
                     _sql?.Flush();
-                    if (_sql != null && _host.LiveSeeds > 0)
+                    if (_sql != null && _host.Count > 0)
                     {
                         var prefixes = new List<string>();
                         foreach (var seed in _host.Seeds)
@@ -895,7 +1702,7 @@ public sealed class MapWorldService : IDisposable
                     /* C5: _blockRev 无别的淘汰路径 (每块一条 key), 长期漫游不同 seed 会线性增长
                        → 按活跃 seed 前缀裁剪。被裁掉的只是「脏标记」, 通知客户端下一次
                        全量拉取即可自愈, 不影响正确性。 */
-                    if (_host.LiveSeeds > 0)
+                    if (_host.Count > 0)
                     {
                         var live = new List<string>();
                         foreach (var seed in _host.Seeds) live.Add("blk:" + WorldKeys.SeedPrefix(seed) + ":");
@@ -945,6 +1752,11 @@ public sealed class MapWorldService : IDisposable
         _sql?.Flush();              // P6: 退出前排空批量写入, 尽量落库
         _sql?.Dispose();
         _ledger.Dispose();
+        _sects.Dispose();
+        /* ★ 子系统台账的释放交给注册表 —— Core 不认识具体子系统类型。
+           ⚠ 必须在 _sql.Dispose() **之前**: 各子系统用的是独立的连接串 (同库不同表),
+             但它们自己 flush; 这里只保证「先关子系统, 再关地图缓存」。 */
+        _subsystems.Dispose();
         _mem.Dispose();
         _maintCts.Dispose();
     }

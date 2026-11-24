@@ -21,11 +21,11 @@
     --seal: #a63a2c;
     --panel-border: rgba(150, 128, 96, 0.55);
     /* 小地图面板几何 —— 面板高 = --mm-h (画布) + --mm-chrome (头行+提示+内边距+间隙, 实测 57px)。
-       ⚠ 2026-11-24: 山川志 (#info) 不再靠这几个变量推出 bottom (它已改为自由拖动浮窗),
-         --mm-gap 随之删除; --mm-chrome 仍留给判据/文档描述面板总高。 */
+       #info (山川志) 的 bottom 由这几个变量推出: 早先写死成 230px/168px, 画布高度一变就会压到小地图上。 */
     --mm-h: 141px;          /* 小地图画布高度 (窄屏另给) */
     --mm-chrome: 57px;      /* 画布之外的面板垂直占位 */
     --mm-bottom: 18px;      /* 面板距视口底 */
+    --mm-gap: 14px;         /* 山川志与小地图的间距 */
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; }
@@ -78,18 +78,26 @@
                 rgba(46,42,36,0.32) 68%, rgba(46,42,36,0) 100%);
   }
 
-  /* ---- 顶栏 ----
-     2026-11-24 (用户: 「删除UI上的这几个, 因为不好用」): 左上角的「题名牌」与「宗门录 + 择宗」
-     整块移除, 顶栏只剩右上齿轮。故这里的排布从 space-between 改成 flex-end ——
-     只剩一个子元素时 space-between 会把它顶到左边, 而齿轮必须留在右上。
-     #topbar 本身仍保留: 齿轮需要它做定位上下文, 且将来再有顶部控件也挂这里。 */
+  /* ---- 顶栏 ---- */
   #topbar {
     position: absolute;
     top: 14px; left: 16px; right: 16px;
-    display: flex; justify-content: flex-end; align-items: flex-start;
+    display: flex; justify-content: space-between; align-items: flex-start;
     pointer-events: none;
   }
   #topbar > * { pointer-events: auto; }
+  /* 左上纵列: 工具列 + 本宗面板 (原「山河五色/种子」所在位)。
+     2026-11-24 用户: 「删除UI上的这几个, 因为不好用」—— 题名牌 (#titleBox, 含 #era/#eraRound)
+     已整块移除; 本宗面板与工具列保留 (它们回答「我是谁 / 能做什么」, 不是装饰)。 */
+  #hudLeft { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+  /* ---- 左侧工具列 (2026-09-23 用户: 「右上角的建立按钮, 要放在左边」) ----
+     卜居(立宗) / 拓土(附属城镇) 互斥显示 ⇒ 同一位置只出现一枚, 不会左右跳。
+     回宗按钮不在这里 (用户指定放在本宗面板内, 见 #btnGotoSect)。 */
+  #toolBox { display: flex; gap: 6px; padding: 6px 6px; }
+  #toolBox button { min-width: 72px; letter-spacing: 4px; }
+  /* 通用显隐: 按钮与浮层行按状态切换 (只在带 .hidden 的元素上生效) */
+  button.hidden, .pb-row.hidden { display: none; }
+  #btnGotoSect { padding: 1px 7px; font-size: 11.5px; letter-spacing: 2px; }
   #controls { padding: 6px; }
   /* ---- 齿轮: 右上角只剩这一枚 (用户 2026-09-16: 「右上角改成一个齿轮, 点开后有弹窗」)。
      旧口径是 7 个按钮/输入框平铺 (#seedInput/btnSeed/btnRegen/btnVeins/btnLabels/btnBanners/
@@ -148,7 +156,84 @@
   button:hover { border-color: var(--seal); color: var(--seal); }
   button.primary { border-color: var(--seal); color: var(--seal); }
   button.off { opacity: 0.45; text-decoration: line-through; }
+  button.on { border-color: var(--seal); color: var(--seal); }
+  #btnPlace { letter-spacing: 3px; }
   #stats { font-size: 12px; color: var(--ink-soft); letter-spacing: 1px; }
+
+  /* ---- 卜居浮层 (方案 §4.4) ----
+     ⚠ 必须与 #topbar **同级**放在 <body> 下: `.panel` 的 clip-path 会裁掉整棵子树
+       (弹窗/全屏小地图踩过同一条)。顶栏左右两块面板已占满, 故取视口顶部居中。
+     pointer-events 保持 auto: 它是可交互的 (起名/品阶/取消), 且它下面的画布仍能收
+     到拖动 —— 面板只覆盖自己那块 (没有铺满全屏的遮罩)。 */
+  #placeBox {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 66; width: 306px; max-width: calc(100vw - 24px); padding: 9px 13px 11px;
+  }
+  #placeBox.hidden { display: none; }
+  #placeBox .pb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #placeBox .pb-title { font-size: 13px; letter-spacing: 5px; color: var(--ink); }
+  #placeBox .pb-title b { font-weight: 400; color: var(--seal); }
+  #btnPlaceClose { padding: 1px 6px; font-size: 12px; letter-spacing: 0; border: none; background: none; color: var(--ink-soft); }
+  #btnPlaceClose:hover { color: var(--seal); }
+  .pb-row { display: flex; align-items: center; gap: 7px; margin: 6px 0; font-size: 12.5px; }
+  .pb-row .k { flex: 0 0 auto; letter-spacing: 2px; color: var(--ink-soft); }
+  #placeName {
+    flex: 1; min-width: 0; padding: 3px 6px; font-family: inherit; font-size: 13px;
+    color: var(--ink); letter-spacing: 1px;
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.95), rgba(238,229,208,0.9));
+  }
+  #placeName:focus { outline: none; border-color: var(--seal); }
+  #placeTier {
+    padding: 3px 6px; font-family: inherit; font-size: 12.5px; color: var(--ink);
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.95), rgba(238,229,208,0.9));
+  }
+  #placeMsg { min-height: 17px; margin-top: 3px; font-size: 12.5px; line-height: 1.5; letter-spacing: 1px; }
+  #placeMsg.ok  { color: #3a6b46; }
+  #placeMsg.bad { color: var(--seal); }
+  #placeMsg.busy { color: var(--ink-soft); }
+  .pb-kv { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0; font-size: 12px; color: var(--ink-soft); }
+  .pb-kv .v { color: var(--ink); }
+  .pb-kv .v.bad { color: var(--seal); }
+  .pb-hint { margin-top: 5px; font-size: 11px; line-height: 1.7; color: var(--ink-faint); }
+
+  /* ---- 本宗面板 (代替原「山河五色」图例) ----
+     2026-09-23 十二版: 旧「宗门录 + 择宗」整条闭环下线 —— 本面板只显示玩家
+     **自己的**宗门 (数据源 = 服务端 PlayerSect 表, 见 docs/玩家信息表设计.md)。
+     ⚠ 「看其他宗门/聚落的详情」不在本面板, 已移入独立模块 js/infocard.js。
+     #sectWrap 仍作定位上下文保留 (将来若在本面板上挂浮层: .panel 的 clip-path
+     会裁剪整个子树 ⇒ 浮层必须与 #sectBox 平级放在 #sectWrap 里)。 */
+  #sectWrap { position: relative; }
+  #sectBox { width: 246px; padding: 9px 12px 11px; }
+  #sectHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #sectHead .cap { font-size: 13px; letter-spacing: 5px; color: var(--ink); }
+  #sectHead .cap b { font-weight: 400; color: var(--seal); }
+  .sec-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .sec-name { font-size: 17px; line-height: 1.3; letter-spacing: 3px; color: var(--ink); }
+  /* 朱砂印章: 宗门前二字竖排 */
+  .sec-seal {
+    flex: 0 0 auto; width: 32px; height: 32px; border-radius: 2px;
+    display: flex; align-items: center; justify-content: center;
+    writing-mode: vertical-rl; text-orientation: upright;
+    font-size: 12.5px; letter-spacing: 1px; color: rgba(250,241,228,0.95);
+    background: var(--seal); opacity: 0.92;
+    box-shadow: inset 0 0 0 1px rgba(252,242,228,0.42), inset 0 0 7px rgba(58,10,4,0.4);
+  }
+  .sec-sub { margin-top: 2px; font-size: 12px; letter-spacing: 2px; color: var(--ink-soft); }
+  #sectBody .kv { display: flex; justify-content: space-between; gap: 10px; margin: 3px 0; font-size: 12.5px; }
+  #sectBody .kv .k { flex: 0 0 auto; letter-spacing: 2px; color: var(--ink-soft); }
+  #sectBody .kv .v { text-align: right; color: var(--ink); }
+  .sec-cap { margin-top: 6px; font-size: 11.5px; letter-spacing: 3px; color: var(--ink-faint); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .tag {
+    display: inline-flex; align-items: baseline; gap: 3px; padding: 1px 6px;
+    font-size: 11.5px; letter-spacing: 1px; color: rgba(70,58,44,0.92);
+    border: 1px solid rgba(150,128,96,0.45); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.8), rgba(236,227,205,0.7));
+  }
+  .tag b { font-weight: 400; color: var(--seal); }
+  .sec-empty { padding: 12px 2px 8px; font-size: 12.5px; letter-spacing: 2px; color: var(--ink-faint); text-align: center; }
 
   /* ---- 信息面板 (#info · 山川志) ----
      2026-11-24 用户: 「点击的时候的弹窗是可以拖动的而不是在左下角」。
@@ -243,6 +328,112 @@
   }
   #mmRestore.show { display: block; }
 
+  /* ---- 众生录 · 角色窗口 (roster.js) ----
+     「在这个世界里看一个个修士」的只读窗口: 左列名册 (境界筛选 + 姓名搜索),
+     右侧详情 (六维条 / 灵根 / 功法 / 储物袋 / 特质 / 出身)。
+     ⚠ 必须与 #topbar **同级**放在 <body> 下: `.panel` 的 clip-path 会裁掉整棵子树
+       (设置弹窗 / 卜居浮层 / 全屏小地图都踩过同一条)。
+     数据源是**服务端实时生成** GET /api/characters (C# CharactersSubsystem → V8 characters
+     scope → js/chargen-core.js), 前端不再有任何预生成的静态表。 */
+  #rosterWrap {
+    position: fixed; inset: 0; z-index: 74;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #rosterWrap.hidden { display: none; }
+  .ro-mask { position: absolute; inset: 0; background: rgba(30,24,15,0.32); }
+  #rosterBox {
+    position: relative; width: 748px; max-width: calc(100vw - 28px);
+    height: min(600px, calc(100vh - 52px));
+    display: flex; flex-direction: column; padding: 11px 15px 12px;
+  }
+  .ro-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .ro-title { font-size: 14px; letter-spacing: 5px; color: var(--ink); }
+  .ro-title b { font-weight: 400; color: var(--seal); }
+  .ro-meta { flex: 1; text-align: right; font-size: 11.5px; letter-spacing: 1px; color: var(--ink-faint); }
+  #rosterBox [data-ro="close"] {
+    padding: 1px 6px; font-size: 12px; letter-spacing: 0;
+    border: none; background: none; color: var(--ink-soft);
+  }
+  #rosterBox [data-ro="close"]:hover { color: var(--seal); }
+  .ro-tools { display: flex; align-items: flex-start; gap: 10px; margin: 2px 0 5px; }
+  .ro-filters { flex: 1; display: flex; flex-wrap: wrap; gap: 4px; }
+  .ro-fchip {
+    padding: 0 7px; font-size: 11.5px; line-height: 19px; letter-spacing: 1px;
+    border: 1px solid rgba(150,128,96,0.45); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.8), rgba(236,227,205,0.7));
+    color: var(--ink-soft);
+  }
+  .ro-fchip b { font-weight: 400; margin-left: 4px; color: var(--ink-faint); }
+  .ro-fchip.on { border-color: var(--seal); color: var(--seal); }
+  .ro-fchip.on b { color: var(--seal); }
+  .ro-search {
+    flex: 0 0 158px; padding: 3px 7px; font-family: inherit; font-size: 12.5px;
+    color: var(--ink); letter-spacing: 1px;
+    border: 1px solid var(--panel-border); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.95), rgba(238,229,208,0.9));
+  }
+  .ro-search:focus { outline: none; border-color: var(--seal); }
+  .ro-body { flex: 1; min-height: 0; display: flex; gap: 12px; }
+  .ro-list {
+    flex: 0 0 232px; min-height: 0; overflow-y: auto; padding-right: 5px;
+    border-right: 1px solid rgba(150,128,96,0.28);
+  }
+  .ro-item { padding: 4px 7px; margin-bottom: 2px; cursor: pointer; border: 1px solid transparent; border-radius: 2px; }
+  .ro-item:hover { background: rgba(166,58,44,0.06); }
+  .ro-item.on { border-color: rgba(166,58,44,0.5); background: rgba(166,58,44,0.07); }
+  .ro-item .nm { font-size: 13px; letter-spacing: 1px; color: var(--ink); }
+  .ro-item .nm .dh { margin-left: 6px; font-size: 11px; color: var(--ink-faint); }
+  .ro-item .sub { font-size: 11px; letter-spacing: 1px; color: var(--ink-faint); }
+  .ro-detail { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding-right: 3px; }
+  .ro-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .ro-name { font-size: 19px; line-height: 1.3; letter-spacing: 3px; color: var(--ink); }
+  .ro-name .ro-dh { margin-left: 8px; font-size: 11.5px; letter-spacing: 1px; color: var(--seal); }
+  .ro-seal {
+    flex: 0 0 auto; width: 32px; height: 32px; border-radius: 2px;
+    display: flex; align-items: center; justify-content: center;
+    writing-mode: vertical-rl; text-orientation: upright;
+    font-size: 12.5px; letter-spacing: 1px; color: rgba(250,241,228,0.95);
+    background: var(--seal); opacity: 0.92;
+    box-shadow: inset 0 0 0 1px rgba(252,242,228,0.42), inset 0 0 7px rgba(58,10,4,0.4);
+  }
+  .ro-sub { margin-top: 3px; font-size: 12px; letter-spacing: 1px; color: var(--ink-soft); }
+  .ro-sub .ro-realm { color: var(--seal); letter-spacing: 2px; }
+  .ro-sub .ro-prog { margin-left: 8px; color: var(--ink-faint); }
+  .ro-sec { margin: 9px 0 3px; font-size: 11.5px; letter-spacing: 4px; color: var(--ink-faint); }
+  .ro-kv { display: flex; justify-content: space-between; gap: 10px; margin: 2px 0; font-size: 12.5px; }
+  .ro-kv .k { flex: 0 0 auto; letter-spacing: 2px; color: var(--ink-soft); }
+  .ro-kv .v { text-align: right; color: var(--ink); }
+  .ro-bars { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 14px; }
+  .ro-bar { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+  .ro-bar .bn { flex: 0 0 28px; color: var(--ink-soft); letter-spacing: 1px; }
+  .ro-bar .bt { flex: 1; height: 6px; border-radius: 3px; background: rgba(120,98,66,0.16); overflow: hidden; }
+  .ro-bar .bf { display: block; height: 100%; background: linear-gradient(90deg, rgba(166,58,44,0.5), var(--seal)); }
+  .ro-bar .bv { flex: 0 0 26px; text-align: right; color: var(--ink); }
+  .ro-traits { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .ro-chip-s {
+    display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px;
+    font-size: 11.5px; letter-spacing: 1px; color: rgba(70,58,44,0.92);
+    border: 1px solid rgba(150,128,96,0.45); border-radius: 2px;
+    background: linear-gradient(180deg, rgba(255,253,246,0.8), rgba(236,227,205,0.7));
+  }
+  .ro-chip-s i { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+  .ro-chip-s b { font-weight: 400; color: var(--seal); }
+  .ro-items { margin-top: 3px; }
+  .ro-item-row { display: flex; align-items: baseline; gap: 6px; padding: 1px 0; font-size: 12px; }
+  .ro-item-row i { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+  .ro-item-row .inm { color: var(--ink); letter-spacing: 1px; }
+  .ro-item-row .icat { color: var(--ink-faint); font-size: 11px; }
+  .ro-item-row .ict { margin-left: auto; color: var(--ink-soft); }
+  .ro-none { padding: 6px 0; font-size: 12px; letter-spacing: 1px; color: var(--ink-faint); }
+  .ro-msg { min-height: 15px; margin-top: 5px; font-size: 11.5px; line-height: 1.6; letter-spacing: 1px; color: var(--ink-faint); }
+  .ro-msg.bad { color: var(--seal); }
+
+  @media (max-width: 760px) {
+    .ro-list { flex-basis: 150px; }
+    .ro-search { flex-basis: 110px; }
+    .ro-bars { grid-template-columns: 1fr; }
+  }
+
   /* ---- 致命错误 ---- */
   #fatal {
     display: none; position: fixed; inset: 0; z-index: 99;
@@ -254,6 +445,8 @@
   #fatalMsg { color: var(--ink-soft); font-size: 14px; max-width: 560px; line-height: 1.7; }
 
   @media (max-width: 760px) {
+    #sectBox { width: 196px; }
+    .sec-name { font-size: 15px; letter-spacing: 2px; }
     /* 窄屏: 小地图铺满窗体宽度。
        原为左下角固定小卡 (画布 150×98): 头行「山河小图 归心 全屏 隐藏」与提示行的固有宽
        都是 188px, 绝对定位的收缩盒取最宽者 ⇒ 面板 204px, 画布只铺满 79.8%,
@@ -265,7 +458,7 @@
     #minimapBox { left: 10px; right: 10px; }
     #minimap { width: 100%; }
     #mmRestore { left: 10px; }
-    /* #info 不再贴边: 位置由 main.js 放 (点击处旁 + clamp), 窄屏靠 max-width 收窄 */
+    /* #info 不再贴边: 位置由 main.js 按点击处放 (窄屏靠 max-width 收窄, 不会出屏) */
   }
 </style>
 </head>
@@ -276,14 +469,64 @@
   </div>
 
   <div id="topbar">
+    <div id="hudLeft">
+      <!-- 题名牌 (#titleBox, 含 #era/#eraRound) 2026-11-24 已删; 左上只留工具列 + 本宗面板。 -->
+      <!-- 工具列: 「卜居」= 择地立宗 (未立宗时显示); 「拓土」= 建附属城镇 (已立宗后显示)。
+           已立宗后隐藏卜居 (一世一宗, 留着只会一直报 quota)。 -->
+      <div id="toolBox" class="panel">
+        <button id="btnPlace" title="卜居 · 择地立宗">卜居</button>
+        <button id="btnExpand" class="hidden" title="拓土 · 在本宗辖域内建附属城镇">拓土</button>
+        <button id="btnRoster" title="众生录 · 查看已生成的角色">名录</button>
+      </div>
+      <div id="sectWrap">
+        <div id="sectBox" class="panel">
+          <div id="sectHead">
+            <span class="cap">本<b>宗</b></span>
+            <button id="btnGotoSect" class="hidden" title="回宗 · 相机移回本宗">回宗</button>
+          </div>
+          <div class="ink-rule"></div>
+          <div id="sectBody"><div class="sec-empty">尚未择地立宗</div></div>
+        </div>
+      </div>
+    </div>
     <div id="controls" class="panel">
       <button id="btnGear" title="设置 · 显示项 / 世界" aria-label="设置">⚙</button>
     </div>
   </div>
 
-  <!-- 山川志: 点地图任意格弹出。可拖 (整条标题栏是把手), 位置由 main.js 写 left/top。 -->
+  <!-- 卜居/拓土浮层: 落点校验提示 + 起名/品阶 (方案 §4.4; 城市扩张 2026-09-23)。
+       与 #topbar 同级 —— .panel 的 clip-path 会裁掉子树, 塞进顶栏面板会被切。 -->
+  <div id="placeBox" class="panel hidden">
+    <div class="pb-head">
+      <span class="pb-title" id="placeTitle">卜<b>居</b></span>
+      <button id="btnPlaceClose" title="取消 (Esc)">✕</button>
+    </div>
+    <div class="ink-rule"></div>
+    <div class="pb-row">
+      <span class="k">名号</span>
+      <input id="placeName" type="text" maxlength="12" placeholder="1~12 字" autocomplete="off">
+    </div>
+    <div class="pb-row" id="placeKindRow">
+      <span class="k">类型</span>
+      <select id="placeKind"></select>
+      <span class="k" id="placeTowns"></span>
+    </div>
+    <div class="pb-row" id="placeTierRow">
+      <span class="k">品阶</span>
+      <select id="placeTier">
+        <option value="1">下品宗门 · 领 6 格</option>
+        <option value="2">中品宗门 · 领 7 格</option>
+        <option value="3">上品宗门 · 领 8 格</option>
+      </select>
+      <span class="k" id="placeQuota"></span>
+    </div>
+    <div id="placeState"></div>
+    <div id="placeMsg"></div>
+    <div class="pb-hint" id="placeHint">移动鼠标择地, 单击落定 · Esc 取消<br>朱砂 = 不可立 · 墨绿 = 可立</div>
+  </div>
+
   <div id="info" class="panel hidden">
-    <h3><span>山川志</span><button id="infoClose" title="关闭">✕</button></h3>
+    <h3><span>山川志</span><button id="infoClose">✕</button></h3>
     <div id="infoBody"></div>
   </div>
 
@@ -306,11 +549,17 @@
         <span class="nm">灵脉名</span><span class="dsc">灵脉签 · 签面敷五行色</span></label>
       <label class="set-item"><input type="checkbox" data-zm="nameRegion">
         <span class="nm">区域名</span><span class="dsc">山川注记淡字</span></label>
+      <label class="set-item"><input type="checkbox" data-zm="domain">
+        <span class="nm">领地圈</span><span class="dsc">各聚落的领地范围 (规模决定)</span></label>
       <label class="set-item"><input type="checkbox" data-zm="clouds">
         <span class="nm">云气</span><span class="dsc">云毯 · 地面云影</span></label>
+      <label class="set-item"><input type="checkbox" data-zm="people">
+        <span class="nm">人烟</span><span class="dsc">人力热力图 · 每格战力合计 (点击看详情)</span></label>
       <div class="ink-rule"></div>
       <div class="set-cap">世 界</div>
       <div class="set-kv"><span class="k">轮次</span><span class="v" id="setRound">-</span></div>
+      <!-- 岁次: 原在已删的题名牌上 (#era), 2026-11-24 迁到设置弹窗 (唯一的时间显示点) -->
+      <div class="set-kv"><span class="k">岁次</span><span class="v" id="setEra">-</span></div>
       <div class="set-kv"><span class="k">种子</span><span class="v" id="setSeed">-</span></div>
       <div class="set-kv"><span class="k">来历</span><span class="v" id="setSeedSrc">-</span></div>
       <button id="btnRegen" class="primary">另 启 一 世</button>
@@ -320,6 +569,31 @@
       <div class="set-cap">山 河</div>
       <div id="stats">-</div>
       <div class="set-msg" id="setMsg"></div>
+    </div>
+  </div>
+
+  <!-- 众生录 (角色窗口) —— 与 #topbar / #settingsWrap 同级: 面板的 clip-path 会裁掉子树。
+       只读窗口: 左名册 (境界筛选 + 姓名搜索) / 右详情 (六维·功法·储物袋…)。
+       数据源 = 服务端 GET /api/characters (角色按当前世 seed 现算); 由 web/js/roster.js 独占管理。 -->
+  <div id="rosterWrap" class="hidden">
+    <div class="ro-mask" data-ro="mask"></div>
+    <div id="rosterBox" class="panel" role="dialog" aria-modal="true" aria-label="众生录">
+      <div class="ro-head">
+        <span class="ro-title">众<b>生</b>录</span>
+        <span class="ro-meta" data-ro="meta">-</span>
+        <button data-ro="close" title="关闭 (Esc)">✕</button>
+      </div>
+      <div class="ink-rule"></div>
+      <div class="ro-tools">
+        <div class="ro-filters" data-ro="filters"></div>
+        <input class="ro-search" data-ro="search" type="text" maxlength="16"
+               placeholder="姓名 / 道号" autocomplete="off">
+      </div>
+      <div class="ro-body">
+        <div class="ro-list" data-ro="list"></div>
+        <div class="ro-detail" data-ro="detail"></div>
+      </div>
+      <div class="ro-msg" data-ro="msg"></div>
     </div>
   </div>
 
@@ -369,9 +643,17 @@
        (两边都只读它; 全站唯一 eval / 唯一 init(seed) 点, 见文件头注释) -->
   <script src="js/engine-local.js"></script>
   <script src="js/minimap-vein.js"></script>
-  <!-- 小队 / 人物任务面板 (环世界式) —— 独立插件, 只加这两行即可挂载:
-       crew-model.js = 数据与规则 (无 DOM), crew-panel.js = 视图与交互 (自带 CSS 注入)。
-       ⚠ 与 main.js 零耦合: 它不调用面板, 面板也不读它的内部变量 —— 删掉这两行就干净移除。 -->
+  <script src="js/infocard.js"></script>
+  <!-- 众生录 (角色窗口): 独立模块, 数据源 = 服务端 /api/characters。
+       在 main.js 之前 —— main.js 的 boot 里只调一次 initRoster() 注入根节点。 -->
+  <script src="js/roster.js"></script>
+  <!-- 图层5 地图人物分布 (热力图 + 点击战力淡出 + 人烟面板): 独立可拔插模块,
+       必须在 main.js **之前** —— main.js 的 boot 里 PeopleLayer.init 注入依赖。 -->
+  <script src="js/people-layer.js"></script>
+  <!-- 小队 / 能力 / 背包面板 —— 独立插件, 只加这几行即可挂载:
+       crew-model.js = 数据与规则 (无 DOM), crew-panel.js = 视图与交互 (CSS 经 SELF 注入),
+       crew-bridge.js = 与服务端 /api/crew 的双向转换 (可选, 无服务端时纯本地).
+       ⚠ 与 main.js 零耦合: 它不调用面板, 面板也不读它的内部变量 —— 删掉这几行就干净移除。 -->
   <script src="js/crew/crew-model.js"></script>
   <script src="js/crew/crew-panel.js"></script>
   <script src="js/crew/crew-bridge.js"></script>

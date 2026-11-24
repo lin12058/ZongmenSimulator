@@ -1,0 +1,5541 @@
+{
+  "schema": "cultivators/v1",
+  "generatedAt": null,
+  "seed": "zongmen",
+  "count": 24,
+  "baseMeta": {
+    "schema": "cultivation-base/v1",
+    "version": "1.0.0"
+  },
+  "dict": {
+    "attributes": [
+      {
+        "key": "gengu",
+        "name": "根骨",
+        "abbr": "骨",
+        "desc": "体魄与先天根基：决定气血、炼体上限、寿元微调。"
+      },
+      {
+        "key": "wuxing",
+        "name": "悟性",
+        "abbr": "悟",
+        "desc": "领悟力：决定修炼速度、功法参悟、法术掌握。"
+      },
+      {
+        "key": "shenshi",
+        "name": "神识",
+        "abbr": "识",
+        "desc": "神魂之力：决定感知、探查、法术威能与御物。"
+      },
+      {
+        "key": "qiyun",
+        "name": "气运",
+        "abbr": "运",
+        "desc": "机缘厚薄：决定奇遇、暴击式好运与逢凶化吉。方差最大。"
+      },
+      {
+        "key": "xinjing",
+        "name": "心境",
+        "abbr": "心",
+        "desc": "道心稳固：决定突破成功率、抗心魔、走火入魔风险。"
+      },
+      {
+        "key": "meili",
+        "name": "魅力",
+        "abbr": "魅",
+        "desc": "风仪气度：决定社交好感、结缘、招募与议价。"
+      }
+    ],
+    "derived": [
+      {
+        "key": "zizhi",
+        "name": "资质",
+        "desc": "综合灵根与悟性的修行天分(0~100+)。"
+      },
+      {
+        "key": "qianli",
+        "name": "潜力",
+        "desc": "上限估值：越高越可能问鼎高境。"
+      },
+      {
+        "key": "shengwang",
+        "name": "声望",
+        "desc": "江湖名望，初始为 0，随经历增长。"
+      }
+    ],
+    "resources": [
+      {
+        "key": "qi",
+        "name": "灵力",
+        "unit": "点",
+        "desc": "施法消耗，随修炼增长。"
+      },
+      {
+        "key": "qixue",
+        "name": "气血",
+        "unit": "点",
+        "desc": "肉身根本，受伤扣除。"
+      },
+      {
+        "key": "jingshen",
+        "name": "精神",
+        "unit": "点",
+        "desc": "神魂额度，耗神则亏。"
+      }
+    ],
+    "realms": [
+      {
+        "id": "fanren",
+        "name": "凡人",
+        "seq": 0
+      },
+      {
+        "id": "lianqi",
+        "name": "炼气期",
+        "seq": 1
+      },
+      {
+        "id": "zhuji",
+        "name": "筑基期",
+        "seq": 2
+      },
+      {
+        "id": "jindan",
+        "name": "金丹期",
+        "seq": 3
+      },
+      {
+        "id": "yuanying",
+        "name": "元婴期",
+        "seq": 4
+      },
+      {
+        "id": "huashen",
+        "name": "化神期",
+        "seq": 5
+      },
+      {
+        "id": "lianxu",
+        "name": "炼虚期",
+        "seq": 6
+      },
+      {
+        "id": "heti",
+        "name": "合体期",
+        "seq": 7
+      },
+      {
+        "id": "dacheng",
+        "name": "大乘期",
+        "seq": 8
+      },
+      {
+        "id": "dujie",
+        "name": "渡劫期",
+        "seq": 9
+      }
+    ],
+    "spiritRoots": [
+      {
+        "id": "tian",
+        "name": "天灵根",
+        "rank": 7,
+        "speedMul": 3,
+        "color": "#e53935"
+      },
+      {
+        "id": "yi",
+        "name": "异灵根",
+        "rank": 6,
+        "speedMul": 2.6,
+        "color": "#fb8c00"
+      },
+      {
+        "id": "dan",
+        "name": "单灵根",
+        "rank": 5,
+        "speedMul": 2.2,
+        "color": "#ab47bc"
+      },
+      {
+        "id": "shuang",
+        "name": "双灵根",
+        "rank": 4,
+        "speedMul": 1.6,
+        "color": "#42a5f5"
+      },
+      {
+        "id": "san",
+        "name": "三灵根",
+        "rank": 3,
+        "speedMul": 1.25,
+        "color": "#4caf50"
+      },
+      {
+        "id": "si",
+        "name": "四灵根",
+        "rank": 2,
+        "speedMul": 1,
+        "color": "#9e9e9e"
+      },
+      {
+        "id": "wu",
+        "name": "五行杂灵根",
+        "rank": 1,
+        "speedMul": 0.75,
+        "color": "#795548"
+      },
+      {
+        "id": "fei",
+        "name": "废灵根",
+        "rank": 0,
+        "speedMul": 0.5,
+        "color": "#616161"
+      }
+    ],
+    "purityTiers": [
+      {
+        "min": 95,
+        "name": "通玄",
+        "mul": 1.35
+      },
+      {
+        "min": 85,
+        "name": "无瑕",
+        "mul": 1.2
+      },
+      {
+        "min": 70,
+        "name": "上品",
+        "mul": 1.1
+      },
+      {
+        "min": 45,
+        "name": "中品",
+        "mul": 1
+      },
+      {
+        "min": 20,
+        "name": "下品",
+        "mul": 0.9
+      },
+      {
+        "min": 0,
+        "name": "驳杂",
+        "mul": 0.78
+      }
+    ],
+    "traitsTypes": [
+      {
+        "id": "tianfu",
+        "name": "天赋"
+      },
+      {
+        "id": "tizhi",
+        "name": "体质"
+      },
+      {
+        "id": "guaipi",
+        "name": "怪癖"
+      },
+      {
+        "id": "tianming",
+        "name": "天命"
+      }
+    ],
+    "traitsQuality": [
+      {
+        "id": "bai",
+        "name": "白",
+        "rank": 0,
+        "color": "#bdbdbd"
+      },
+      {
+        "id": "lv",
+        "name": "绿",
+        "rank": 1,
+        "color": "#66bb6a"
+      },
+      {
+        "id": "lan",
+        "name": "蓝",
+        "rank": 2,
+        "color": "#42a5f5"
+      },
+      {
+        "id": "zi",
+        "name": "紫",
+        "rank": 3,
+        "color": "#ab47bc"
+      },
+      {
+        "id": "cheng",
+        "name": "橙",
+        "rank": 4,
+        "color": "#fb8c00"
+      },
+      {
+        "id": "hong",
+        "name": "红",
+        "rank": 5,
+        "color": "#e53935"
+      }
+    ],
+    "techniqueCategories": [
+      {
+        "id": "xinfa",
+        "name": "心法",
+        "slot": "主修"
+      },
+      {
+        "id": "shenfa",
+        "name": "身法",
+        "slot": "辅修"
+      },
+      {
+        "id": "jianjue",
+        "name": "剑诀",
+        "slot": "辅修"
+      },
+      {
+        "id": "daofa",
+        "name": "刀法",
+        "slot": "辅修"
+      },
+      {
+        "id": "quanzhang",
+        "name": "拳掌",
+        "slot": "辅修"
+      },
+      {
+        "id": "zhifa",
+        "name": "指法",
+        "slot": "辅修"
+      },
+      {
+        "id": "gongfa_shu",
+        "name": "攻击法术",
+        "slot": "辅修"
+      },
+      {
+        "id": "fangfa_shu",
+        "name": "防御法术",
+        "slot": "辅修"
+      },
+      {
+        "id": "fuzhu_shu",
+        "name": "辅助法术",
+        "slot": "辅修"
+      },
+      {
+        "id": "dunfa",
+        "name": "遁法",
+        "slot": "辅修"
+      },
+      {
+        "id": "zhenfa",
+        "name": "阵法",
+        "slot": "技艺"
+      },
+      {
+        "id": "liandan",
+        "name": "炼丹术",
+        "slot": "技艺"
+      },
+      {
+        "id": "lianqi_shu",
+        "name": "炼器术",
+        "slot": "技艺"
+      },
+      {
+        "id": "fufa",
+        "name": "符法",
+        "slot": "技艺"
+      },
+      {
+        "id": "yushou",
+        "name": "御兽",
+        "slot": "技艺"
+      }
+    ],
+    "itemCategories": [
+      {
+        "id": "danyao",
+        "name": "丹药",
+        "stack": 99
+      },
+      {
+        "id": "lingyao",
+        "name": "灵药灵草",
+        "stack": 99
+      },
+      {
+        "id": "faqi",
+        "name": "法器",
+        "stack": 1
+      },
+      {
+        "id": "fabao",
+        "name": "法宝",
+        "stack": 1
+      },
+      {
+        "id": "fulu",
+        "name": "符箓",
+        "stack": 50
+      },
+      {
+        "id": "lingshi",
+        "name": "灵石",
+        "stack": 999999
+      },
+      {
+        "id": "cailiao",
+        "name": "炼器材料",
+        "stack": 99
+      },
+      {
+        "id": "yaoshou",
+        "name": "妖兽材料",
+        "stack": 99
+      },
+      {
+        "id": "yujian",
+        "name": "功法玉简",
+        "stack": 20
+      },
+      {
+        "id": "fushi",
+        "name": "服饰",
+        "stack": 1
+      },
+      {
+        "id": "zawu",
+        "name": "杂物",
+        "stack": 99
+      }
+    ],
+    "grades": {
+      "techniques": [
+        {
+          "id": "fan",
+          "name": "凡阶",
+          "rank": 0,
+          "color": "#9aa0a6"
+        },
+        {
+          "id": "huang",
+          "name": "黄阶",
+          "rank": 1,
+          "color": "#7cb342"
+        },
+        {
+          "id": "xuan",
+          "name": "玄阶",
+          "rank": 2,
+          "color": "#42a5f5"
+        },
+        {
+          "id": "di",
+          "name": "地阶",
+          "rank": 3,
+          "color": "#ab47bc"
+        },
+        {
+          "id": "tian",
+          "name": "天阶",
+          "rank": 4,
+          "color": "#fb8c00"
+        },
+        {
+          "id": "xian",
+          "name": "仙阶",
+          "rank": 5,
+          "color": "#e53935"
+        }
+      ],
+      "items": [
+        {
+          "id": "fan",
+          "name": "凡品",
+          "rank": 0,
+          "color": "#9aa0a6"
+        },
+        {
+          "id": "huang",
+          "name": "黄品",
+          "rank": 1,
+          "color": "#7cb342"
+        },
+        {
+          "id": "xuan",
+          "name": "玄品",
+          "rank": 2,
+          "color": "#42a5f5"
+        },
+        {
+          "id": "di",
+          "name": "地品",
+          "rank": 3,
+          "color": "#ab47bc"
+        },
+        {
+          "id": "tian",
+          "name": "天品",
+          "rank": 4,
+          "color": "#fb8c00"
+        },
+        {
+          "id": "xian",
+          "name": "仙品",
+          "rank": 5,
+          "color": "#e53935"
+        }
+      ]
+    },
+    "backgrounds": [
+      {
+        "id": "shijia",
+        "name": "世家子弟"
+      },
+      {
+        "id": "sanxiu_guaer",
+        "name": "散修孤儿"
+      },
+      {
+        "id": "liehu",
+        "name": "猎户之子"
+      },
+      {
+        "id": "yaonong",
+        "name": "药农"
+      },
+      {
+        "id": "shangjia",
+        "name": "商贾之家"
+      },
+      {
+        "id": "huangzu",
+        "name": "皇族旁支"
+      },
+      {
+        "id": "yujia",
+        "name": "渔家"
+      },
+      {
+        "id": "shanzei",
+        "name": "山贼出身"
+      },
+      {
+        "id": "shushu",
+        "name": "书塾学子"
+      },
+      {
+        "id": "zhenfa_houyi",
+        "name": "阵法师后裔"
+      },
+      {
+        "id": "lianqi_shijia",
+        "name": "炼器世家"
+      },
+      {
+        "id": "fomen_huansu",
+        "name": "佛门还俗"
+      },
+      {
+        "id": "daoguan_qitu",
+        "name": "道观弃徒"
+      },
+      {
+        "id": "modao_yigu",
+        "name": "魔道遗孤"
+      },
+      {
+        "id": "youfang_houyi",
+        "name": "游方术士后裔"
+      },
+      {
+        "id": "lingshou_bansheng",
+        "name": "灵兽伴生"
+      },
+      {
+        "id": "junwu",
+        "name": "军伍出身"
+      },
+      {
+        "id": "qigai",
+        "name": "乞儿"
+      }
+    ],
+    "alignments": [
+      {
+        "id": "zhengdao",
+        "name": "正道",
+        "color": "#42a5f5"
+      },
+      {
+        "id": "modao",
+        "name": "魔道",
+        "color": "#8e24aa"
+      },
+      {
+        "id": "zhongli",
+        "name": "中立",
+        "color": "#78909c"
+      },
+      {
+        "id": "sanxiu",
+        "name": "散修",
+        "color": "#a1887f"
+      }
+    ]
+  },
+  "characters": [
+    {
+      "v": 1,
+      "id": "c00000",
+      "genSeed": "zongmen|0",
+      "name": {
+        "surname": "郑",
+        "given": "君临",
+        "full": "郑君临",
+        "daohao": null
+      },
+      "gender": "男",
+      "age": 21,
+      "lifespan": 80,
+      "realm": {
+        "id": "fanren",
+        "name": "凡人",
+        "seq": 0,
+        "layer": "凡体",
+        "layerIndex": 0,
+        "stage": "凡人·凡体",
+        "progress": 0.776,
+        "talentScore": 97.4,
+        "talentNorm": 0.623
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "金",
+          "火",
+          "木"
+        ],
+        "element": "金·火·木",
+        "mutation": null,
+        "purity": 62,
+        "purityName": "中品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 50,
+        "wuxing": 72,
+        "shenshi": 71,
+        "qiyun": 43,
+        "xinjing": 37,
+        "meili": 46
+      },
+      "derived": {
+        "zizhi": 93,
+        "qianli": 49,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 0,
+        "qixue": 100,
+        "jingshen": 71
+      },
+      "traits": [
+        {
+          "id": "guoer_chengsong",
+          "name": "过耳成诵",
+          "type": "tianfu",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "wuxing": 4
+          },
+          "desc": "听一遍便可复述。"
+        }
+      ],
+      "background": {
+        "id": "sanxiu_guaer",
+        "name": "散修孤儿",
+        "desc": "自幼流落江湖，靠自己摸爬滚打，道心坚韧。",
+        "lingshiMul": 0.4
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": null
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": [
+          {
+            "id": "tiyun_zong",
+            "name": "梯云纵",
+            "cat": "shenfa",
+            "grade": "huang",
+            "element": "无",
+            "proficiency": 0.65
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 8,
+        "used": 8,
+        "lingshi": 0,
+        "items": [
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "luopan",
+            "name": "罗盘",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "jingang_fu",
+            "name": "金刚符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          }
+        ]
+      },
+      "appearance": {
+        "build": "娇小",
+        "face": "阴柔",
+        "temperament": "孤僻"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00001",
+      "genSeed": "zongmen|1",
+      "name": {
+        "surname": "蔡",
+        "given": "妙音",
+        "full": "蔡妙音",
+        "daohao": "玄真"
+      },
+      "gender": "女",
+      "age": 6,
+      "lifespan": 125,
+      "realm": {
+        "id": "lianqi",
+        "name": "炼气期",
+        "seq": 1,
+        "layer": "三层",
+        "layerIndex": 2,
+        "stage": "炼气期·三层",
+        "progress": 0.56,
+        "talentScore": 109,
+        "talentNorm": 0.816
+      },
+      "spiritRoot": {
+        "grade": "dan",
+        "gradeName": "单灵根",
+        "rank": 5,
+        "elements": [
+          "土"
+        ],
+        "element": "土",
+        "mutation": null,
+        "purity": 56,
+        "purityName": "中品",
+        "speedMul": 2.2,
+        "color": "#ab47bc",
+        "desc": "单属性纯灵根，修炼迅捷，宗门争抢之才。"
+      },
+      "attributes": {
+        "gengu": 69,
+        "wuxing": 32,
+        "shenshi": 79,
+        "qiyun": 38,
+        "xinjing": 28,
+        "meili": 63
+      },
+      "derived": {
+        "zizhi": 117,
+        "qianli": 43,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 156,
+        "qixue": 427,
+        "jingshen": 211
+      },
+      "traits": [
+        {
+          "id": "tiansheng_shenli",
+          "name": "天生神力",
+          "type": "tianfu",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "gengu": 10
+          },
+          "desc": "力可拔山，体修之资。"
+        },
+        {
+          "id": "tongling_zhiti",
+          "name": "通灵之体",
+          "type": "tizhi",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "shenshi": 10
+          },
+          "desc": "生而通灵，可与草木禽兽语。"
+        },
+        {
+          "id": "baozhao",
+          "name": "暴躁",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "attack": 6,
+            "xinjing": -8
+          },
+          "desc": "一言不合即动手，战力高而道心乱。"
+        }
+      ],
+      "background": {
+        "id": "liehu",
+        "name": "猎户之子",
+        "desc": "山中长大，箭术与体魄过人。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhongli",
+          "name": "中立",
+          "color": "#78909c"
+        },
+        "sect": {
+          "id": "tianji_lou",
+          "name": "天机楼",
+          "tier": 2
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "xuedun_mogong",
+          "name": "血遁魔功",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "暗",
+          "desc": "魔道速成之法，损道心而进境飞快。"
+        },
+        "aux": []
+      },
+      "storageBag": {
+        "slots": 10,
+        "used": 8,
+        "lingshi": 30,
+        "items": [
+          {
+            "id": "shou_pi",
+            "name": "妖兽皮毛",
+            "cat": "yaoshou",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "jiedu_dan",
+            "name": "解毒丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "juqi_dan",
+            "name": "聚气丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 3
+          },
+          {
+            "id": "huiLing_dan",
+            "name": "回灵丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 30
+          }
+        ]
+      },
+      "appearance": {
+        "build": "颀长",
+        "face": "方正",
+        "temperament": "冷峻"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00002",
+      "genSeed": "zongmen|2",
+      "name": {
+        "surname": "侯",
+        "given": "明轩",
+        "full": "侯明轩",
+        "daohao": "静子"
+      },
+      "gender": "男",
+      "age": 88,
+      "lifespan": 204,
+      "realm": {
+        "id": "zhuji",
+        "name": "筑基期",
+        "seq": 2,
+        "layer": "中期",
+        "layerIndex": 1,
+        "stage": "筑基期·中期",
+        "progress": 0.586,
+        "talentScore": 75.4,
+        "talentNorm": 0.257
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "木",
+          "水",
+          "火"
+        ],
+        "element": "木·水·火",
+        "mutation": null,
+        "purity": 40,
+        "purityName": "下品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 59,
+        "wuxing": 50,
+        "shenshi": 36,
+        "qiyun": 48,
+        "xinjing": 67,
+        "meili": 55
+      },
+      "derived": {
+        "zizhi": 77,
+        "qianli": 40,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 800,
+        "qixue": 738,
+        "jingshen": 265
+      },
+      "traits": [
+        {
+          "id": "duoyi",
+          "name": "多疑",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "meili": -6,
+            "shenshi": 3
+          },
+          "desc": "事事存疑，反少受骗。"
+        },
+        {
+          "id": "shishui",
+          "name": "嗜睡",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "speedMul": -0.05
+          },
+          "desc": "一日三觉，误事不少。"
+        }
+      ],
+      "background": {
+        "id": "huangzu",
+        "name": "皇族旁支",
+        "desc": "帝王血裔，资源权势俱佳。",
+        "lingshiMul": 2.5
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": null
+      },
+      "techniques": {
+        "main": {
+          "id": "jinguang_zhou",
+          "name": "金光咒",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "金",
+          "desc": "佛道双修的金身法门。"
+        },
+        "aux": [
+          {
+            "id": "huoqiu_shu",
+            "name": "火球术",
+            "cat": "gongfa_shu",
+            "grade": "huang",
+            "element": "火",
+            "proficiency": 0.32
+          },
+          {
+            "id": "yujian_shu",
+            "name": "御剑术",
+            "cat": "jianjue",
+            "grade": "huang",
+            "element": "金",
+            "proficiency": 0.3
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 12,
+        "used": 11,
+        "lingshi": 750,
+        "items": [
+          {
+            "id": "jiaoxiao_shayi",
+            "name": "鲛绡纱衣",
+            "cat": "fushi",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "zhuji_dan",
+            "name": "筑基丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "ningshen_dan",
+            "name": "凝神丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "qingfeng_jian",
+            "name": "青锋剑",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_yujian_shu",
+            "name": "玉简·御剑术",
+            "cat": "yujian",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "qiannian_shen",
+            "name": "千年人参",
+            "cat": "lingyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "daopao",
+            "name": "青布道袍",
+            "cat": "fushi",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "xuantie",
+            "name": "玄铁",
+            "cat": "cailiao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 7
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 50
+          }
+        ]
+      },
+      "appearance": {
+        "build": "肥硕",
+        "face": "寻常",
+        "temperament": "热忱"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00003",
+      "genSeed": "zongmen|3",
+      "name": {
+        "surname": "常",
+        "given": "南枝",
+        "full": "常南枝",
+        "daohao": "云老祖"
+      },
+      "gender": "女",
+      "age": 864,
+      "lifespan": 1683,
+      "realm": {
+        "id": "huashen",
+        "name": "化神期",
+        "seq": 5,
+        "layer": "中期",
+        "layerIndex": 1,
+        "stage": "化神期·中期",
+        "progress": 0.637,
+        "talentScore": 70,
+        "talentNorm": 0.167
+      },
+      "spiritRoot": {
+        "grade": "wu",
+        "gradeName": "五行杂灵根",
+        "rank": 1,
+        "elements": [
+          "水",
+          "土",
+          "火",
+          "木",
+          "金"
+        ],
+        "element": "水·土·火·木·金",
+        "mutation": null,
+        "purity": 48,
+        "purityName": "中品",
+        "speedMul": 0.75,
+        "color": "#795548",
+        "desc": "五行俱全却驳杂，俗称伪灵根，难成大器。"
+      },
+      "attributes": {
+        "gengu": 45,
+        "wuxing": 61,
+        "shenshi": 56,
+        "qiyun": 22,
+        "xinjing": 38,
+        "meili": 37
+      },
+      "derived": {
+        "zizhi": 66,
+        "qianli": 40,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 49600,
+        "qixue": 1501,
+        "jingshen": 693
+      },
+      "traits": [
+        {
+          "id": "tanchi",
+          "name": "贪吃",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "meili": -2
+          },
+          "desc": "口腹之欲极重。"
+        },
+        {
+          "id": "bingruo_zhiqu",
+          "name": "病弱之躯",
+          "type": "tizhi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "gengu": -10,
+            "lifespanMul": 0.85
+          },
+          "desc": "自幼体弱，寿元亦短。"
+        },
+        {
+          "id": "shoudou",
+          "name": "手抖",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "forge": -0.15,
+            "alchemy": -0.15
+          },
+          "desc": "精细之事难成，炼丹炼器皆受挫。"
+        }
+      ],
+      "background": {
+        "id": "lianqi_shijia",
+        "name": "炼器世家",
+        "desc": "炉火相伴，识器如识人。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": {
+          "id": "taixu_dao",
+          "name": "太虚道宗",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "wuxing_guiyuan",
+          "name": "五行归元诀",
+          "cat": "xinfa",
+          "grade": "di",
+          "element": "全",
+          "desc": "五行杂灵根者的翻身之法，化驳杂为浑厚。"
+        },
+        "aux": [
+          {
+            "id": "tiyun_zong",
+            "name": "梯云纵",
+            "cat": "shenfa",
+            "grade": "huang",
+            "element": "无",
+            "proficiency": 0.5
+          },
+          {
+            "id": "wuxing_quan",
+            "name": "五行拳",
+            "cat": "quanzhang",
+            "grade": "huang",
+            "element": "全",
+            "proficiency": 0.38
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 18,
+        "used": 10,
+        "lingshi": 150000,
+        "items": [
+          {
+            "id": "xuantie",
+            "name": "玄铁",
+            "cat": "cailiao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "pojing_dan",
+            "name": "破境丹",
+            "cat": "danyao",
+            "grade": "tian",
+            "count": 1
+          },
+          {
+            "id": "dinghai_zhu",
+            "name": "定海珠",
+            "cat": "fabao",
+            "grade": "tian",
+            "count": 1
+          },
+          {
+            "id": "taomu",
+            "name": "千年桃木",
+            "cat": "cailiao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "jingkun_dai",
+            "name": "乾坤袋",
+            "cat": "fabao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "luopan",
+            "name": "罗盘",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huti_yufu",
+            "name": "护体玉符",
+            "cat": "faqi",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "daopao",
+            "name": "青布道袍",
+            "cat": "fushi",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_shang",
+            "name": "上品灵石",
+            "cat": "lingshi",
+            "grade": "xuan",
+            "count": 15
+          }
+        ]
+      },
+      "appearance": {
+        "build": "娇小",
+        "face": "方正",
+        "temperament": "温和"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00004",
+      "genSeed": "zongmen|4",
+      "name": {
+        "surname": "侯",
+        "given": "玄真",
+        "full": "侯玄真",
+        "daohao": null
+      },
+      "gender": "男",
+      "age": 22,
+      "lifespan": 65,
+      "realm": {
+        "id": "fanren",
+        "name": "凡人",
+        "seq": 0,
+        "layer": "凡体",
+        "layerIndex": 0,
+        "stage": "凡人·凡体",
+        "progress": 0.603,
+        "talentScore": 63.5,
+        "talentNorm": 0.059
+      },
+      "spiritRoot": {
+        "grade": "si",
+        "gradeName": "四灵根",
+        "rank": 2,
+        "elements": [
+          "火",
+          "水",
+          "木",
+          "土"
+        ],
+        "element": "火·水·木·土",
+        "mutation": null,
+        "purity": 49,
+        "purityName": "中品",
+        "speedMul": 1,
+        "color": "#9e9e9e",
+        "desc": "四属性灵根，泛而不精，修行艰难。"
+      },
+      "attributes": {
+        "gengu": 25,
+        "wuxing": 20,
+        "shenshi": 64,
+        "qiyun": 14,
+        "xinjing": 58,
+        "meili": 16
+      },
+      "derived": {
+        "zizhi": 61,
+        "qianli": 33,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 0,
+        "qixue": 79,
+        "jingshen": 67
+      },
+      "traits": [
+        {
+          "id": "tongling_zhiti",
+          "name": "通灵之体",
+          "type": "tizhi",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "shenshi": 10
+          },
+          "desc": "生而通灵，可与草木禽兽语。"
+        },
+        {
+          "id": "yinsha_zhiti",
+          "name": "阴煞之体",
+          "type": "tizhi",
+          "quality": "zi",
+          "color": "#ab47bc",
+          "effects": {
+            "darkAffinity": 0.25,
+            "meili": -8
+          },
+          "desc": "身负阴煞，修魔道事半功倍，然为世人所忌。"
+        },
+        {
+          "id": "bingruo_zhiqu",
+          "name": "病弱之躯",
+          "type": "tizhi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "gengu": -10,
+            "lifespanMul": 0.85
+          },
+          "desc": "自幼体弱，寿元亦短。"
+        }
+      ],
+      "background": {
+        "id": "sanxiu_guaer",
+        "name": "散修孤儿",
+        "desc": "自幼流落江湖，靠自己摸爬滚打，道心坚韧。",
+        "lingshiMul": 0.4
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": {
+          "id": "taixu_dao",
+          "name": "太虚道宗",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": [
+          {
+            "id": "yushou_jue",
+            "name": "御兽诀",
+            "cat": "yushou",
+            "grade": "huang",
+            "element": "木",
+            "proficiency": 0.18
+          },
+          {
+            "id": "jingxin_zhou",
+            "name": "静心咒",
+            "cat": "fuzhu_shu",
+            "grade": "huang",
+            "element": "无",
+            "proficiency": 0.69
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 8,
+        "used": 7,
+        "lingshi": 0,
+        "items": [
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "bainian_lingzhi",
+            "name": "百年灵芝",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "xuantie",
+            "name": "玄铁",
+            "cat": "cailiao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_huoqiu",
+            "name": "玉简·火球术",
+            "cat": "yujian",
+            "grade": "fan",
+            "count": 1
+          }
+        ]
+      },
+      "appearance": {
+        "build": "匀称",
+        "face": "威仪",
+        "temperament": "狂放"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00005",
+      "genSeed": "zongmen|5",
+      "name": {
+        "surname": "百里",
+        "given": "玄真",
+        "full": "百里玄真",
+        "daohao": "紫上人"
+      },
+      "gender": "男",
+      "age": 99,
+      "lifespan": 425,
+      "realm": {
+        "id": "jindan",
+        "name": "金丹期",
+        "seq": 3,
+        "layer": "中期",
+        "layerIndex": 1,
+        "stage": "金丹期·中期",
+        "progress": 0.15,
+        "talentScore": 69.4,
+        "talentNorm": 0.156
+      },
+      "spiritRoot": {
+        "grade": "si",
+        "gradeName": "四灵根",
+        "rank": 2,
+        "elements": [
+          "火",
+          "木",
+          "水",
+          "土"
+        ],
+        "element": "火·木·水·土",
+        "mutation": null,
+        "purity": 47,
+        "purityName": "中品",
+        "speedMul": 1,
+        "color": "#9e9e9e",
+        "desc": "四属性灵根，泛而不精，修行艰难。"
+      },
+      "attributes": {
+        "gengu": 50,
+        "wuxing": 48,
+        "shenshi": 40,
+        "qiyun": 44,
+        "xinjing": 48,
+        "meili": 24
+      },
+      "derived": {
+        "zizhi": 67,
+        "qianli": 37,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 3293,
+        "qixue": 980,
+        "jingshen": 385
+      },
+      "traits": [
+        {
+          "id": "bingruo_zhiqu",
+          "name": "病弱之躯",
+          "type": "tizhi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "gengu": -10,
+            "lifespanMul": 0.85
+          },
+          "desc": "自幼体弱，寿元亦短。"
+        }
+      ],
+      "background": {
+        "id": "sanxiu_guaer",
+        "name": "散修孤儿",
+        "desc": "自幼流落江湖，靠自己摸爬滚打，道心坚韧。",
+        "lingshiMul": 0.4
+      },
+      "faction": {
+        "alignment": {
+          "id": "modao",
+          "name": "魔道",
+          "color": "#8e24aa"
+        },
+        "sect": {
+          "id": "xueluo_dian",
+          "name": "血罗殿",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": [
+          {
+            "id": "wuxing_quan",
+            "name": "五行拳",
+            "cat": "quanzhang",
+            "grade": "huang",
+            "element": "全",
+            "proficiency": 0.12
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 14,
+        "used": 11,
+        "lingshi": 1200,
+        "items": [
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "jindan_dan",
+            "name": "结丹丹",
+            "cat": "danyao",
+            "grade": "di",
+            "count": 1
+          },
+          {
+            "id": "huti_yufu",
+            "name": "护体玉符",
+            "cat": "faqi",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "liuyun_feiJian",
+            "name": "流云飞剑",
+            "cat": "fabao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "jingkun_dai",
+            "name": "乾坤袋",
+            "cat": "fabao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "zizhi_cao",
+            "name": "紫芝",
+            "cat": "lingyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "qingfeng_jian",
+            "name": "青锋剑",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "xuanshen",
+            "name": "玄参",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "jiedu_dan",
+            "name": "解毒丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 12
+          }
+        ]
+      },
+      "appearance": {
+        "build": "颀长",
+        "face": "稚嫩",
+        "temperament": "娴静"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00006",
+      "genSeed": "zongmen|6",
+      "name": {
+        "surname": "崔",
+        "given": "夕颜",
+        "full": "崔夕颜",
+        "daohao": "无居士"
+      },
+      "gender": "女",
+      "age": 48,
+      "lifespan": 207,
+      "realm": {
+        "id": "zhuji",
+        "name": "筑基期",
+        "seq": 2,
+        "layer": "中期",
+        "layerIndex": 1,
+        "stage": "筑基期·中期",
+        "progress": 0.31,
+        "talentScore": 91.4,
+        "talentNorm": 0.524
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "水",
+          "土",
+          "火"
+        ],
+        "element": "水·土·火",
+        "mutation": null,
+        "purity": 68,
+        "purityName": "中品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 68,
+        "wuxing": 54,
+        "shenshi": 69,
+        "qiyun": 34,
+        "xinjing": 38,
+        "meili": 73
+      },
+      "derived": {
+        "zizhi": 85,
+        "qianli": 50,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 893,
+        "qixue": 790,
+        "jingshen": 347
+      },
+      "traits": [
+        {
+          "id": "haoju",
+          "name": "好酒",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "meili": 3
+          },
+          "desc": "千杯不醉，座上之宾。"
+        }
+      ],
+      "background": {
+        "id": "huangzu",
+        "name": "皇族旁支",
+        "desc": "帝王血裔，资源权势俱佳。",
+        "lingshiMul": 2.5
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhongli",
+          "name": "中立",
+          "color": "#78909c"
+        },
+        "sect": null
+      },
+      "techniques": {
+        "main": {
+          "id": "wuxing_guiyuan",
+          "name": "五行归元诀",
+          "cat": "xinfa",
+          "grade": "di",
+          "element": "全",
+          "desc": "五行杂灵根者的翻身之法，化驳杂为浑厚。"
+        },
+        "aux": [
+          {
+            "id": "huoqiu_shu",
+            "name": "火球术",
+            "cat": "gongfa_shu",
+            "grade": "huang",
+            "element": "火",
+            "proficiency": 0.58
+          },
+          {
+            "id": "lingbo_weibu",
+            "name": "凌波微步",
+            "cat": "shenfa",
+            "grade": "xuan",
+            "element": "水",
+            "proficiency": 0.3
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 12,
+        "used": 11,
+        "lingshi": 750,
+        "items": [
+          {
+            "id": "jiaoxiao_shayi",
+            "name": "鲛绡纱衣",
+            "cat": "fushi",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "zhuji_dan",
+            "name": "筑基丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 2
+          },
+          {
+            "id": "ningshen_dan",
+            "name": "凝神丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "qingfeng_jian",
+            "name": "青锋剑",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_yujian_shu",
+            "name": "玉简·御剑术",
+            "cat": "yujian",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "xuantie_dao",
+            "name": "玄铁刀",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 7
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 50
+          }
+        ]
+      },
+      "appearance": {
+        "build": "清瘦",
+        "face": "俊逸",
+        "temperament": "狡黠"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00007",
+      "genSeed": "zongmen|7",
+      "name": {
+        "surname": "夏",
+        "given": "挽月",
+        "full": "夏挽月",
+        "daohao": null
+      },
+      "gender": "女",
+      "age": 53,
+      "lifespan": 83,
+      "realm": {
+        "id": "fanren",
+        "name": "凡人",
+        "seq": 0,
+        "layer": "凡体",
+        "layerIndex": 0,
+        "stage": "凡人·凡体",
+        "progress": 0.162,
+        "talentScore": 94.6,
+        "talentNorm": 0.576
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "木",
+          "火",
+          "土"
+        ],
+        "element": "木·火·土",
+        "mutation": null,
+        "purity": 67,
+        "purityName": "中品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 67,
+        "wuxing": 71,
+        "shenshi": 52,
+        "qiyun": 60,
+        "xinjing": 46,
+        "meili": 34
+      },
+      "derived": {
+        "zizhi": 89,
+        "qianli": 51,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 0,
+        "qixue": 114,
+        "jingshen": 61
+      },
+      "traits": [
+        {
+          "id": "tongtizi",
+          "name": "童子之身",
+          "type": "tizhi",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "speedMul": 0.12,
+            "meili": -3
+          },
+          "desc": "元阳/元阴未泄，修行前期大有裨益。"
+        },
+        {
+          "id": "shishui",
+          "name": "嗜睡",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "speedMul": -0.05
+          },
+          "desc": "一日三觉，误事不少。"
+        },
+        {
+          "id": "guoer_chengsong",
+          "name": "过耳成诵",
+          "type": "tianfu",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "wuxing": 4
+          },
+          "desc": "听一遍便可复述。"
+        }
+      ],
+      "background": {
+        "id": "sanxiu_guaer",
+        "name": "散修孤儿",
+        "desc": "自幼流落江湖，靠自己摸爬滚打，道心坚韧。",
+        "lingshiMul": 0.4
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": null
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": []
+      },
+      "storageBag": {
+        "slots": 8,
+        "used": 8,
+        "lingshi": 0,
+        "items": [
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "bainian_lingzhi",
+            "name": "百年灵芝",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_huoqiu",
+            "name": "玉简·火球术",
+            "cat": "yujian",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "bing_fu",
+            "name": "冰符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          }
+        ]
+      },
+      "appearance": {
+        "build": "清瘦",
+        "face": "俊逸",
+        "temperament": "狡黠"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00008",
+      "genSeed": "zongmen|8",
+      "name": {
+        "surname": "蒋",
+        "given": "太初",
+        "full": "蒋太初",
+        "daohao": "玄真人"
+      },
+      "gender": "男",
+      "age": 119,
+      "lifespan": 198,
+      "realm": {
+        "id": "zhuji",
+        "name": "筑基期",
+        "seq": 2,
+        "layer": "初期",
+        "layerIndex": 0,
+        "stage": "筑基期·初期",
+        "progress": 0.593,
+        "talentScore": 94,
+        "talentNorm": 0.567
+      },
+      "spiritRoot": {
+        "grade": "shuang",
+        "gradeName": "双灵根",
+        "rank": 4,
+        "elements": [
+          "金",
+          "木"
+        ],
+        "element": "金·木",
+        "mutation": null,
+        "purity": 53,
+        "purityName": "中品",
+        "speedMul": 1.6,
+        "color": "#42a5f5",
+        "desc": "双属性灵根，可修两系功法，均衡。"
+      },
+      "attributes": {
+        "gengu": 46,
+        "wuxing": 53,
+        "shenshi": 52,
+        "qiyun": 45,
+        "xinjing": 41,
+        "meili": 37
+      },
+      "derived": {
+        "zizhi": 96,
+        "qianli": 39,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 633,
+        "qixue": 522,
+        "jingshen": 244
+      },
+      "traits": [
+        {
+          "id": "jiyi_chaqun",
+          "name": "记忆超群",
+          "type": "tianfu",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "shenshi": 4
+          },
+          "desc": "神魂敏锐，记忆不凡。"
+        },
+        {
+          "id": "shoudou",
+          "name": "手抖",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "forge": -0.15,
+            "alchemy": -0.15
+          },
+          "desc": "精细之事难成，炼丹炼器皆受挫。"
+        },
+        {
+          "id": "tiansheng_shenli",
+          "name": "天生神力",
+          "type": "tianfu",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "gengu": 10
+          },
+          "desc": "力可拔山，体修之资。"
+        }
+      ],
+      "background": {
+        "id": "lingshou_bansheng",
+        "name": "灵兽伴生",
+        "desc": "自幼与灵兽相伴，通晓兽语。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "modao",
+          "name": "魔道",
+          "color": "#8e24aa"
+        },
+        "sect": {
+          "id": "xueluo_dian",
+          "name": "血罗殿",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "wuxing_guiyuan",
+          "name": "五行归元诀",
+          "cat": "xinfa",
+          "grade": "di",
+          "element": "全",
+          "desc": "五行杂灵根者的翻身之法，化驳杂为浑厚。"
+        },
+        "aux": [
+          {
+            "id": "xiuluo_jian",
+            "name": "修罗剑法",
+            "cat": "jianjue",
+            "grade": "xuan",
+            "element": "暗",
+            "proficiency": 0.51
+          },
+          {
+            "id": "bahuang_daofa",
+            "name": "八荒刀法",
+            "cat": "daofa",
+            "grade": "xuan",
+            "element": "土",
+            "proficiency": 0.31
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 12,
+        "used": 8,
+        "lingshi": 300,
+        "items": [
+          {
+            "id": "neidan",
+            "name": "妖兽内丹",
+            "cat": "yaoshou",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "zhuji_dan",
+            "name": "筑基丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "ningshen_dan",
+            "name": "凝神丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "qingfeng_jian",
+            "name": "青锋剑",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_yujian_shu",
+            "name": "玉简·御剑术",
+            "cat": "yujian",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "qiannian_shen",
+            "name": "千年人参",
+            "cat": "lingyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "yujian_danhuo",
+            "name": "玉简·丹火真诀",
+            "cat": "yujian",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 3
+          }
+        ]
+      },
+      "appearance": {
+        "build": "清瘦",
+        "face": "阴柔",
+        "temperament": "狡黠"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00009",
+      "genSeed": "zongmen|9",
+      "name": {
+        "surname": "江",
+        "given": "照影",
+        "full": "江照影",
+        "daohao": null
+      },
+      "gender": "女",
+      "age": 70,
+      "lifespan": 80,
+      "realm": {
+        "id": "fanren",
+        "name": "凡人",
+        "seq": 0,
+        "layer": "凡体",
+        "layerIndex": 0,
+        "stage": "凡人·凡体",
+        "progress": 0.3,
+        "talentScore": 72.5,
+        "talentNorm": 0.208
+      },
+      "spiritRoot": {
+        "grade": "wu",
+        "gradeName": "五行杂灵根",
+        "rank": 1,
+        "elements": [
+          "土",
+          "火",
+          "金",
+          "水",
+          "木"
+        ],
+        "element": "土·火·金·水·木",
+        "mutation": null,
+        "purity": 81,
+        "purityName": "上品",
+        "speedMul": 0.75,
+        "color": "#795548",
+        "desc": "五行俱全却驳杂，俗称伪灵根，难成大器。"
+      },
+      "attributes": {
+        "gengu": 47,
+        "wuxing": 42,
+        "shenshi": 60,
+        "qiyun": 21,
+        "xinjing": 30,
+        "meili": 22
+      },
+      "derived": {
+        "zizhi": 59,
+        "qianli": 41,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 0,
+        "qixue": 98,
+        "jingshen": 65
+      },
+      "traits": [
+        {
+          "id": "yaoyin",
+          "name": "药瘾",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "gengu": 3,
+            "xinjing": -5
+          },
+          "desc": "以身试药成瘾，体健而心浮。"
+        },
+        {
+          "id": "huigen_shenzhong",
+          "name": "慧根深种",
+          "type": "tianfu",
+          "quality": "zi",
+          "color": "#ab47bc",
+          "effects": {
+            "wuxing": 15
+          },
+          "desc": "天生慧根，闻道而悟。"
+        },
+        {
+          "id": "yinsha_zhiti",
+          "name": "阴煞之体",
+          "type": "tizhi",
+          "quality": "zi",
+          "color": "#ab47bc",
+          "effects": {
+            "darkAffinity": 0.25,
+            "meili": -8
+          },
+          "desc": "身负阴煞，修魔道事半功倍，然为世人所忌。"
+        }
+      ],
+      "background": {
+        "id": "shushu",
+        "name": "书塾学子",
+        "desc": "寒窗苦读，诗书满腹。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhongli",
+          "name": "中立",
+          "color": "#78909c"
+        },
+        "sect": {
+          "id": "juxing_ge",
+          "name": "聚星阁",
+          "tier": 1
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": []
+      },
+      "storageBag": {
+        "slots": 8,
+        "used": 8,
+        "lingshi": 0,
+        "items": [
+          {
+            "id": "daopao",
+            "name": "青布道袍",
+            "cat": "fushi",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "yujian_huoqiu",
+            "name": "玉简·火球术",
+            "cat": "yujian",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "luopan",
+            "name": "罗盘",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "shou_pi",
+            "name": "妖兽皮毛",
+            "cat": "yaoshou",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "xuanshen",
+            "name": "玄参",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          }
+        ]
+      },
+      "appearance": {
+        "build": "匀称",
+        "face": "阴柔",
+        "temperament": "狂放"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00010",
+      "genSeed": "zongmen|10",
+      "name": {
+        "surname": "侯",
+        "given": "清欢",
+        "full": "侯清欢",
+        "daohao": "紫道人"
+      },
+      "gender": "女",
+      "age": 30,
+      "lifespan": 118,
+      "realm": {
+        "id": "lianqi",
+        "name": "炼气期",
+        "seq": 1,
+        "layer": "七层",
+        "layerIndex": 6,
+        "stage": "炼气期·七层",
+        "progress": 0.502,
+        "talentScore": 100.2,
+        "talentNorm": 0.669
+      },
+      "spiritRoot": {
+        "grade": "shuang",
+        "gradeName": "双灵根",
+        "rank": 4,
+        "elements": [
+          "水",
+          "木"
+        ],
+        "element": "水·木",
+        "mutation": null,
+        "purity": 57,
+        "purityName": "中品",
+        "speedMul": 1.6,
+        "color": "#42a5f5",
+        "desc": "双属性灵根，可修两系功法，均衡。"
+      },
+      "attributes": {
+        "gengu": 41,
+        "wuxing": 62,
+        "shenshi": 59,
+        "qiyun": 56,
+        "xinjing": 51,
+        "meili": 34
+      },
+      "derived": {
+        "zizhi": 101,
+        "qianli": 44,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 214,
+        "qixue": 432,
+        "jingshen": 226
+      },
+      "traits": [
+        {
+          "id": "jiyi_chaqun",
+          "name": "记忆超群",
+          "type": "tianfu",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "shenshi": 4
+          },
+          "desc": "神魂敏锐，记忆不凡。"
+        }
+      ],
+      "background": {
+        "id": "qigai",
+        "name": "乞儿",
+        "desc": "街头求生，深谙世态炎凉。",
+        "lingshiMul": 0.3
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhongli",
+          "name": "中立",
+          "color": "#78909c"
+        },
+        "sect": null
+      },
+      "techniques": {
+        "main": {
+          "id": "jinguang_zhou",
+          "name": "金光咒",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "金",
+          "desc": "佛道双修的金身法门。"
+        },
+        "aux": [
+          {
+            "id": "hanbing_zhen",
+            "name": "寒冰阵",
+            "cat": "gongfa_shu",
+            "grade": "xuan",
+            "element": "冰",
+            "proficiency": 0.21
+          },
+          {
+            "id": "huichun_shu",
+            "name": "回春术",
+            "cat": "fuzhu_shu",
+            "grade": "huang",
+            "element": "木",
+            "proficiency": 0.4
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 10,
+        "used": 9,
+        "lingshi": 9,
+        "items": [
+          {
+            "id": "juqi_dan",
+            "name": "聚气丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "jiedu_dan",
+            "name": "解毒丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_huoqiu",
+            "name": "玉简·火球术",
+            "cat": "yujian",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huiLing_dan",
+            "name": "回灵丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 9
+          }
+        ]
+      },
+      "appearance": {
+        "build": "健硕",
+        "face": "粗犷",
+        "temperament": "狡黠"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00011",
+      "genSeed": "zongmen|11",
+      "name": {
+        "surname": "曾",
+        "given": "归尘",
+        "full": "曾归尘",
+        "daohao": "幽仙子"
+      },
+      "gender": "男",
+      "age": 52,
+      "lifespan": 127,
+      "realm": {
+        "id": "lianqi",
+        "name": "炼气期",
+        "seq": 1,
+        "layer": "六层",
+        "layerIndex": 5,
+        "stage": "炼气期·六层",
+        "progress": 0.656,
+        "talentScore": 78.8,
+        "talentNorm": 0.314
+      },
+      "spiritRoot": {
+        "grade": "si",
+        "gradeName": "四灵根",
+        "rank": 2,
+        "elements": [
+          "火",
+          "金",
+          "水",
+          "木"
+        ],
+        "element": "火·金·水·木",
+        "mutation": null,
+        "purity": 48,
+        "purityName": "中品",
+        "speedMul": 1,
+        "color": "#9e9e9e",
+        "desc": "四属性灵根，泛而不精，修行艰难。"
+      },
+      "attributes": {
+        "gengu": 78,
+        "wuxing": 56,
+        "shenshi": 70,
+        "qiyun": 53,
+        "xinjing": 40,
+        "meili": 19
+      },
+      "derived": {
+        "zizhi": 76,
+        "qianli": 48,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 193,
+        "qixue": 545,
+        "jingshen": 233
+      },
+      "traits": [
+        {
+          "id": "liancai",
+          "name": "敛财癖",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "lingshiMul": 1.2,
+            "meili": -3
+          },
+          "desc": "见钱眼开，善积财货。"
+        },
+        {
+          "id": "lunhui_zhiren",
+          "name": "轮回之人",
+          "type": "tianming",
+          "quality": "zi",
+          "color": "#ab47bc",
+          "effects": {
+            "wuxing": 10,
+            "shenshi": 8
+          },
+          "desc": "前世记忆残存，悟性神识远超常人。"
+        }
+      ],
+      "background": {
+        "id": "sanxiu_guaer",
+        "name": "散修孤儿",
+        "desc": "自幼流落江湖，靠自己摸爬滚打，道心坚韧。",
+        "lingshiMul": 0.4
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": {
+          "id": "qinglian_zong",
+          "name": "青莲剑宗",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": [
+          {
+            "id": "yushou_jue",
+            "name": "御兽诀",
+            "cat": "yushou",
+            "grade": "huang",
+            "element": "木",
+            "proficiency": 0.32
+          },
+          {
+            "id": "huoqiu_shu",
+            "name": "火球术",
+            "cat": "gongfa_shu",
+            "grade": "huang",
+            "element": "火",
+            "proficiency": 0.69
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 10,
+        "used": 8,
+        "lingshi": 14,
+        "items": [
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "juqi_dan",
+            "name": "聚气丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "jingang_fu",
+            "name": "金刚符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 14
+          }
+        ]
+      },
+      "appearance": {
+        "build": "匀称",
+        "face": "稚嫩",
+        "temperament": "孤僻"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00012",
+      "genSeed": "zongmen|12",
+      "name": {
+        "surname": "魏",
+        "given": "灵犀",
+        "full": "魏灵犀",
+        "daohao": "青真人"
+      },
+      "gender": "女",
+      "age": 93,
+      "lifespan": 163,
+      "realm": {
+        "id": "zhuji",
+        "name": "筑基期",
+        "seq": 2,
+        "layer": "中期",
+        "layerIndex": 1,
+        "stage": "筑基期·中期",
+        "progress": 0.874,
+        "talentScore": 65.4,
+        "talentNorm": 0.089
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "木",
+          "土",
+          "金"
+        ],
+        "element": "木·土·金",
+        "mutation": null,
+        "purity": 37,
+        "purityName": "下品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 29,
+        "wuxing": 24,
+        "shenshi": 42,
+        "qiyun": 53,
+        "xinjing": 75,
+        "meili": 49
+      },
+      "derived": {
+        "zizhi": 68,
+        "qianli": 32,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 790,
+        "qixue": 566,
+        "jingshen": 280
+      },
+      "traits": [
+        {
+          "id": "bingruo_zhiqu",
+          "name": "病弱之躯",
+          "type": "tizhi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "gengu": -10,
+            "lifespanMul": 0.85
+          },
+          "desc": "自幼体弱，寿元亦短。"
+        }
+      ],
+      "background": {
+        "id": "liehu",
+        "name": "猎户之子",
+        "desc": "山中长大，箭术与体魄过人。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": {
+          "id": "taixu_dao",
+          "name": "太虚道宗",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "jinguang_zhou",
+          "name": "金光咒",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "金",
+          "desc": "佛道双修的金身法门。"
+        },
+        "aux": [
+          {
+            "id": "leiting_shu",
+            "name": "雷霆术",
+            "cat": "gongfa_shu",
+            "grade": "xuan",
+            "element": "雷",
+            "proficiency": 0.2
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 12,
+        "used": 11,
+        "lingshi": 300,
+        "items": [
+          {
+            "id": "shou_pi",
+            "name": "妖兽皮毛",
+            "cat": "yaoshou",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "jiedu_dan",
+            "name": "解毒丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "zhuji_dan",
+            "name": "筑基丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "ningshen_dan",
+            "name": "凝神丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "qingfeng_jian",
+            "name": "青锋剑",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_yujian_shu",
+            "name": "玉简·御剑术",
+            "cat": "yujian",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "daopao",
+            "name": "青布道袍",
+            "cat": "fushi",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "lingcan_si",
+            "name": "灵蚕丝",
+            "cat": "cailiao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 3
+          }
+        ]
+      },
+      "appearance": {
+        "build": "匀称",
+        "face": "寻常",
+        "temperament": "孤僻"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00013",
+      "genSeed": "zongmen|13",
+      "name": {
+        "surname": "拓跋",
+        "given": "承影",
+        "full": "拓跋承影",
+        "daohao": "云道友"
+      },
+      "gender": "男",
+      "age": 35,
+      "lifespan": 126,
+      "realm": {
+        "id": "lianqi",
+        "name": "炼气期",
+        "seq": 1,
+        "layer": "一层",
+        "layerIndex": 0,
+        "stage": "炼气期·一层",
+        "progress": 0.627,
+        "talentScore": 82.2,
+        "talentNorm": 0.37
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "木",
+          "土",
+          "火"
+        ],
+        "element": "木·土·火",
+        "mutation": null,
+        "purity": 35,
+        "purityName": "下品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 73,
+        "wuxing": 62,
+        "shenshi": 53,
+        "qiyun": 33,
+        "xinjing": 59,
+        "meili": 41
+      },
+      "derived": {
+        "zizhi": 85,
+        "qianli": 46,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 118,
+        "qixue": 381,
+        "jingshen": 154
+      },
+      "traits": [
+        {
+          "id": "haoju",
+          "name": "好酒",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "meili": 3
+          },
+          "desc": "千杯不醉，座上之宾。"
+        },
+        {
+          "id": "guomu_buwang",
+          "name": "过目不忘",
+          "type": "tianfu",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "wuxing": 8
+          },
+          "desc": "典籍一阅即记，参悟功法事半功倍。"
+        },
+        {
+          "id": "tanchi",
+          "name": "贪吃",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "meili": -2
+          },
+          "desc": "口腹之欲极重。"
+        }
+      ],
+      "background": {
+        "id": "yaonong",
+        "name": "药农",
+        "desc": "世代采药，识得百草。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": null
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": [
+          {
+            "id": "yushou_jue",
+            "name": "御兽诀",
+            "cat": "yushou",
+            "grade": "huang",
+            "element": "木",
+            "proficiency": 0.3
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 10,
+        "used": 10,
+        "lingshi": 30,
+        "items": [
+          {
+            "id": "bainian_lingzhi",
+            "name": "百年灵芝",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "xuanshen",
+            "name": "玄参",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "juqi_dan",
+            "name": "聚气丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "daopao",
+            "name": "青布道袍",
+            "cat": "fushi",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "bing_fu",
+            "name": "冰符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "xuantie_dao",
+            "name": "玄铁刀",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 30
+          }
+        ]
+      },
+      "appearance": {
+        "build": "娇小",
+        "face": "稚嫩",
+        "temperament": "憨直"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00014",
+      "genSeed": "zongmen|14",
+      "name": {
+        "surname": "司马",
+        "given": "承渊",
+        "full": "司马承渊",
+        "daohao": "幽老祖"
+      },
+      "gender": "男",
+      "age": 1487,
+      "lifespan": 2012,
+      "realm": {
+        "id": "huashen",
+        "name": "化神期",
+        "seq": 5,
+        "layer": "中期",
+        "layerIndex": 1,
+        "stage": "化神期·中期",
+        "progress": 0.153,
+        "talentScore": 75.7,
+        "talentNorm": 0.261
+      },
+      "spiritRoot": {
+        "grade": "si",
+        "gradeName": "四灵根",
+        "rank": 2,
+        "elements": [
+          "土",
+          "金",
+          "火",
+          "木"
+        ],
+        "element": "土·金·火·木",
+        "mutation": null,
+        "purity": 41,
+        "purityName": "下品",
+        "speedMul": 1,
+        "color": "#9e9e9e",
+        "desc": "四属性灵根，泛而不精，修行艰难。"
+      },
+      "attributes": {
+        "gengu": 53,
+        "wuxing": 52,
+        "shenshi": 72,
+        "qiyun": 19,
+        "xinjing": 72,
+        "meili": 61
+      },
+      "derived": {
+        "zizhi": 75,
+        "qianli": 48,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 48200,
+        "qixue": 1606,
+        "jingshen": 781
+      },
+      "traits": [
+        {
+          "id": "jiepi",
+          "name": "洁癖",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "xinjing": 2
+          },
+          "desc": "一尘不染，心境反清。"
+        }
+      ],
+      "background": {
+        "id": "liehu",
+        "name": "猎户之子",
+        "desc": "山中长大，箭术与体魄过人。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhongli",
+          "name": "中立",
+          "color": "#78909c"
+        },
+        "sect": {
+          "id": "tianji_lou",
+          "name": "天机楼",
+          "tier": 2
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "jinguang_zhou",
+          "name": "金光咒",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "金",
+          "desc": "佛道双修的金身法门。"
+        },
+        "aux": [
+          {
+            "id": "huoqiu_shu",
+            "name": "火球术",
+            "cat": "gongfa_shu",
+            "grade": "huang",
+            "element": "火",
+            "proficiency": 0.46
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 18,
+        "used": 7,
+        "lingshi": 150000,
+        "items": [
+          {
+            "id": "shou_pi",
+            "name": "妖兽皮毛",
+            "cat": "yaoshou",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "jiedu_dan",
+            "name": "解毒丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "pojing_dan",
+            "name": "破境丹",
+            "cat": "danyao",
+            "grade": "tian",
+            "count": 1
+          },
+          {
+            "id": "dinghai_zhu",
+            "name": "定海珠",
+            "cat": "fabao",
+            "grade": "tian",
+            "count": 1
+          },
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "yunwen_xue",
+            "name": "云纹靴",
+            "cat": "fushi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "lingshi_shang",
+            "name": "上品灵石",
+            "cat": "lingshi",
+            "grade": "xuan",
+            "count": 15
+          }
+        ]
+      },
+      "appearance": {
+        "build": "颀长",
+        "face": "清丽",
+        "temperament": "娴静"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00015",
+      "genSeed": "zongmen|15",
+      "name": {
+        "surname": "江",
+        "given": "无双",
+        "full": "江无双",
+        "daohao": "玉散人"
+      },
+      "gender": "女",
+      "age": 93,
+      "lifespan": 100,
+      "realm": {
+        "id": "lianqi",
+        "name": "炼气期",
+        "seq": 1,
+        "layer": "一层",
+        "layerIndex": 0,
+        "stage": "炼气期·一层",
+        "progress": 0.683,
+        "talentScore": 63.8,
+        "talentNorm": 0.063
+      },
+      "spiritRoot": {
+        "grade": "wu",
+        "gradeName": "五行杂灵根",
+        "rank": 1,
+        "elements": [
+          "金",
+          "火",
+          "土",
+          "水",
+          "木"
+        ],
+        "element": "金·火·土·水·木",
+        "mutation": null,
+        "purity": 42,
+        "purityName": "下品",
+        "speedMul": 0.75,
+        "color": "#795548",
+        "desc": "五行俱全却驳杂，俗称伪灵根，难成大器。"
+      },
+      "attributes": {
+        "gengu": 41,
+        "wuxing": 59,
+        "shenshi": 37,
+        "qiyun": 84,
+        "xinjing": 43,
+        "meili": 42
+      },
+      "derived": {
+        "zizhi": 61,
+        "qianli": 35,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 121,
+        "qixue": 296,
+        "jingshen": 134
+      },
+      "traits": [
+        {
+          "id": "shoudou",
+          "name": "手抖",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "forge": -0.15,
+            "alchemy": -0.15
+          },
+          "desc": "精细之事难成，炼丹炼器皆受挫。"
+        },
+        {
+          "id": "bingruo_zhiqu",
+          "name": "病弱之躯",
+          "type": "tizhi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "gengu": -10,
+            "lifespanMul": 0.85
+          },
+          "desc": "自幼体弱，寿元亦短。"
+        },
+        {
+          "id": "shangdao_zhixin",
+          "name": "上道之心",
+          "type": "tianfu",
+          "quality": "zi",
+          "color": "#ab47bc",
+          "effects": {
+            "xinjing": 12
+          },
+          "desc": "一心向道，道心坚固。"
+        }
+      ],
+      "background": {
+        "id": "daoguan_qitu",
+        "name": "道观弃徒",
+        "desc": "被逐出道观，身负未解之谜。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": {
+          "id": "taixu_dao",
+          "name": "太虚道宗",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": [
+          {
+            "id": "wuxing_quan",
+            "name": "五行拳",
+            "cat": "quanzhang",
+            "grade": "huang",
+            "element": "全",
+            "proficiency": 0.66
+          },
+          {
+            "id": "yushou_jue",
+            "name": "御兽诀",
+            "cat": "yushou",
+            "grade": "huang",
+            "element": "木",
+            "proficiency": 0.47
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 10,
+        "used": 9,
+        "lingshi": 30,
+        "items": [
+          {
+            "id": "luopan",
+            "name": "罗盘",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "juqi_dan",
+            "name": "聚气丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "xuantie",
+            "name": "玄铁",
+            "cat": "cailiao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_huoqiu",
+            "name": "玉简·火球术",
+            "cat": "yujian",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "daopao",
+            "name": "青布道袍",
+            "cat": "fushi",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 30
+          }
+        ]
+      },
+      "appearance": {
+        "build": "肥硕",
+        "face": "稚嫩",
+        "temperament": "憨直"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00016",
+      "genSeed": "zongmen|16",
+      "name": {
+        "surname": "叶",
+        "given": "语嫣",
+        "full": "叶语嫣",
+        "daohao": "天散人"
+      },
+      "gender": "女",
+      "age": 103,
+      "lifespan": 208,
+      "realm": {
+        "id": "zhuji",
+        "name": "筑基期",
+        "seq": 2,
+        "layer": "中期",
+        "layerIndex": 1,
+        "stage": "筑基期·中期",
+        "progress": 0.148,
+        "talentScore": 74.9,
+        "talentNorm": 0.248
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "土",
+          "金",
+          "木"
+        ],
+        "element": "土·金·木",
+        "mutation": null,
+        "purity": 31,
+        "purityName": "下品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 71,
+        "wuxing": 46,
+        "shenshi": 54,
+        "qiyun": 78,
+        "xinjing": 36,
+        "meili": 49
+      },
+      "derived": {
+        "zizhi": 79,
+        "qianli": 37,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 770,
+        "qixue": 807,
+        "jingshen": 310
+      },
+      "traits": [
+        {
+          "id": "tiansheng_shenli",
+          "name": "天生神力",
+          "type": "tianfu",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "gengu": 10
+          },
+          "desc": "力可拔山，体修之资。"
+        }
+      ],
+      "background": {
+        "id": "liehu",
+        "name": "猎户之子",
+        "desc": "山中长大，箭术与体魄过人。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "modao",
+          "name": "魔道",
+          "color": "#8e24aa"
+        },
+        "sect": {
+          "id": "xueluo_dian",
+          "name": "血罗殿",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "xuedun_mogong",
+          "name": "血遁魔功",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "暗",
+          "desc": "魔道速成之法，损道心而进境飞快。"
+        },
+        "aux": []
+      },
+      "storageBag": {
+        "slots": 12,
+        "used": 9,
+        "lingshi": 300,
+        "items": [
+          {
+            "id": "shou_pi",
+            "name": "妖兽皮毛",
+            "cat": "yaoshou",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "jiedu_dan",
+            "name": "解毒丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "zhuji_dan",
+            "name": "筑基丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "ningshen_dan",
+            "name": "凝神丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "qingfeng_jian",
+            "name": "青锋剑",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_yujian_shu",
+            "name": "玉简·御剑术",
+            "cat": "yujian",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "lingcan_si",
+            "name": "灵蚕丝",
+            "cat": "cailiao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "peiyuan_dan",
+            "name": "培元丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 3
+          }
+        ]
+      },
+      "appearance": {
+        "build": "娇小",
+        "face": "稚嫩",
+        "temperament": "狂放"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00017",
+      "genSeed": "zongmen|17",
+      "name": {
+        "surname": "冯",
+        "given": "惊鸿",
+        "full": "冯惊鸿",
+        "daohao": null
+      },
+      "gender": "男",
+      "age": 48,
+      "lifespan": 76,
+      "realm": {
+        "id": "fanren",
+        "name": "凡人",
+        "seq": 0,
+        "layer": "凡体",
+        "layerIndex": 0,
+        "stage": "凡人·凡体",
+        "progress": 0.76,
+        "talentScore": 109.2,
+        "talentNorm": 0.819
+      },
+      "spiritRoot": {
+        "grade": "shuang",
+        "gradeName": "双灵根",
+        "rank": 4,
+        "elements": [
+          "土",
+          "木"
+        ],
+        "element": "土·木",
+        "mutation": null,
+        "purity": 62,
+        "purityName": "中品",
+        "speedMul": 1.6,
+        "color": "#42a5f5",
+        "desc": "双属性灵根，可修两系功法，均衡。"
+      },
+      "attributes": {
+        "gengu": 27,
+        "wuxing": 85,
+        "shenshi": 51,
+        "qiyun": 69,
+        "xinjing": 53,
+        "meili": 54
+      },
+      "derived": {
+        "zizhi": 108,
+        "qianli": 46,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 0,
+        "qixue": 81,
+        "jingshen": 61
+      },
+      "traits": [
+        {
+          "id": "lingguang",
+          "name": "灵光乍现",
+          "type": "tianfu",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "breakBonus": 0.05
+          },
+          "desc": "关键时刻常有奇思，突破更顺。"
+        },
+        {
+          "id": "huigen_shenzhong",
+          "name": "慧根深种",
+          "type": "tianfu",
+          "quality": "zi",
+          "color": "#ab47bc",
+          "effects": {
+            "wuxing": 15
+          },
+          "desc": "天生慧根，闻道而悟。"
+        }
+      ],
+      "background": {
+        "id": "modao_yigu",
+        "name": "魔道遗孤",
+        "desc": "身负魔功血脉，为正道所不容。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "modao",
+          "name": "魔道",
+          "color": "#8e24aa"
+        },
+        "sect": {
+          "id": "xueluo_dian",
+          "name": "血罗殿",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": [
+          {
+            "id": "houtu_dun",
+            "name": "厚土盾",
+            "cat": "fangfa_shu",
+            "grade": "huang",
+            "element": "土",
+            "proficiency": 0.41
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 8,
+        "used": 6,
+        "lingshi": 0,
+        "items": [
+          {
+            "id": "yujian_xuedun",
+            "name": "玉简·血遁魔功",
+            "cat": "yujian",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "jingang_fu",
+            "name": "金刚符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "xuantie",
+            "name": "玄铁",
+            "cat": "cailiao",
+            "grade": "huang",
+            "count": 1
+          }
+        ]
+      },
+      "appearance": {
+        "build": "匀称",
+        "face": "威仪",
+        "temperament": "温和"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00018",
+      "genSeed": "zongmen|18",
+      "name": {
+        "surname": "张",
+        "given": "君临",
+        "full": "张君临",
+        "daohao": "孤散人"
+      },
+      "gender": "男",
+      "age": 29,
+      "lifespan": 198,
+      "realm": {
+        "id": "zhuji",
+        "name": "筑基期",
+        "seq": 2,
+        "layer": "初期",
+        "layerIndex": 0,
+        "stage": "筑基期·初期",
+        "progress": 0.495,
+        "talentScore": 42.6,
+        "talentNorm": -0.29
+      },
+      "spiritRoot": {
+        "grade": "fei",
+        "gradeName": "废灵根",
+        "rank": 0,
+        "elements": [
+          "火"
+        ],
+        "element": "火",
+        "mutation": null,
+        "purity": 35,
+        "purityName": "下品",
+        "speedMul": 0.5,
+        "color": "#616161",
+        "desc": "灵根闭塞近乎无，唯逆天机缘方可入道。"
+      },
+      "attributes": {
+        "gengu": 46,
+        "wuxing": 34,
+        "shenshi": 31,
+        "qiyun": 51,
+        "xinjing": 58,
+        "meili": 65
+      },
+      "derived": {
+        "zizhi": 40,
+        "qianli": 31,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 588,
+        "qixue": 522,
+        "jingshen": 202
+      },
+      "traits": [
+        {
+          "id": "baozhao",
+          "name": "暴躁",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "attack": 6,
+            "xinjing": -8
+          },
+          "desc": "一言不合即动手，战力高而道心乱。"
+        }
+      ],
+      "background": {
+        "id": "youfang_houyi",
+        "name": "游方术士后裔",
+        "desc": "走南闯北，见识奇诡。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": {
+          "id": "wanyao_gu",
+          "name": "万药谷",
+          "tier": 2
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": []
+      },
+      "storageBag": {
+        "slots": 12,
+        "used": 9,
+        "lingshi": 300,
+        "items": [
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "luopan",
+            "name": "罗盘",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "zhuji_dan",
+            "name": "筑基丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "ningshen_dan",
+            "name": "凝神丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "qingfeng_jian",
+            "name": "青锋剑",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_yujian_shu",
+            "name": "玉简·御剑术",
+            "cat": "yujian",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "jingkun_dai",
+            "name": "乾坤袋",
+            "cat": "fabao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "yujian_huoqiu",
+            "name": "玉简·火球术",
+            "cat": "yujian",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 3
+          }
+        ]
+      },
+      "appearance": {
+        "build": "匀称",
+        "face": "寻常",
+        "temperament": "狡黠"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00019",
+      "genSeed": "zongmen|19",
+      "name": {
+        "surname": "欧阳",
+        "given": "揽月",
+        "full": "欧阳揽月",
+        "daohao": "青子"
+      },
+      "gender": "女",
+      "age": 163,
+      "lifespan": 486,
+      "realm": {
+        "id": "jindan",
+        "name": "金丹期",
+        "seq": 3,
+        "layer": "初期",
+        "layerIndex": 0,
+        "stage": "金丹期·初期",
+        "progress": 0.198,
+        "talentScore": 87.4,
+        "talentNorm": 0.456
+      },
+      "spiritRoot": {
+        "grade": "si",
+        "gradeName": "四灵根",
+        "rank": 2,
+        "elements": [
+          "金",
+          "火",
+          "土",
+          "木"
+        ],
+        "element": "金·火·土·木",
+        "mutation": null,
+        "purity": 57,
+        "purityName": "中品",
+        "speedMul": 1,
+        "color": "#9e9e9e",
+        "desc": "四属性灵根，泛而不精，修行艰难。"
+      },
+      "attributes": {
+        "gengu": 36,
+        "wuxing": 64,
+        "shenshi": 84,
+        "qiyun": 67,
+        "xinjing": 88,
+        "meili": 43
+      },
+      "derived": {
+        "zizhi": 82,
+        "qianli": 56,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 2570,
+        "qixue": 671,
+        "jingshen": 423
+      },
+      "traits": [
+        {
+          "id": "guomu_buwang",
+          "name": "过目不忘",
+          "type": "tianfu",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "wuxing": 8
+          },
+          "desc": "典籍一阅即记，参悟功法事半功倍。"
+        },
+        {
+          "id": "huigen_shenzhong",
+          "name": "慧根深种",
+          "type": "tianfu",
+          "quality": "zi",
+          "color": "#ab47bc",
+          "effects": {
+            "wuxing": 15
+          },
+          "desc": "天生慧根，闻道而悟。"
+        }
+      ],
+      "background": {
+        "id": "liehu",
+        "name": "猎户之子",
+        "desc": "山中长大，箭术与体魄过人。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": null
+      },
+      "techniques": {
+        "main": {
+          "id": "jinguang_zhou",
+          "name": "金光咒",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "金",
+          "desc": "佛道双修的金身法门。"
+        },
+        "aux": []
+      },
+      "storageBag": {
+        "slots": 14,
+        "used": 10,
+        "lingshi": 3000,
+        "items": [
+          {
+            "id": "shou_pi",
+            "name": "妖兽皮毛",
+            "cat": "yaoshou",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "jiedu_dan",
+            "name": "解毒丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "jindan_dan",
+            "name": "结丹丹",
+            "cat": "danyao",
+            "grade": "di",
+            "count": 1
+          },
+          {
+            "id": "huti_yufu",
+            "name": "护体玉符",
+            "cat": "faqi",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "liuyun_feiJian",
+            "name": "流云飞剑",
+            "cat": "fabao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "jingkun_dai",
+            "name": "乾坤袋",
+            "cat": "fabao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "luopan",
+            "name": "罗盘",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "ningshen_dan",
+            "name": "凝神丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "yujian_huoqiu",
+            "name": "玉简·火球术",
+            "cat": "yujian",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 30
+          }
+        ]
+      },
+      "appearance": {
+        "build": "娇小",
+        "face": "清丽",
+        "temperament": "孤僻"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00020",
+      "genSeed": "zongmen|20",
+      "name": {
+        "surname": "高",
+        "given": "承影",
+        "full": "高承影",
+        "daohao": null
+      },
+      "gender": "男",
+      "age": 40,
+      "lifespan": 81,
+      "realm": {
+        "id": "fanren",
+        "name": "凡人",
+        "seq": 0,
+        "layer": "凡体",
+        "layerIndex": 0,
+        "stage": "凡人·凡体",
+        "progress": 0.8,
+        "talentScore": 79.4,
+        "talentNorm": 0.324
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "木",
+          "土",
+          "火"
+        ],
+        "element": "木·土·火",
+        "mutation": null,
+        "purity": 58,
+        "purityName": "中品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 59,
+        "wuxing": 56,
+        "shenshi": 19,
+        "qiyun": 19,
+        "xinjing": 49,
+        "meili": 71
+      },
+      "derived": {
+        "zizhi": 76,
+        "qianli": 38,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 0,
+        "qixue": 108,
+        "jingshen": 45
+      },
+      "traits": [
+        {
+          "id": "lingguang",
+          "name": "灵光乍现",
+          "type": "tianfu",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "breakBonus": 0.05
+          },
+          "desc": "关键时刻常有奇思，突破更顺。"
+        },
+        {
+          "id": "shoudou",
+          "name": "手抖",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "forge": -0.15,
+            "alchemy": -0.15
+          },
+          "desc": "精细之事难成，炼丹炼器皆受挫。"
+        },
+        {
+          "id": "yaoyin",
+          "name": "药瘾",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "gengu": 3,
+            "xinjing": -5
+          },
+          "desc": "以身试药成瘾，体健而心浮。"
+        }
+      ],
+      "background": {
+        "id": "shijia",
+        "name": "世家子弟",
+        "desc": "出身修行世家，见多识广，资源丰厚。",
+        "lingshiMul": 2
+      },
+      "faction": {
+        "alignment": {
+          "id": "modao",
+          "name": "魔道",
+          "color": "#8e24aa"
+        },
+        "sect": {
+          "id": "wangui_yao",
+          "name": "万鬼窟",
+          "tier": 2
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": [
+          {
+            "id": "yushou_jue",
+            "name": "御兽诀",
+            "cat": "yushou",
+            "grade": "huang",
+            "element": "木",
+            "proficiency": 0.52
+          },
+          {
+            "id": "houtu_dun",
+            "name": "厚土盾",
+            "cat": "fangfa_shu",
+            "grade": "huang",
+            "element": "土",
+            "proficiency": 0.64
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 8,
+        "used": 8,
+        "lingshi": 0,
+        "items": [
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "daopao",
+            "name": "青布道袍",
+            "cat": "fushi",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "yujian_huoqiu",
+            "name": "玉简·火球术",
+            "cat": "yujian",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "bainian_lingzhi",
+            "name": "百年灵芝",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          }
+        ]
+      },
+      "appearance": {
+        "build": "清瘦",
+        "face": "稚嫩",
+        "temperament": "孤僻"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00021",
+      "genSeed": "zongmen|21",
+      "name": {
+        "surname": "谢",
+        "given": "长明",
+        "full": "谢长明",
+        "daohao": "孤真人"
+      },
+      "gender": "无",
+      "age": 100,
+      "lifespan": 115,
+      "realm": {
+        "id": "lianqi",
+        "name": "炼气期",
+        "seq": 1,
+        "layer": "一层",
+        "layerIndex": 0,
+        "stage": "炼气期·一层",
+        "progress": 0.304,
+        "talentScore": 63.8,
+        "talentNorm": 0.064
+      },
+      "spiritRoot": {
+        "grade": "san",
+        "gradeName": "三灵根",
+        "rank": 3,
+        "elements": [
+          "水",
+          "木",
+          "火"
+        ],
+        "element": "水·木·火",
+        "mutation": null,
+        "purity": 28,
+        "purityName": "下品",
+        "speedMul": 1.25,
+        "color": "#4caf50",
+        "desc": "三属性灵根，资质中庸，最是常见。"
+      },
+      "attributes": {
+        "gengu": 29,
+        "wuxing": 19,
+        "shenshi": 57,
+        "qiyun": 32,
+        "xinjing": 52,
+        "meili": 65
+      },
+      "derived": {
+        "zizhi": 69,
+        "qianli": 28,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 114,
+        "qixue": 264,
+        "jingshen": 159
+      },
+      "traits": [
+        {
+          "id": "lingguang",
+          "name": "灵光乍现",
+          "type": "tianfu",
+          "quality": "lan",
+          "color": "#42a5f5",
+          "effects": {
+            "breakBonus": 0.05
+          },
+          "desc": "关键时刻常有奇思，突破更顺。"
+        },
+        {
+          "id": "liancai",
+          "name": "敛财癖",
+          "type": "guaipi",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "lingshiMul": 1.2,
+            "meili": -3
+          },
+          "desc": "见钱眼开，善积财货。"
+        }
+      ],
+      "background": {
+        "id": "yaonong",
+        "name": "药农",
+        "desc": "世代采药，识得百草。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhongli",
+          "name": "中立",
+          "color": "#78909c"
+        },
+        "sect": null
+      },
+      "techniques": {
+        "main": {
+          "id": "yinqi_jue",
+          "name": "引气诀",
+          "cat": "xinfa",
+          "grade": "fan",
+          "element": "无",
+          "desc": "最粗浅的入门吐纳法。"
+        },
+        "aux": []
+      },
+      "storageBag": {
+        "slots": 10,
+        "used": 9,
+        "lingshi": 36,
+        "items": [
+          {
+            "id": "bainian_lingzhi",
+            "name": "百年灵芝",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "xuanshen",
+            "name": "玄参",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "juqi_dan",
+            "name": "聚气丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 3
+          },
+          {
+            "id": "luopan",
+            "name": "罗盘",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "bing_fu",
+            "name": "冰符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 36
+          }
+        ]
+      },
+      "appearance": {
+        "build": "娇小",
+        "face": "阴柔",
+        "temperament": "热忱"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00022",
+      "genSeed": "zongmen|22",
+      "name": {
+        "surname": "谭",
+        "given": "语冰",
+        "full": "谭语冰",
+        "daohao": "灵老祖"
+      },
+      "gender": "女",
+      "age": 106,
+      "lifespan": 198,
+      "realm": {
+        "id": "zhuji",
+        "name": "筑基期",
+        "seq": 2,
+        "layer": "初期",
+        "layerIndex": 0,
+        "stage": "筑基期·初期",
+        "progress": 0.567,
+        "talentScore": 67.7,
+        "talentNorm": 0.129
+      },
+      "spiritRoot": {
+        "grade": "si",
+        "gradeName": "四灵根",
+        "rank": 2,
+        "elements": [
+          "木",
+          "金",
+          "火",
+          "水"
+        ],
+        "element": "木·金·火·水",
+        "mutation": null,
+        "purity": 84,
+        "purityName": "上品",
+        "speedMul": 1,
+        "color": "#9e9e9e",
+        "desc": "四属性灵根，泛而不精，修行艰难。"
+      },
+      "attributes": {
+        "gengu": 44,
+        "wuxing": 19,
+        "shenshi": 38,
+        "qiyun": 46,
+        "xinjing": 76,
+        "meili": 59
+      },
+      "derived": {
+        "zizhi": 55,
+        "qianli": 41,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 710,
+        "qixue": 513,
+        "jingshen": 216
+      },
+      "traits": [
+        {
+          "id": "shishui",
+          "name": "嗜睡",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "speedMul": -0.05
+          },
+          "desc": "一日三觉，误事不少。"
+        }
+      ],
+      "background": {
+        "id": "yujia",
+        "name": "渔家",
+        "desc": "水边长大，水性极佳。",
+        "lingshiMul": 1
+      },
+      "faction": {
+        "alignment": {
+          "id": "zhengdao",
+          "name": "正道",
+          "color": "#42a5f5"
+        },
+        "sect": {
+          "id": "qinglian_zong",
+          "name": "青莲剑宗",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "jinguang_zhou",
+          "name": "金光咒",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "金",
+          "desc": "佛道双修的金身法门。"
+        },
+        "aux": [
+          {
+            "id": "tiyun_zong",
+            "name": "梯云纵",
+            "cat": "shenfa",
+            "grade": "huang",
+            "element": "无",
+            "proficiency": 0.41
+          },
+          {
+            "id": "wuxing_quan",
+            "name": "五行拳",
+            "cat": "quanzhang",
+            "grade": "huang",
+            "element": "全",
+            "proficiency": 0.54
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 12,
+        "used": 12,
+        "lingshi": 300,
+        "items": [
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "ganliang",
+            "name": "干粮",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "zhuji_dan",
+            "name": "筑基丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "ningshen_dan",
+            "name": "凝神丹",
+            "cat": "danyao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "qingfeng_jian",
+            "name": "青锋剑",
+            "cat": "faqi",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "yujian_yujian_shu",
+            "name": "玉简·御剑术",
+            "cat": "yujian",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "huozhe",
+            "name": "火折子",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "peiyuan_dan",
+            "name": "培元丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "neidan",
+            "name": "妖兽内丹",
+            "cat": "yaoshou",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "hantie",
+            "name": "寒铁",
+            "cat": "cailiao",
+            "grade": "xuan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_zhong",
+            "name": "中品灵石",
+            "cat": "lingshi",
+            "grade": "huang",
+            "count": 3
+          }
+        ]
+      },
+      "appearance": {
+        "build": "娇小",
+        "face": "粗犷",
+        "temperament": "孤僻"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    },
+    {
+      "v": 1,
+      "id": "c00023",
+      "genSeed": "zongmen|23",
+      "name": {
+        "surname": "史",
+        "given": "拾光",
+        "full": "史拾光",
+        "daohao": "碧子"
+      },
+      "gender": "女",
+      "age": 61,
+      "lifespan": 118,
+      "realm": {
+        "id": "lianqi",
+        "name": "炼气期",
+        "seq": 1,
+        "layer": "一层",
+        "layerIndex": 0,
+        "stage": "炼气期·一层",
+        "progress": 0.257,
+        "talentScore": 90.1,
+        "talentNorm": 0.501
+      },
+      "spiritRoot": {
+        "grade": "shuang",
+        "gradeName": "双灵根",
+        "rank": 4,
+        "elements": [
+          "木",
+          "土"
+        ],
+        "element": "木·土",
+        "mutation": null,
+        "purity": 71,
+        "purityName": "上品",
+        "speedMul": 1.6,
+        "color": "#42a5f5",
+        "desc": "双属性灵根，可修两系功法，均衡。"
+      },
+      "attributes": {
+        "gengu": 40,
+        "wuxing": 40,
+        "shenshi": 33,
+        "qiyun": 34,
+        "xinjing": 40,
+        "meili": 70
+      },
+      "derived": {
+        "zizhi": 87,
+        "qianli": 34,
+        "shengwang": 0
+      },
+      "resources": {
+        "qi": 136,
+        "qixue": 293,
+        "jingshen": 129
+      },
+      "traits": [
+        {
+          "id": "tanchi",
+          "name": "贪吃",
+          "type": "guaipi",
+          "quality": "bai",
+          "color": "#bdbdbd",
+          "effects": {
+            "meili": -2
+          },
+          "desc": "口腹之欲极重。"
+        },
+        {
+          "id": "guoer_chengsong",
+          "name": "过耳成诵",
+          "type": "tianfu",
+          "quality": "lv",
+          "color": "#66bb6a",
+          "effects": {
+            "wuxing": 4
+          },
+          "desc": "听一遍便可复述。"
+        }
+      ],
+      "background": {
+        "id": "shangjia",
+        "name": "商贾之家",
+        "desc": "家中经商，精于算计与人情。",
+        "lingshiMul": 1.8
+      },
+      "faction": {
+        "alignment": {
+          "id": "modao",
+          "name": "魔道",
+          "color": "#8e24aa"
+        },
+        "sect": {
+          "id": "xueluo_dian",
+          "name": "血罗殿",
+          "tier": 3
+        }
+      },
+      "techniques": {
+        "main": {
+          "id": "xuedun_mogong",
+          "name": "血遁魔功",
+          "cat": "xinfa",
+          "grade": "xuan",
+          "element": "暗",
+          "desc": "魔道速成之法，损道心而进境飞快。"
+        },
+        "aux": [
+          {
+            "id": "lingbo_weibu",
+            "name": "凌波微步",
+            "cat": "shenfa",
+            "grade": "xuan",
+            "element": "水",
+            "proficiency": 0.44
+          }
+        ]
+      },
+      "storageBag": {
+        "slots": 10,
+        "used": 8,
+        "lingshi": 54,
+        "items": [
+          {
+            "id": "yiner_yinliang",
+            "name": "白银十两",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 2
+          },
+          {
+            "id": "juqi_dan",
+            "name": "聚气丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "liaoshang_dan",
+            "name": "疗伤丹",
+            "cat": "danyao",
+            "grade": "huang",
+            "count": 2
+          },
+          {
+            "id": "huo_fu",
+            "name": "火符",
+            "cat": "fulu",
+            "grade": "huang",
+            "count": 3
+          },
+          {
+            "id": "shuinang",
+            "name": "水囊",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "bainian_lingzhi",
+            "name": "百年灵芝",
+            "cat": "lingyao",
+            "grade": "huang",
+            "count": 1
+          },
+          {
+            "id": "luopan",
+            "name": "罗盘",
+            "cat": "zawu",
+            "grade": "fan",
+            "count": 1
+          },
+          {
+            "id": "lingshi_xia",
+            "name": "下品灵石",
+            "cat": "lingshi",
+            "grade": "fan",
+            "count": 54
+          }
+        ]
+      },
+      "appearance": {
+        "build": "清瘦",
+        "face": "俊逸",
+        "temperament": "冷峻"
+      },
+      "relations": {
+        "master": null,
+        "disciples": [],
+        "partner": null,
+        "allies": [],
+        "enemies": []
+      },
+      "history": [],
+      "ext": {}
+    }
+  ]
+}

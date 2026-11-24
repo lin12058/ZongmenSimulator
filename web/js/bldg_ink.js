@@ -226,6 +226,7 @@
       q: o.q || 0, r: o.r || 0, kind: o.kind || '',
       detail: o.detail == null ? 3 : o.detail,    // 3=全 2=中 1=剪影
       tier: o.tier || 1,
+      lv: o.lv || 1,                              // v4 演化等级 (1..3; 影响体量与层数)
       /* 地缘标记: 该格环内有可用水面 —— 决定水车/水碓一类构件是否成立。
          缺省 true (不影响不读它的建筑); 由调用方按地类探针给出。 */
       water: o.water !== false,
@@ -1947,6 +1948,17 @@
       tiles: 6, cun: 4, fill: '#d2c6a6', door: { c: '#4b3a2c' }, wins: [['left', 0.72, 0.5, 0.06, 0.055]] });
     houseCore(S, { at: [0.5, -0.26], w: 0.5, d: 0.4, plat: 0.05, wall: 0.22, rise: 0.17,
       tiles: 5, eave: 0.1, cun: 3, fill: '#cdc0a0', door: { c: '#4b3a2c' } });
+    /* ★ v4 演化等级: 二级起在正屋之上叠一层「楼」; 三级再收顶层 —— 人口越多、房子越高。
+       (等级 lv 由后端按人口/紧缺度派生; 1=平房 → 3=楼阁。) */
+    if (S.lv >= 2) {
+      houseCore(S, { at: [-0.14, 0.10], w: 0.42, d: 0.32, plat: 0.50, wall: 0.20, rise: 0.15,
+        tiles: 5, eave: 0.09, cun: 3, fill: '#d8ccae', door: false,
+        wins: [['left', 0.6, 0.5, 0.05, 0.05]] });
+    }
+    if (S.lv >= 3) {
+      houseCore(S, { at: [-0.10, 0.06], w: 0.26, d: 0.20, plat: 0.86, wall: 0.16, rise: 0.12,
+        tiles: 4, eave: 0.07, cun: 2, fill: '#e2d8be', door: false });
+    }
     /* 茅草散锋 (檐口) */
     if (S.detail >= 3) {
       var i;
@@ -2331,9 +2343,14 @@
   function paint(B, spec) {
     var R = spec.R || 16;
     var detail = spec.detail != null ? spec.detail : (R >= 9 ? 3 : (R >= 5.2 ? 2 : 1));
+    /* ★ v4 建筑等级 (演化, 与骨架 tier 无关): lv 1..3 → 体量放大 (1.0/1.10/1.20);
+       民房系再按 lv 叠「楼」(见 KINDS['民房'])。等级由后端按人口/紧缺度派生。 */
+    var lv = spec.lv | 0; if (lv < 1) lv = 1; if (lv > 3) lv = 3;
+    var lvK = 1 + 0.10 * (lv - 1);
     var S = frameOf({
       B: B, cx: spec.cx, cy: spec.cy, R: R, q: spec.q, r: spec.r, kind: spec.kind,
-      tier: spec.tier, detail: detail, unit: spec.unit,
+      tier: spec.tier, lv: lv, detail: detail,
+      unit: (spec.unit == null ? 0.78 * lvK : spec.unit * lvK),
       face: spec.face, seed: seedOf(spec), water: spec.water
     });
     /* 朝向: 未显式给定则按规则 + 探针推导 */
@@ -2386,6 +2403,7 @@
     var detail = spec.detail != null ? spec.detail : (R >= 9 ? 3 : (R >= 5.2 ? 2 : 1));
     var key = spec.kind + '|' + dirIdxOf(spec.face) + '|' + (spec.variant | 0) + '|' +
               (Math.round(R * 2) / 2) + '|' + detail + '|' + (spec.tier | 0) + '|' +
+              (spec.lv | 0) + '|' +
               (spec.water === false ? 'd' : 'w') + '|' + (spec.plate === false ? 'n' : 'p') + '|' +
               (spec.onWater ? 'W' : '-') + '|' +
               /* ⚠ A (2026-09-15): 渔村皮肤位。**绝不可省** —— 渔家民房与内陆民房同 kind/
@@ -2400,6 +2418,7 @@
     var ctx2 = cv.getContext('2d');
     paint(new CanvasBk(ctx2), {
       kind: spec.kind, q: spec.q, r: spec.r, variant: spec.variant, tier: spec.tier,
+      lv: spec.lv,                                /* v4: 等级必须透传, 否则缓存键不同但画法相同 */
       face: spec.face, probe: spec.probe, R: R, detail: detail, water: spec.water,
       cx: -SPR_BOX.x0 * R, cy: -SPR_BOX.y0 * R,
       plate: spec.plate, tint: spec.tint, plateA: spec.plateA, onWater: spec.onWater,

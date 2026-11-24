@@ -138,17 +138,30 @@ async function main() {
       return JSON.stringify({
         metaStatus: metaStatus,
         data: window.__data ? window.__data() : null,
-        /* 2026-11-24: 题名牌/宗门录已删 —— 探针只留当前还存在的 HUD 元素 */
-        infoOpen: !document.getElementById('info').classList.contains('hidden'),
+        /* 本宗面板 (2026-09-23 十二版: 原「宗门录 + 择宗」整条闭环已下线)。
+           未立宗 ⇒ 三项为 ''/0/0, 面板显示引导文案「尚未择地立宗」;
+           立宗后口径与旧宗门录相同 (sec-name / kv / tag)。 */
+        sectName: (document.querySelector('#sectBody .sec-name') || {}).textContent || '',
+        sectRows: (document.querySelectorAll('#sectBody .kv') || []).length,
+        sectTags: (document.querySelectorAll('#sectBody .tag') || []).length,
+        /* 山川志 (2026-11-24 改成可拖动自由浮窗): 开没开 + 被放到哪儿。
+           标题栏是拖动把手, 位置写 left/top (视口坐标) —— 这两项就是「拖动生效」的证据。 */
+        infoOpen: (function () {
+          var el = document.getElementById('info');
+          return !!el && !el.classList.contains('hidden');
+        })(),
         infoRect: (function () {
-          var r = document.getElementById('info').getBoundingClientRect();
+          var el = document.getElementById('info');
+          if (!el) return 'absent';
+          var r = el.getBoundingClientRect();
           return Math.round(r.left) + ',' + Math.round(r.top) + ',' +
                  Math.round(r.width) + ',' + Math.round(r.height);
         })(),
         /* HUD 几何: 面板错位/被压这类问题在缩放图上肉眼看不准, 直接报边框 */
         hud: (function () {
           var out = [];
-          var ids = ['controls', 'minimapBox', 'info'];
+          /* titleBox 2026-11-24 已删 ⇒ 这里恒报 absent, 保留位是为了让旧判据继续可读 */
+          var ids = ['titleBox', 'sectBox', 'controls', 'minimapBox', 'info'];
           for (var i = 0; i < ids.length; i++) {
             var el = document.getElementById(ids[i]);
             if (!el) { out.push(ids[i] + ':absent'); continue; }

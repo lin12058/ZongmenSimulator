@@ -10,6 +10,14 @@
 (function () {
   'use strict';
   var MC = MapClient, IT = InkTextures, PB = window.PB;
+  /* 图层5「地图人物分布」表现层 (web/js/people-layer.js) —— 可拔插:
+     缺文件 / 加载失败时退化为空实现, main.js 的既有行为一个字节都不变。 */
+  var PeopleLayer = window.PeopleLayer || {
+    init: function () {}, maskBit: function () { return 0; }, enabled: function () { return false; },
+    wantBlock: function () { return false; }, dropBlock: function () {}, onBlock: function () {},
+    draw: function () {}, noteClick: function () {}, refresh: function () {},
+    sectionHTML: function () { return ''; }
+  };
 
   var els = {};
   var renderer = null;
@@ -49,6 +57,10 @@
   if (!S) throw new Error('缺少 web/js/store.js (全局存储组件) — index.html 里必须在本文件之前加载');
   var showVeins = true, showLabels = true;
   var showBanners = true, showVeinName = true, showClouds = true;
+  /* 领地圈 (2026-09-23 玩家宗门放置方案 §4.4): 常显各聚落的领地范围。
+     画在**覆盖层**而非静态层 —— 它的数据源是动态实体层 (settleCells, 随视野进出),
+     与静动态分离的既有口径一致 (静态层只画"世界不变的那部分")。 */
+  var showDomain = false;
   /* headless 调试参数 (与 nofade/nobldg 同族, 只做 A/B 差分用):
        nobanner=1 → **所有**地名纸签关掉 (聚落名 + 灵脉名; 旧语义, 验收脚本在用)
        nocloud=1  → 云气关掉 (check_cloud_zoom 的同机位 A/B 靠它)
@@ -75,6 +87,7 @@
     showBanners = sv.nameSettle;
     showVeinName = sv.nameVein;
     showClouds = sv.clouds;
+    showDomain = sv.domain;
     /* 调试参数压过持久化偏好 —— 见上面 NO_BANNER_URL 的注释 (调试态必须可复现) */
     if (NO_BANNER_URL) { showBanners = false; showVeinName = false; }
     if (NO_CLOUD_URL) showClouds = false;
@@ -135,8 +148,8 @@
         return r.json();
       });
   }
-  /* 把世界事实落到 UI: 弹窗的轮次/种子/来历 + 齿轮 tooltip
-     (题名牌下的「岁次…· 第 N 世」随题名牌一起删了, 2026-11-24) */
+  /* 把世界事实落到 UI 两处: 设置弹窗的轮次/种子/来历 + 齿轮 tooltip
+     (题名牌与它下面那行「 · 第 N 世」小字随题名牌一起删, 2026-11-24) */
   function setWorldInfo(w) {
     worldRound = (w && w.round) ? w.round : 0;
     worldSrc = (w && w.src) ? w.src : ((w && w.kind) || '');
@@ -215,14 +228,23 @@
     return new URLSearchParams(location.search).get('veinpt') === 'apex' ? 'apex' : 'center';
   })();
 
-  /* ---------- 宗门录: 已按用户要求移除 (2026-11-24) ----------
-     用户: 「删除UI上的这几个, 因为不好用」—— 左上角的题名牌与整块「宗门录 + 择宗」
-     面板都删了 (web/index.html 里对应 DOM/CSS 同步移除)。
-     连带删掉的还有: sect 选中态 (pinId/pinEnt)、scanSects/collectSects/updateSectPanel、
-     sectBodyHTML/sectMenuHTML/openSectMenu、择宗菜单事件、__feat().sectPin 探针。
-     **点格子仍然画朱砂标记** (selectTile), 只是不再有任何"选中宗门"的概念 ——
-     该格上有何物, 现在统一由弹出的「山川志」(showInfo) 回答。
-     ⚠ 保留的通用工具 (esc/hash32/hexDist) 仍在本文件下方, 它们被渲染层/探针共用。 */
+  /* ---------- 本宗面板 (左上角水墨面板, 2026-09-23 十二版) ----------
+     ⚠ 旧版「宗门录 + 择宗」整条闭环已下线 (用户: 「现在有的宗门的选择的什么的
+     都是之前版本的都要迭代掉, 之前的都不用了」):
+       · 删 择宗菜单 / 点地图认领宗门 / pinId 追随 —— 「从别人的宗门里挑一个当我的」
+         不再存在; 宗门由玩家**自己择地建** (见 docs/玩家宗门放置与城市迭代方案.md)。
+       · 删 「随行·就近择宗」(九版已删) 的残留。
+     本面板现在只管**玩家自己的宗门**, 数据源 = 服务端 PlayerSect 表 (登录帧随 LoginResponse
+     回填, 见 mapclient.onLogin) + 放置流程乐观上屏。
+     立宗前显示引导态; 立宗后由 renderMySect() 按 mySect 渲染。
+     ⚠ 「查看**其他**宗门/聚落的详情」不是本面板的职责, 已抽为独立模块
+     web/js/infocard.js (另一套 UI 体系), 本面板不引用它。
+
+     2026-09-23 城市扩张: 本面板同时承载「附属城镇」清单与「回宗」按钮
+     (用户: 「在自己宗门的地方有一个回到宗门的按钮」= 面板就是"自己宗门的地方")。 */
+  var mySect = null;                // 玩家自己的**主宗** (null = 未立宗)
+  var myTowns = [];                 // 自己的**附属城镇** (按 id 序; 服务端是权威)
+  var townMax = 0;                  // 附属城镇数上限 (0 = 不限; 服务端 PlayerTownMaxPerSect)
 
   var chunkData = new Map();        // 'ca,cb' -> {arrays, bbox}
   var regionCells = new Map();      // 'i,j'  -> {region, roads}   (图层1: 区域名+道路)
@@ -267,7 +289,7 @@
   };
   /* 本地档的请求掩码 —— ⚠ 全项目**只此一处**出现「去掉 CHUNK 位」的运算
      (契约守卫: verify/frontend_smoke.mjs 断言该表达式仅出现 1 次, 防有人另起炉灶) */
-  var CALC_MASK = PB.MASK.ALL & ~PB.MASK.CHUNK;      // 31 & ~1 = 30
+  var CALC_MASK = PB.MASK.ALL & ~PB.MASK.CHUNK;      // ALL(63) & ~CHUNK(1) = 62；热力图关时再剔 PEOPLE 位 ⇒ 30
   function EL() { return window.EngineLocal || null; }
   /* 档位生效判定: armed && 引擎就绪 && 指纹未漂移 */
   function calcRefresh() {
@@ -296,7 +318,7 @@
       var it = chunkDefer.shift();
       deferKeys.delete(it.job.key);
       if (it.gen !== worldSeed) continue;                 // 旧世界的块: 直接丢
-      if (!keepChunk.has(it.job.key)) { MC.blockForget(it.job.key); continue; }
+      if (!keepChunk.has(it.job.key)) { MC.blockForget(it.job.key); PeopleLayer.dropBlock(it.job.key); continue; }
       finishChunk(it.job, it.resp, it.gen);
     }
   }
@@ -539,6 +561,7 @@
         chunkData.delete(key);
         propBuilt.delete(key);               // 精灵过滤记录随块卸载 (重进视野重算)
         MC.blockForget(key);                 // rev 缓存同步失效: 重进视野须全量重取
+        PeopleLayer.dropBlock(key);          // 图层5: 人物落格表随块卸载
         forceStaticDirty();                  // 内容移除: 尽快重绘清除残影 (R1)
       }
     });
@@ -548,8 +571,10 @@
     var tNow = performance.now();
     for (var key in need) {
       var rr = chunkRetry.get(key);
-      if (!chunkData.has(key) && !chunkBusy.has(key) && !deferKeys.has(key) &&
-          (!rr || rr.at <= tNow)) {
+      /* 图层5: 已加载但缺 People 层的块也要重排一次 (开关刚打开时, 否则"开了什么也没有")。
+         热力图关着 ⇒ 该子条件恒 false, 行为与旧版一致。 */
+      if ((!chunkData.has(key) || PeopleLayer.wantBlock(key)) &&
+          !chunkBusy.has(key) && !deferKeys.has(key) && (!rr || rr.at <= tNow)) {
         var cc = need[key];
         var w = MC.tileToWorld(cc.ca * geo.chunkS, cc.cb * geo.chunkS);
         var d = (w.x - cam.x) * (w.x - cam.x) + (w.y - cam.y) * (w.y - cam.y);
@@ -570,6 +595,9 @@
     /* S3: 本地算档不带 CHUNK 位 (服务端就不算不发整块地形);
        ?chunkab=1 是显式开发自检 ⇒ 仍带 CHUNK 位, 好拿服务端的块做逐位对拍。 */
     var mask = (CALC.local && !CALC.ab) ? CALC_MASK : PB.MASK.ALL;
+    /* 图层5: 热力图关着时**剔掉该位** —— All/CALC_MASK 现已含 PEOPLE 位 (0x3F/0x3E),
+       不剔的话服务端每块都白算一层 (Q2「只有开启人力热力图时才要」)。 */
+    if (!PeopleLayer.enabled()) mask &= ~PB.MASK.PEOPLE;
     lastMask = mask;
     MC.block(gen, job.ca, job.cb, mask).then(function (resp) {
       /* 修复「个别色块无贴图」(待办/色块无贴图bug排查): MapClient.onFrame 收到
@@ -699,6 +727,9 @@
       settleVer++;              // R6b (B): 新聚落到货 → 归属缓存 (st._fac) 全部失效重算
       markStaticDirty();
       rebuildPropBlock();       // 建筑占地格变 → 覆盖格重算 (聚落内的树/山让位)
+      /* ⚠ 2026-09-23: 这里原有一句 updateSectPanel(false)。
+         本宗面板的数据源是服务端 PlayerSect 表, **不读视野内的实体层**,
+         所以实体层到货不再需要刷新它。 */
     }
     if (resp.poi) {
       for (var pg = 0; pg < resp.poi.groups.length; pg++) {
@@ -717,6 +748,9 @@
       commCells.set(ck, cm);
       markStaticDirty();
     }
+
+    /* 图层5 人物分布 (稀疏 {q,r,n,ps}); 未登录/关热力图时服务端不给 ⇒ 落空表止住重排 */
+    PeopleLayer.onBlock(resp, job.key);
   }
 
   /* 指数退避: 0.8s→1.6→3.2→6.4→12.8→…→30s 封顶, 之后保持 30s 周期重试,
@@ -739,7 +773,9 @@
     if (!CALC.settled) return;
     while (chunkBusy.size < NET_CFG.concChunk && chunkQueue.length) {
       var job = chunkQueue.shift();
-      if (chunkData.has(job.key) || chunkBusy.has(job.key)) continue;
+      /* 图层5: 已加载的块仅当"缺 People 层"时才允许再发一次 (只为补那一层)。 */
+      if (chunkBusy.has(job.key)) continue;
+      if (chunkData.has(job.key) && !PeopleLayer.wantBlock(job.key)) continue;
       chunkBusy.set(job.key, true);
       loadChunk(job);
     }
@@ -1020,6 +1056,55 @@
          ⚠ 模块必须容忍这两个键缺失 (main.js 可单独回退) ⇒ 那边写 `if (g.factionOf)`。 */
       factionOf: factionOf,
       factionColor: factionColor
+    });
+  }
+  /* 「他人聚落详情卡」数据源注入 (web/js/infocard.js)。
+     ⚠ 本模块**只注入, 不渲染** —— 它的 UI 属于另一套体系 (2026-09-23 用户:
+     「看其他人的宗门和信息属于另一个 UI 体系」)。等那套 UI 定形后直接:
+       var d = window.InkInfoCard.describe(q, r, refQ, refR);  // → {found,kind,name,html}
+       container.innerHTML = d.html;
+     数据源一律传**取值函数** (照 factionOf 的姿势) ⇒ 即使 main.js 之后 clear()
+     或换 seed, 模块读到的仍是最新集合。 */
+  function initInfoCard() {
+    var IC = window.InkInfoCard;
+    if (!IC || !IC.init) {
+      console.warn('他人详情卡模块未加载 (web/js/infocard.js) — 已跳过');
+      return;
+    }
+    IC.init({
+      esc: esc,
+      tierName: TIER_NAME,
+      veinLabel: veinLabel,
+      pxToTile: function (wx, wy) { return MC.pxToTile(wx, wy); },
+      worldSeed: function () { return worldSeed; },
+      settleCells: function () { return settleCells; },
+      regionCells: function () { return regionCells; },
+      commCells: function () { return commCells; },
+      regionM: function () { return geo ? geo.regionM : 0; }
+    });
+  }
+  /* 「众生录」角色窗口接线 (web/js/roster.js)。
+     ⚠ 本模块**只注入根节点与数据源, 不渲染** —— 开关/筛选/选中全在 roster.js 内部。
+     数据源 = **服务端实时生成**: GET /api/characters (C# CharactersSubsystem →
+     V8 "characters" scope → 同一份 chargen-core.js)。前端**不再**读任何预生成的静态快照
+     —— 角色是 (seed,index) 的纯函数派生, 由服务端按当前世现算。
+     ⚠ count 由前端给上限, seed **不给** (服务端缺省取当前世 —— 种子是服务端资产)。
+     ⚠ 响应 gzip; 端点带 no-cache, 换世后再开窗即得新一批人。 */
+  function initRoster() {
+    var R = window.SectRoster;
+    if (!R || !R.init) {
+      console.warn('众生录模块未加载 (web/js/roster.js) — 已跳过');
+      return;
+    }
+    R.init({
+      root: $('rosterWrap'),
+      btn: $('btnRoster'),
+      esc: esc,
+      dataUrl: 'api/characters?count=300',
+      onToggle: function (open) {
+        var b = $('btnRoster');
+        if (b) b.classList.toggle('on', !!open);
+      }
     });
   }
   /* ---------- 标注层: 全部基于后端数据绘制 ---------- */
@@ -1554,6 +1639,7 @@
       var bridge = onWater && !isFish && (WATER_OLD || !WATER_KIND[b.kind]);
       var rec = BI.spriteOf({
         kind: bridge ? '栈桥' : b.kind, q: b.q, r: b.r, variant: variantOf(b), tier: b.tier,
+        lv: b.lv || 1,                            // v4: 演化等级 (人口/紧缺度派生) → 楼/规模
         face: fi.face, water: fi.water, R: R, detail: detail,
         plate: false,                            // R6: 地盘改由城镇色**现画** (见下), 精灵内不再烘地皮色
         onWater: onWater,                        // R5b: 水上格 → 垫干栏木台 (水上人家)
@@ -2159,6 +2245,8 @@
     }
     /* 云气: 压在静态层之上 (云是"天", 在路/建筑/名牌之上), 交互高亮之下 */
     drawClouds(ctx, vw, vh);
+    /* 图层5 人物分布: 热力图 + 点击战力淡出 (关着时 PL.draw 内部早退, 零开销) */
+    PeopleLayer.draw(ctx);
     /* 悬停: 淡墨细六边框 —— 只回答"鼠标底下是哪一格", 不是选中态 */
     function hexHi(t, alpha) {
       if (!t) return;
@@ -2214,6 +2302,10 @@
         ctx.restore();
       }
     }
+    /* 卜居预览 / 领地圈 (方案 §4.4): 画在**覆盖层**而非静态层 ——
+       它随鼠标逐格变、随视野进出变, 而且是"临时态"; 塞进静态层会强制全量重绘,
+       还要额外进 staticDirty 指纹 (见方案同段的理由)。 */
+    drawPlaceOverlay(ctx, vw, vh);
   }
 
   /* ---------- 相机 ---------- */
@@ -2414,6 +2506,89 @@
   }
 
   /* ---------- 世界重建 ---------- */
+  /* 种子派生的「岁次」已随题名牌删除 (2026-11-24): 世界种子的干支/季节是纯装饰,
+     真正的时间显示由 Tick 时钟 (paintClock → #setEra) 负责。该函数保留为空壳的
+     唯一原因是 regenerate() 仍在调它 —— 想彻底清掉就顺手删调用点。 */
+  function seedEra(seedStr) { /* no-op: 见上 */ }
+
+  /* ============================================================
+   * Tick 框架: 世界时钟显示 (帧 7)
+   *   服务端权威 tick ⇒ 干支 / 季节 / 第几年 全部**由 tick 推导**。
+   *   ⚠ 本地插值用单调墙钟 (performance.now), 绝不用 Date.now()
+   *     (系统时间跳变会让「第 1 年」瞬间跳成「第 40 年」)。
+   *   ⚠ 校准每 CLOCK_SYNC_EVERY_TICKS 个本地 tick 一次, **不是每 tick** ——
+   *     每 tick 一问等于把服务端的懒调度白做了。
+   * ============================================================ */
+  var CLOCK_SYNC_EVERY_TICKS = 10;      // 每 10 游戏日 (≈10s) 校一次绝对 tick
+  var clockBase = null;                 // {tick, monoMs, rate} 最后一次权威校准
+
+  var _GAN = '甲乙丙丁戊己庚辛壬癸', _ZHI = '子丑寅卯辰巳午未申酉戌亥';
+  var _SEASON = '春夏秋冬';
+
+  /* tick → 干支纪年 / 季节 / 第几年 (纯整数, 与服务端 GameClock 同口径) */
+  function eraOfTick(tick) {
+    var ty = Math.floor(tick / 360) + 1;             // 第几年 (1-based)
+    var doy = ((tick % 360) + 360) % 360;            // 年内第几天 (防负)
+    var season = Math.floor(doy / 90);               // 0春 1夏 2秋 3冬
+    var idx = (ty - 1) % 60;                         // 第 1 年 = 甲子 (纯显示约定)
+    return {
+      year: ty,
+      ganZhi: _GAN.charAt(idx % 10) + _ZHI.charAt(idx % 12),
+      season: _SEASON.charAt(season)
+    };
+  }
+
+  /* 用校准基准 + 单调墙钟外推「现在」的 tick (null = 还没校准过) */
+  function clockNowTick() {
+    if (!clockBase) return null;
+    var now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    var rate = clockBase.rate > 0 ? clockBase.rate : 1;
+    return clockBase.tick + Math.floor((now - clockBase.monoMs) / 1000 * rate);
+  }
+
+  function paintClock(tick) {
+    if (!els.setEra || tick == null) return;      // 岁次显示位在设置弹窗 (题名牌已删)
+    var e = eraOfTick(tick);
+    els.setEra.textContent = '岁次' + e.ganZhi + ' · ' + e.season + ' · 第' + e.year + '年';
+  }
+
+  /* 校准一次: 拉服务端绝对 tick, 记下单调基准 */
+  function clockSync() {
+    if (typeof MC.clock !== 'function') return Promise.resolve(null);
+    return MC.clock().then(function (c) {
+      if (!c || c.err) return null;
+      clockBase = {
+        tick: c.tick,
+        monoMs: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+        rate: c.ratePerSecond > 0 ? c.ratePerSecond : 1
+      };
+      paintClock(c.tick);
+      return c;
+    }, function (err) {
+      /* ⚠ 失败**只停更**, 不清零 —— 显示旧值远好于显示「0 年」/空白 */
+      console.warn('[clock] 校准失败 (保留上次显示):', err && err.message);
+      return null;
+    });
+  }
+
+  /* 常驻循环: 1s 一次。到了校准点重校, 否则只按本地时钟外推重绘。
+     ⚠ 与 rAF 正交 —— 时钟是低频校准 + 本地插值, 不该进每帧热路径。
+     ⚠ 后台标签页的 `setInterval` 会被浏览器降到 ≥1 次/分钟 ⇒ 回到前台时基准可能已很旧。
+       故 `visibilitychange` 回前台时**立刻重校** (这才是「切回来看到正确时间」的关键)。 */
+  function clockSyncLoop() {
+    clockSync();
+    setInterval(function () {
+      var now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      if (!clockBase || now - clockBase.monoMs > CLOCK_SYNC_EVERY_TICKS * 1000) clockSync();
+      else paintClock(clockNowTick());
+    }, 1000);
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) clockSync();          // 回前台: 基准已旧, 立刻重校
+      });
+    }
+  }
+
   function regenerate(seedString) {
     worldSeed = String(seedString);
     chunkData.forEach(function (_info, key) { renderer.dropChunk(key); });
@@ -2449,7 +2624,25 @@
     cam.tzoom = cam.zoom = 2.2;
     /* ⚠ 这里不再回填任何"种子输入框" —— 手输种子的 UI 已删 (2026-09-16 用户:
        「seed 由服务器统一产生, 不能通过前端产生」)。世界事实由 setWorldInfo 落 UI。 */
-    /* 世界重铸: 点选标记与山川志的旧结果一并作废 (旧格详情属于上一世) */
+    /* Tick 框架: 时间显示改由**服务端时钟**驱动 (帧 7)。
+       ⚠ 换世后必须先**清掉旧世界的校准基准** —— 否则新世界的头几秒会继续显示
+         旧世界的年份 (基准未刷新), 是典型的「换了世界时间却没换」静默错。
+       之后 clockSync() 拉到新基准即自然覆盖。 */
+    clockBase = null;
+    clockSync();
+    /* 未拿到服务端时钟前的兜底 (老服务端无帧 7 / 离线): 保留 seed 派生的装饰性干支,
+       **绝不**用前端自造的时间冒充权威 —— 它只是"还没同步"的占位。 */
+    if (!clockBase) seedEra(worldSeed);
+    /* 世界重铸: 旧世界的宗门 id 全部失效 ⇒ 本宗面板回到未立宗态, 点选标记清空。
+       卜居一并退出 (落点/校验全作废 —— 在途响应由 placeSeq++ 与世界守卫双重作废)。 */
+    enterPlace(false);
+    mySect = null;
+    myTowns = [];                     // 附属城镇随本宗一并作废 (换世后由 loginAgain 重取)
+    renderMySect();                   // 面板回落引导态 (applyPlaceButtons 随之复位)
+    /* 换世后主动重登 —— socket 未断, 故不会走 onopen / onReconnect 那两条路;
+       「我的聚落」只能靠这一次 Login 帧重取 (首屏时 socket 未就绪 ⇒ 静默跳过,
+       onopen 里的首次登录会补上)。 */
+    MC.loginAgain();
     selMark = null;
     hideInfo();
     forceStaticDirty();               // R1: 重铸需立即全量重绘 (清节流定时器) + 小地图 rev bump
@@ -2464,7 +2657,7 @@
     els.stats.textContent = '已探明 宗门村镇 ' + st + ' · 墨路 ' + rd + ' · 灵脉 ' + veins;
   }
 
-  /* ---------- 通用小工具 (渲染层 / 山川志 / 探针共用) ---------- */
+  /* ---------- 通用小工具 (多处共用) ---------- */
   function hash32(str) {
     var h = 2166136261 >>> 0;
     for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -2480,6 +2673,580 @@
     var dq = q1 - q0, dr = r1 - r0;
     return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
   }
+  /* 原「宗门录」的**他人详情**部分 (tileDistFrom / masterOf / regionNameAt / nearestVein
+     + MASTER_CH / MASTER_TAIL / VEIN_NEAR) 已迁至 web/js/infocard.js —— 它们只服务
+     「看别人的宗门」, 不是全局工具。品阶名 TIER_NAME 留下 (全局命名口径: 本宗面板
+     与将来的立宗 UI 都要用)。 */
+  var TIER_NAME = ['', '下品宗门', '中品宗门', '上品宗门'];
+
+  /* ---------- 本宗面板 (只看玩家自己的宗门) ----------
+     ⚠ 数据源 = 服务端 PlayerSect 表 (docs/玩家信息表设计.md), **不是**视野内的实体层:
+     本宗是**持久资产**, 不在视野内时同样要能显示 ⇒ 字段随放置流程一起回填, 不靠扫视野。
+     旧「宗门录」的字段口径 (掌门/门人/地界/灵脉/岁入) 属于**他人的**宗门,
+     已随详情卡迁至 web/js/infocard.js, 本面板不再引用。 */
+  function kv(k, v) {
+    return '<div class="kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
+  }
+  /* 位次文案 (东西南北 + 格数) —— 面板与落点浮层共用同一口径 */
+  function placePos(q, r) {
+    return (q < 0 ? '西 ' + (-q) : '东 ' + q) + ' · ' + (r < 0 ? '北 ' + (-r) : '南 ' + r);
+  }
+  function mySectHTML() {
+    var s = mySect, row = [];
+    row.push('<div class="sec-top"><div class="sec-name">' + esc(s.name) + '</div>' +
+             '<div class="sec-seal">' + esc(String(s.name).slice(0, 2)) + '</div></div>');
+    row.push('<div class="sec-sub">' + (TIER_NAME[s.tier] || '宗门') + '</div>');
+    row.push('<div class="ink-rule"></div>');
+    row.push(kv('门人', (s.pop || 0).toLocaleString() + ' 口'));
+    row.push(kv('领地', (s.domainR || 0) + ' 格'));
+    row.push(kv('位次', placePos(s.q, s.r)));
+    /* 附属城镇: 服务端是权威 (登录/落子响应回填), 最多列 6 条 —— 面板不滚动。
+       超出部分折成「…等 N 处」, 免得把左栏撑破。 */
+    var lim = 6;
+    row.push('<div class="sec-cap">附属 · ' + myTowns.length +
+             (townMax > 0 ? ' / ' + townMax : '') + ' 处</div>');
+    if (!myTowns.length) {
+      row.push('<div class="sec-empty" style="padding:2px 0 4px">尚无可建 · 用「拓土」开疆</div>');
+    } else {
+      for (var i = 0; i < myTowns.length && i < lim; i++) {
+        var t = myTowns[i];
+        row.push(kv(TYPE_NAME[t.type] || t.type, esc(t.name) + ' · ' + placePos(t.q, t.r)));
+      }
+      if (myTowns.length > lim)
+        row.push('<div class="sec-cap">… 等 ' + myTowns.length + ' 处</div>');
+    }
+    return row.join('');
+  }
+  /* 未立宗 → 引导态。立宗后由放置流程回填 mySect, 再调本函数即可。
+     同时刷新「回宗」按钮与工具列按钮的显隐 (它们都是「有没有本宗」的函数)。 */
+  function renderMySect() {
+    if (els.sectBody) {
+      els.sectBody.innerHTML = mySect
+        ? mySectHTML()
+        : '<div class="sec-empty">尚未择地立宗</div>';
+    }
+    applyPlaceButtons();
+  }
+  /* 工具列按钮 + 回宗按钮的显隐 (2026-09-23 用户: 「如果宗门已经有了就隐藏按钮」)。
+     · 未立宗 ⇒ 显示「卜居」(右上角那枚已移到左侧 #toolBox), 隐藏「拓土」
+     · 已立宗 ⇒ 隐藏「卜居」, 显示「拓土」; 本宗面板出现「回宗」
+     ⚠ 与 mySect 单点绑定: 别在别处直接改 style/class, 否则落子/换世/重登三条路会各说各话。 */
+  function applyPlaceButtons() {
+    var bp = $('btnPlace'), be = $('btnExpand'), bg = $('btnGotoSect');
+    var has = !!mySect;
+    if (bp) bp.classList.toggle('hidden', has);
+    if (be) be.classList.toggle('hidden', !has);
+    if (bg) bg.classList.toggle('hidden', !has);
+    /* 已立宗却还停在卜居档 (落子响应与登录响应竞争时的兜底) ⇒ 退出, 免得一直报 quota */
+    if (has && placeMode && placeMode.kind === 'sect') enterPlace(false);
+  }
+  /* 回宗: 相机移回本宗 (方案 §4.4「回宗」)。世界级坐标 ⇒ 直接置 cam.x/tx,
+     再 forceStaticDirty 让静态层立刻重画 (与 mmJump 同一手法)。 */
+  function gotoSect() {
+    if (!mySect) return;
+    var wp = MC.tileToWorld(mySect.q, mySect.r);
+    cam.tx = cam.x = wp.x; cam.ty = cam.y = wp.y;
+    selectTile({ q: mySect.q, r: mySect.r });
+    lastStream.x = NaN;               // 相机跳远了 ⇒ 下一帧重建需求集
+    forceStaticDirty();
+  }
+  /* 登录响应回填 (主宗 + 附属城镇)。服务端是权威 ⇒ 整表替换, 不做增量合并
+     (增量合并会让"别处已经拆掉的城镇"永远留在面板上)。
+     ⚠ places 里 type==='sect' 的那条是主宗; 其余都是附属城镇。 */
+  function applyMyPlaces(places, tMax) {
+    mySect = null; myTowns = [];
+    if (tMax != null) townMax = tMax | 0;
+    for (var i = 0; i < (places || []).length; i++) {
+      var p = places[i];
+      if (!p || !p.id) continue;
+      if (p.type === 'sect') {
+        mySect = { id: p.id, name: p.name, type: 'sect', q: p.q, r: p.r, x: p.x, y: p.y,
+                   pop: p.pop || 0, tier: p.tier || 1, owner: p.owner || '',
+                   domainR: domainRof('sect', p.tier || 1) };
+      } else {
+        myTowns.push({ id: p.id, name: p.name, type: p.type || 'village',
+                       q: p.q, r: p.r, x: p.x, y: p.y, pop: p.pop || 0, tier: p.tier || 1 });
+      }
+    }
+    myTowns.sort(function (a, b) { return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; });
+    renderMySect();
+  }
+
+  /* ============================================================
+   * 卜居 —— 玩家择地立宗 (2026-09-23 方案 §2/§4)
+   * ------------------------------------------------------------
+   * 分工 (写路径绝不信前端):
+   *   · 悬停 = 发 PlaceCheck, 服务端跑 §2.3 全套判据 → 前端只**显示**结论;
+   *   · 单击 = 发 PlaceCommit, 服务端**重跑**一遍判据 + 落点 + **同步**重算
+   *     受影响区域的道路 (实测 118~450ms, 全程持 V8 门闩), 然后回**脏块清单**;
+   *   · 前端拿脏块清单 blockForget + 重拉 (前端对已加载的块不会自动重拉 ——
+   *     updateStreaming 的入队条件是 `!chunkData.has(key)`, 这条是本次改造的关键)。
+   *
+   * ⚠ 悬停节流是**必须**的 (§2.7): 一次 PlaceCheck = 25 个区域格的邻域扫描。
+   *   不节流 = 鼠标划过每像素一次 V8 调用 = 门闩被钉死, 连带 Chunk/Region 全排队。
+   * ============================================================ */
+  var PLACE_HOVER_MS = 160;         // 悬停两次校验的最小间隔 (≥150ms, 见 §4.4)
+  var placeMode = null;             // null = 关闭; 否则 { kind, tier } (kind: 'sect'|'town'|'village')
+  var placeAt = null;               // 待校验/已在校验的落点 { q, r }
+  var placeRes = null;              // 最近一次 PlaceCheck 响应 (画预览 + 提示文案)
+  var placeSeq = 0;                 // 请求序号: 最新者胜 (与 infoSeq 同思路)
+  var placeTimer = null, placeLastMs = 0;
+  var placeBusy = false;            // 提交在途 (前端防连点; 服务端另有幂等 + 全局闸)
+
+  var PLACE_REASON = {
+    world_stale: '此世已退场, 请刷新后领当前世',
+    need_login: '卜居需先登录',
+    quota_exceeded: '此世已立宗门',
+    no_sect: '尚未立宗, 无处拓土',
+    bad_coord: '此处在世界之外',
+    too_far: '超出本宗辖域',
+    bad_type: '此间不可建此类',
+    deep_water: '深海之上不可立',
+    on_vein: '灵脉地脉之上不可立',
+    spirit_too_low: '此间灵机不足',
+    too_close: '距此间太近, 立宗需留出领地',
+    bad_name: '名号需 1~12 字',
+    too_frequent: '卜居过于频繁, 请稍候再试'
+  };
+  /* 类型 → 中文 (与 TYPE_NAME 同源; 拓土档的两种 + 立宗档) */
+  function kindName(kind) {
+    if (kind === 'sect') return '宗门';
+    return TYPE_NAME[kind] || '城镇';
+  }
+  /* 规模 → 领地半径 (真源服务端 CFG.DOMAIN_R, 经 meta 下发)。
+     ⚠ 这是**镜像口径**, 只用于画圈与文案; 判据永远在服务端算
+     (老服务端没下发该表时返回 0 ⇒ 不画圈, 静默降级)。 */
+  function domainRof(type, tier) {
+    var DR = geo.domainR;
+    if (!DR) return 0;
+    var k = (type === 'sect') ? ('sect' + Math.max(1, Math.min(3, tier | 0))) : type;
+    return DR[k] || 0;
+  }
+  /* 扩张档允许的类型清单 (真源服务端 CFG.EXPAND_TYPES, 经 meta 下发)。
+     ⚠ 不写死 'town'/'village': 将来加/减档位只改引擎一处 (同 domainR 的规矩);
+       服务端未下发 (老引擎) ⇒ 返回空 = 拓土按钮点了也没得选, 静默降级。 */
+  function expandKinds() {
+    var T = geo.expandTypes, out = [];
+    if (!T) return out;
+    for (var k in T) if (Object.prototype.hasOwnProperty.call(T, k)) out.push(k);
+    out.sort();
+    return out;
+  }
+  /* 辖区半径 (= 附属城镇距本宗的最大格数); 0 = 该引擎没有这个概念 */
+  function expandR() { return geo.expandR | 0; }
+
+  /* ---------- 画: 领地六边 ----------
+     六角立方距离的球 {d ≤ R} 在轴向坐标下 = 三条带 |q|≤R ∩ |r|≤R ∩ |q+r|≤R 的交,
+     在世界上是**正六边形**, 其 6 个顶点恰好落在 6 个格点上
+     (R,0)/(R,-R)/(0,-R)/(-R,0)/(-R,R)/(0,R) 的偏移处 —— 故按顶点画就是精确边界,
+     不必逐格描边 (R=8 时逐格要 48 个六边形, 每帧几十座就是几千次 stroke)。 */
+  function domainHexPath(ctx, cx, cy, R) {
+    var hw = geo.hexW || geo.hexR * 1.7320508, hr = geo.hexR;
+    var dx = hw * R, dy = 1.5 * hr * R;
+    var pts = [[dx, 0], [dx / 2, -dy], [-dx / 2, -dy],
+               [-dx, 0], [-dx / 2, dy], [dx / 2, dy]];
+    ctx.beginPath();
+    for (var k = 0; k < 6; k++) {
+      var px = cx + pts[k][0] * cam.zoom, py = cy + pts[k][1] * cam.zoom;
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  }
+
+  /* 常显领地圈 (设置开关 domain) —— 数据源 = 视野内动态实体层 settleCells */
+  function drawDomainRings(ctx, vw, vh) {
+    settleCells.forEach(function (list) {
+      for (var i = 0; i < list.length; i++) {
+        var st = list[i];
+        var R = domainRof(st.type, st.tier);
+        if (R <= 0) continue;
+        var sp = w2s(st.x, st.y);
+        var edge = (geo.hexW * R + geo.hexR) * cam.zoom;
+        if (sp.x + edge < -8 || sp.y + edge * 1.2 < -8 ||
+            sp.x - edge > vw + 8 || sp.y - edge * 1.2 > vh + 8) continue;
+        ctx.strokeStyle = (st.type === 'sect')
+          ? 'rgba(166,58,44,0.34)' : 'rgba(58,48,38,0.26)';
+        ctx.lineWidth = 1.4;
+        ctx.setLineDash([5, 4]);
+        domainHexPath(ctx, sp.x, sp.y, R);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    });
+  }
+
+  /* 卜居/拓土预览: 落点六边 (墨绿可立 / 朱砂不可立) + 邻近聚落的领地六边 + 引线 */
+  function drawPlacePreview(ctx) {
+    if (!placeAt) return;
+    var at = placeAt, ok = !!(placeRes && placeRes.ok);
+    var wp = MC.tileToWorld(at.q, at.r);
+    var sp = w2s(wp.x, wp.y);
+    var hr = geo.hexR;
+
+    /* ⓪ 本宗辖域环 (拓土档专属): 半径 = meta.expandR, 锚点 = 本宗。
+          与下面 ① 的「领地圈」是两个概念 —— 领地圈是"别人不许插足的范围"(DOMAIN_R),
+          辖域环是"我还能往外建多远"(EXPAND_R)。两圈一起画, 玩家一眼能看出那条
+          可建环带 (上品宗门 8~10 格)。立宗档不画 (那时没有辖域约束, 画了会误导)。 */
+    if (placeMode && placeMode.kind !== 'sect' && mySect) {
+      var ER = expandR();
+      if (ER > 0) {
+        var ew = MC.tileToWorld(mySect.q, mySect.r);
+        var ep = w2s(ew.x, ew.y);
+        ctx.strokeStyle = 'rgba(58,116,74,0.42)';
+        ctx.lineWidth = 1.6;
+        ctx.setLineDash([9, 6]);
+        domainHexPath(ctx, ep.x, ep.y, ER);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    /* ① 邻近聚落的领地圈 —— 只看 PlaceCheck 回的 near 列表 (含 blocker),
+          半径用服务端给的 need (它才是判据口径), 不信前端自己那张表 */
+    var near = (placeRes && placeRes.near) || [];
+    for (var i = 0; i < near.length; i++) {
+      var n = near[i];
+      if (!(n.need > 0)) continue;
+      var nw = MC.tileToWorld(n.q, n.r);
+      var np = w2s(nw.x, nw.y);
+      ctx.strokeStyle = 'rgba(166,58,44,0.42)';
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([6, 5]);
+      domainHexPath(ctx, np.x, np.y, n.need);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    /* ② 落点自身: 六边填色 + 描边 */
+    ctx.fillStyle = ok ? 'rgba(58,116,74,0.17)' : 'rgba(166,58,44,0.17)';
+    ctx.strokeStyle = ok ? 'rgba(58,116,74,0.92)' : 'rgba(166,58,44,0.92)';
+    ctx.lineWidth = 2.2;
+    hexPath(ctx, sp.x, sp.y, hr * 0.96 * cam.zoom);
+    ctx.fill();
+    ctx.stroke();
+    /* ③ 十字准星 (小, 让人看清落在哪格心) */
+    var cl = Math.max(6, hr * cam.zoom * 0.34);
+    ctx.strokeStyle = ok ? 'rgba(58,116,74,0.75)' : 'rgba(166,58,44,0.75)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(sp.x - cl, sp.y); ctx.lineTo(sp.x + cl, sp.y);
+    ctx.moveTo(sp.x, sp.y - cl); ctx.lineTo(sp.x, sp.y + cl);
+    ctx.stroke();
+    /* ④ 若被否, 从落点拉一条引线到"挡路的那座" (回显 too_close 的归因) */
+    if (!ok && placeRes && placeRes.blocker) {
+      var bw = MC.tileToWorld(placeRes.blocker.q, placeRes.blocker.r);
+      var bp = w2s(bw.x, bw.y);
+      ctx.strokeStyle = 'rgba(166,58,44,0.55)';
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(sp.x, sp.y); ctx.lineTo(bp.x, bp.y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  function drawPlaceOverlay(ctx, vw, vh) {
+    if (!showDomain && !placeMode) return;
+    ctx.save();
+    /* 覆盖层画布是设备像素, 这里按 dpr 缩放 ⇒ 以下全部按 CSS px 作图 */
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineJoin = 'round';
+    if (showDomain && !placeMode) drawDomainRings(ctx, vw, vh);
+    if (placeMode) drawPlacePreview(ctx);
+    ctx.restore();
+  }
+
+  /* ---------- 交互: 悬停节流校验 ---------- */
+  function hoverPlaceCheck(t) {
+    if (!placeMode || !t) return;
+    if (placeAt && placeAt.q === t.q && placeAt.r === t.r) return;   // 同格不重发
+    placeAt = { q: t.q, r: t.r };
+    if (placeTimer) return;                    // 窗口内已有挂起的请求: 它结束时用最新落点
+    var wait = Math.max(0, PLACE_HOVER_MS - (performance.now() - placeLastMs));
+    placeTimer = setTimeout(sendPlaceCheck, wait);
+  }
+  function sendPlaceCheck() {
+    placeTimer = null;
+    if (!placeMode || !placeAt) return;
+    placeLastMs = performance.now();
+    var rid = ++placeSeq, gen = worldSeed, q = placeAt.q, r = placeAt.r;
+    var kind = placeMode.kind;
+    /* ⚠ excludeId 只在**立宗档**传 (原地重建时豁免自己那座)。
+       拓土档必须传空: 本宗正是"领地间距"约束的来源 —— 传了就等于对自己宗门免疫,
+       10 格辖域会退化成"贴脸也能建"(而服务端 PlaceCommit 侧本来也不认这个豁免,
+       两边行为分叉 ⇒ 前端显示可建、落子被拒, 最糟的一种不一致)。 */
+    var ex = (kind === 'sect' && mySect) ? mySect.id : '';
+    MC.placeCheck(gen, q, r, ex, kind === 'sect' ? '' : kind).then(function (res) {
+      /* 最新者胜 + 世界守卫: 过期响应不改 UI, 也不画到新世界上 */
+      if (rid !== placeSeq || gen !== worldSeed) return;
+      placeRes = res;
+      renderPlaceState(res);
+    }, function (err) {
+      if (rid !== placeSeq || gen !== worldSeed) return;
+      placeRes = null;
+      placeMsg('校验未通: ' + ((err && err.message) || err), 'bad');
+    });
+  }
+  function placeMsg(text, cls) {
+    var el = $('placeMsg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = cls || '';
+  }
+  function renderPlaceState(res) {
+    var el = $('placeState');
+    if (!el) return;
+    if (!res) { el.innerHTML = ''; placeMsg('', ''); return; }
+    var rows = [];
+    function kvp(k, v, bad) {
+      return '<div class="pb-kv"><span>' + k + '</span><span class="v' +
+             (bad ? ' bad' : '') + '">' + v + '</span></div>';
+    }
+    rows.push(kvp('位次', placePos(res.q, res.r)));
+    rows.push(kvp('灵机', res.spirit.toFixed(2) + ' / 需 ' + res.spiritMin.toFixed(2),
+                  res.spirit < res.spiritMin));
+    /* 拓土档: 距本宗实测距离 (服务端算的, 前端只显示) —— too_far 的归因就靠这一行 */
+    if (placeMode && placeMode.kind !== 'sect' && res.hasAnchor) {
+      var far = res.reason === 'too_far';
+      rows.push(kvp('离宗', res.anchorDist + ' / 限 ' + res.maxR + ' 格', far));
+    }
+    if (res.blocker) {
+      var b = res.blocker;
+      rows.push(kvp('近处', esc(TYPE_NAME[b.type] || b.type) + ' · ' +
+                    esc(b.name || b.id) + ' → ' + b.dist + ' / 需 ' + b.need + ' 格', true));
+    }
+    /* 配额行: 立宗档数宗门数, 拓土档数附属城镇数 (服务端两档都给) */
+    var q = $('placeQuota');
+    if (q) {
+      q.textContent = (placeMode && placeMode.kind !== 'sect')
+        ? ('附属 ' + res.towns + (res.townMax > 0 ? ' / ' + res.townMax : ''))
+        : ('已立 ' + res.quota + ' / ' + res.quotaMax);
+    }
+    el.innerHTML = rows.join('');
+    if (res.ok) placeMsg('此地可' + (placeMode && placeMode.kind === 'sect' ? '立宗' : '建镇') +
+                         ' · 单击落定', 'ok');
+    else placeMsg(PLACE_REASON[res.reason] || res.err || '此地不可立', 'bad');
+  }
+
+  /* ---------- 提交 (落定) ---------- */
+  /* 幂等键 = 类型 + 落点 + 名号 + 品阶 的确定性函数:
+     重复点击同一处 = 同键 ⇒ 服务端回放首次响应, 绝不会立两座。
+     (用随机键反而丢掉了这层保护; 用时间戳键则每次点击都是新键。)
+     ⚠ 必须含**类型**: 立宗档与拓土档的 tier 含义不同 (宗门品阶 vs 恒定 1),
+       不含类型时「同格同名」的两次不同动作会撞成同一个键 ⇒ 第二座永远被回放成第一座。 */
+  function placeIdemKey(gen, kind, q, r, name, tier) {
+    return 'pl_' + gen + '_' + kind + '_' + q + '_' + r + '_' + tier + '_' + hash32(name);
+  }
+  function commitPlace(t) {
+    if (!placeMode || !t || placeBusy) return;
+    var nm = ($('placeName') ? $('placeName').value : '').trim();
+    if (nm.length < 1 || nm.length > 12) { placeMsg('名号需 1~12 字', 'bad'); return; }
+    var kind = placeMode.kind;
+    var expand = kind !== 'sect';
+    var tier = expand ? 1 : (placeMode.tier | 0);
+    var gen = worldSeed, q = t.q, r = t.r;
+    placeBusy = true;
+    setPlaceBusy(true);
+    placeMsg('落定中 · 重算此地道路…', 'busy');
+    MC.placeCommit(gen, q, r, nm, tier, placeIdemKey(gen, kind, q, r, nm, tier),
+                   expand ? kind : '')
+      .then(function (res) {
+        placeBusy = false; setPlaceBusy(false);
+        if (gen !== worldSeed) return;
+        if (!res.ok) { placeMsg(PLACE_REASON[res.reason] || res.err || '落定失败', 'bad'); return; }
+        onPlaced(res, t, kind);
+      }, function (err) {
+        placeBusy = false; setPlaceBusy(false);
+        if (gen !== worldSeed) return;
+        placeMsg('落定失败: ' + ((err && err.message) || err), 'bad');
+      });
+  }
+  function setPlaceBusy(b) {
+    var btn = $('btnPlace'), be = $('btnExpand');
+    if (b) { if (btn) btn.className = 'on'; if (be) be.className = 'on'; }
+    else applyPlaceButtons();          // 收工时回落到「按有无本宗决定显隐」的权威状态
+  }
+  /* 落定成功后的**本地同步** (方案 §3.6/§4.4) —— 顺序不能乱:
+     ① 先作废 rev 与已加载数据 (否则重拉时服务端按"rev 未变"缺省下发 ⇒ 路永远不变);
+     ② 置静态脏 + 让下一帧全量重建需求集 (updateStreaming 只对 !chunkData.has 的块入队
+        —— 我们把块删掉了, 它才会重新排队)。 */
+  function onPlaced(res, t, kind) {
+    var st = res.sect || {};
+    var expand = kind !== 'sect';
+    if (expand) {
+      /* 拓土: 主宗不变, 只把新城镇并进清单。
+         ⚠ **不能**像立宗那样无条件用响应里的实体去覆盖 mySect —— 附属城镇 type 是
+           town/village, 拿它当主宗会让面板显示错档、领地圈也算错。 */
+      myTowns.push({ id: st.id, name: st.name, type: st.type || kind,
+                     q: st.q, r: st.r, x: st.x, y: st.y, pop: st.pop || 0, tier: st.tier || 1 });
+      myTowns.sort(function (a, b) { return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; });
+    } else {
+      mySect = { id: st.id, name: st.name, type: st.type || 'sect',
+                 q: st.q, r: st.r, x: st.x, y: st.y,
+                 pop: st.pop || 0, tier: st.tier || 1, owner: st.owner || '',
+                 domainR: domainRof(st.type || 'sect', st.tier || 1) };
+    }
+    renderMySect();
+
+    var blocks = res.blocks || [];
+    for (var i = 0; i < blocks.length; i++) {
+      var ca = blocks[i].ca, cb = blocks[i].cb;
+      var key = chunkKey(ca, cb);
+      MC.blockForget(key);                       // ① rev 记账先清 (不变量: 有记录 ⇒ 有数据)
+      chunkRetry.delete(key);
+      if (chunkData.has(key)) {
+        renderer.dropChunk(key);                 // ② 已加载的块必须**卸载**, 才会被重新排队
+        chunkData.delete(key);
+        propBuilt.delete(key);
+        PeopleLayer.dropBlock(key);              // 图层5: 人物落格表一并作废
+      }
+      if (!keepChunk.has(key) || chunkBusy.has(key) || deferKeys.has(key)) continue;
+      var w = MC.tileToWorld(ca * geo.chunkS, cb * geo.chunkS);
+      chunkQueue.push({ ca: ca, cb: cb, key: key,
+                        d: (w.x - cam.x) * (w.x - cam.x) + (w.y - cam.y) * (w.y - cam.y) });
+    }
+    chunkQueue.sort(function (p2, q2) { return p2.d - q2.d; });
+    settleVer++;                                 // 实体层变了 ⇒ 归属/派生缓存一并失效
+    roadsDirty = true;
+    forceStaticDirty();
+    lastStream.x = NaN;                          // ③ 下一帧强制全量重建需求集
+    pumpChunks();
+    selectTile({ q: st.q, r: st.r });            // 顺手落一枚朱砂标记
+    if (expand) {
+      /* 拓土**不退出**模式: 数量不限 (用户: 「先不限制」), 连着建第二座是常态。
+         只把落点作废让它继续跟鼠标走 —— 并**先清状态行再报成功**:
+         renderPlaceState(null) 会把 placeMsg 一起清掉, 顺序反了就看不到这条成功提示。 */
+      placeAt = null; placeRes = null;
+      var elS = $('placeState'); if (elS) elS.innerHTML = '';
+      placeMsg('已建' + kindName(kind) + ' · ' + esc(st.name) + '（道路 ' + res.roads +
+               ' 条 / ' + res.ms + 'ms · 重载 ' + blocks.length + ' 块）', 'ok');
+      return;
+    }
+    placeMsg('已立宗 · ' + esc(st.name) + '（道路 ' + res.roads + ' 条 / ' +
+             res.ms + 'ms · 重载 ' + blocks.length + ' 块）', 'ok');
+    /* 立宗后自动退出卜居: 配额已满, 留在模式里只会一直报 quota */
+    enterPlace(false);
+    if (mySect && mySect.q != null) {
+      var wp = MC.tileToWorld(mySect.q, mySect.r);
+      cam.tx = cam.x = wp.x; cam.ty = cam.y = wp.y;   // 并移到本宗 (它多半在视野外)
+      lastStream.x = NaN;
+    }
+  }
+
+  /* ---------- 模式开关 ----------
+     enterPlace(on, kind): kind = 'sect'(卜居) | EXPAND_TYPES 里的 town/village(拓土)。
+     ⚠ 两个入口共用同一套落点校验/提交链路, 差别只有三处: ① 发给服务端的 type
+       ② 浮层显示哪几行 (品阶 vs 类型) ③ 落定后的后处理 (见 onPlaced)。 */
+  function enterPlace(on, kind) {
+    var box = $('placeBox');
+    var k = kind || (placeMode ? placeMode.kind : null) || 'sect';
+    if (on && k !== 'sect' && !expandTypesHas(k)) k = (expandKinds()[0] || 'sect');
+    placeMode = on ? { kind: k, tier: ($('placeTier') ? (+$('placeTier').value || 1) : 1) } : null;
+    if (box) box.classList.toggle('hidden', !on);
+    var title = $('placeTitle');
+    if (title) {
+      title.innerHTML = on && k !== 'sect'
+        ? '拓<b>土</b>' : '卜<b>居</b>';
+    }
+    var hint = $('placeHint');
+    if (hint) {
+      hint.innerHTML = on && k !== 'sect'
+        ? '移动鼠标择地, 单击落定 · Esc 取消<br>绿虚线 = 本宗辖域 · 须在辖域内'
+        : '移动鼠标择地, 单击落定 · Esc 取消<br>朱砂 = 不可立 · 墨绿 = 可立';
+    }
+    var rowKind = $('placeKindRow'), rowTier = $('placeTierRow');
+    if (rowKind) rowKind.classList.toggle('hidden', !(on && k !== 'sect'));
+    if (rowTier) rowTier.classList.toggle('hidden', !!(on && k !== 'sect'));
+    if (!on) {
+      placeAt = null; placeRes = null;
+      placeSeq++;                     // 让在途校验响应过期 (最新者胜)
+      if (placeTimer) { clearTimeout(placeTimer); placeTimer = null; }
+      if (placeBusy) { placeBusy = false; }
+      /* ⚠ 别把 DOM 句柄叫 `st` —— frontend_smoke 的解码字段契约按名字扫
+         `<resp|cm|st|lr>.prop`, `st` 是**聚落解码结构**的保留名 (本文件其余 st 都真
+         的是聚落结构)。命名成 elState 是为了让那条判据继续有意义。 */
+      var elState = $('placeState'); if (elState) elState.innerHTML = '';
+      placeMsg('', '');
+      setPlaceBusy(false);            // 收工: 按钮回到「按有无本宗决定显隐」
+    } else {
+      fillKindSelect();
+      renderPlaceState(null);
+      placeMsg(mySect ? (k === 'sect' ? '此世已立宗门' : '在本宗辖域内择地建镇')
+                      : (k === 'sect' ? '移动鼠标择地' : '尚未立宗, 无处拓土'),
+               (mySect && k === 'sect') || (!mySect && k !== 'sect') ? 'bad' : '');
+      /* 拓土档: 名号留空时给一个建议 (不覆盖用户已输入的内容) */
+      var nm = $('placeName');
+      if (nm) {
+        if (k !== 'sect' && !nm.value && mySect) nm.value = String(mySect.name).slice(0, 4) + '别院';
+        if (!placeBusy) try { nm.focus(); } catch (e) { /* 无焦点环境 (headless) */ }
+      }
+    }
+    setPlaceBusy(placeBusy);
+    applyPlaceButtons();
+  }
+  function expandTypesHas(k) {
+    var ks = expandKinds();
+    for (var i = 0; i < ks.length; i++) if (ks[i] === k) return true;
+    return false;
+  }
+  /* 类型下拉的选项来自 meta.expandTypes (服务端真源) —— 不写死 town/village。
+     只在选项集合真的变了时重建 DOM (每帧重建会打断用户的展开态)。 */
+  var kindSig = '';
+  function fillKindSelect() {
+    var sel = $('placeKind');
+    if (!sel) return;
+    var ks = expandKinds();
+    var sig = ks.join(',');
+    if (sig !== kindSig) {
+      kindSig = sig;
+      var html = '';
+      for (var i = 0; i < ks.length; i++)
+        html += '<option value="' + ks[i] + '">' + esc(kindName(ks[i])) + '</option>';
+      sel.innerHTML = html || '<option value="">（引擎未开放）</option>';
+    }
+    if (placeMode && placeMode.kind !== 'sect') sel.value = placeMode.kind;
+  }
+
+  function bindPlaceUI() {
+    var btn = $('btnPlace');
+    if (btn) btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (placeMode && placeMode.kind === 'sect') enterPlace(false);
+      else enterPlace(true, 'sect');
+    });
+    var be = $('btnExpand');
+    if (be) be.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (placeMode && placeMode.kind !== 'sect') enterPlace(false);
+      else enterPlace(true, expandKinds()[0] || 'town');
+    });
+    var bg = $('btnGotoSect');
+    if (bg) bg.addEventListener('click', function (e) { e.stopPropagation(); gotoSect(); });
+    var cls = $('btnPlaceClose');
+    if (cls) cls.addEventListener('click', function () { enterPlace(false); });
+    var nm = $('placeName');
+    if (nm) nm.addEventListener('input', function () { if (placeMode) placeMsg('', ''); });
+    var tr = $('placeTier');
+    if (tr) tr.addEventListener('change', function () {
+      if (placeMode) placeMode.tier = (+this.value || 1);
+    });
+    var kd = $('placeKind');
+    if (kd) kd.addEventListener('change', function () {
+      /* 换类型 ⇒ 落点作废重验 (类型不同, 白名单/领地档都不同), 但**不**退出模式 */
+      if (!placeMode) return;
+      placeMode.kind = this.value || 'town';
+      placeAt = null; placeRes = null;
+      var elState = $('placeState'); if (elState) elState.innerHTML = '';
+      placeMsg('已切换为' + kindName(placeMode.kind) + ' · 请择地', '');
+      var nmEl = $('placeName');
+      if (nmEl) nmEl.value = mySect ? (String(mySect.name).slice(0, 4) + '别院') : nmEl.value;
+    });
+    /* Esc 退出卜居/拓土。⚠ 与设置弹窗的 Esc 各自独立判断, 互不吞噬:
+       卜居模式下优先关卜居 (它是"手上的动作"), 设置弹窗保持原行为。 */
+    window.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      if (placeMode) { enterPlace(false); return; }
+    });
+  }
+
   /* ---------- 山川志的数据来源: 这一格上到底站着什么 ----------
      用户 2026-11-24: 「必须是……先显示上面的有什么东西, 而不是只显示一个地皮的信息」。
      /api/map/tile 只给"地皮"(地貌/海拔/润泽) 与聚合的 placeType/placeName;
@@ -2537,12 +3304,16 @@
     }
     return best;
   }
-  /* 点选一格: 落朱砂标记。2026-11-24 宗门录已删 —— 不再有「选中宗门」这回事,
-     这一格上有什么, 由弹出的山川志回答 (见 showInfo / infoRowsHTML)。 */
+  /* ---------- 点选 ---------- */
+  /* 点一格 → 落一枚朱砂标记 (画在覆盖层 ⇒ 点一下立刻可见, 不必等静态层置脏)。
+     ⚠ 旧版的「若该格属某座宗门则顺带把它设为选中宗门」已删 (2026-09-23 十二版):
+     择宗闭环整体下线。本函数现在只回答「玩家点了哪一格」,
+     供「选点立宗」与「查他人聚落」两套流程各自复用。 */
   function selectTile(t) {
     if (!t) return;
     var w = MC.tileToWorld(t.q, t.r);
     selMark = { q: t.q, r: t.r, x: w.x, y: w.y };
+    PeopleLayer.noteClick(t);      // 图层5: 记下点击格 → 覆盖层做一次「战力淡出」
   }
 
   /* ---------- 输入 ---------- */
@@ -2568,6 +3339,9 @@
         var w = s2w(mx, my);
         hoverTile = MC.pxToTile(w.x, w.y);
         app.style.cursor = 'pointer';
+        /* 卜居: 悬停即校验 (节流 ≥160ms —— 一次 = 25 个区域格的邻域扫描)。
+           ⚠ 只在**非拖动**时发: 拖相机时鼠标扫过几十格, 全发出去等于请求风暴。 */
+        if (placeMode) hoverPlaceCheck(hoverTile);
       } else {
         /* D9: 鼠标移出画布时清掉悬停格与指针样式 —— 原实现只在「画布内」分支赋值,
            走出画布后 hover 高亮与 cursor:pointer 一直残留。 */
@@ -2588,9 +3362,13 @@
       var mx = e.clientX - rect.left, my = e.clientY - rect.top;
       if (mx < 0 || my < 0 || mx > rect.width || my > rect.height) return;
       var wpt = s2w(mx, my);
-      selectedTile = MC.pxToTile(wpt.x, wpt.y);
-      selectTile(selectedTile);         // 点哪选哪 (朱砂圈)
-      /* 传**视口坐标** (clientX/Y): 山川志是 position: fixed 的自由浮窗, 贴在点击处旁边弹出 */
+      var ct = MC.pxToTile(wpt.x, wpt.y);
+      /* 卜居模式: 单击 = 落定 (走 PlaceCommit), 不再弹山川志 —— 同一次点击只服务一个意图,
+         否则「立宗」与「查看此格」会互相打断 (信息面板遮住落点提示)。 */
+      if (placeMode) { commitPlace(ct); return; }
+      selectedTile = ct;
+      selectTile(selectedTile);
+      /* 传**视口坐标** (clientX/Y): 山川志是 position: fixed 的自由浮窗, 贴点击处弹出 */
       showInfo(selectedTile, e.clientX, e.clientY);
     });
     app.addEventListener('wheel', function (e) {
@@ -2725,10 +3503,8 @@
         regenBusy(false);
       });
     });
-    /* 2026-11-24: 择宗菜单随「宗门录」一起移除 (按钮/下拉/点空白收起三段事件全删) */
-
     $('infoClose').addEventListener('click', hideInfo);
-    bindInfoDrag();                        // 山川志: 标题栏拖动 + 位置记忆
+    bindInfoDrag();                        // 山川志: 标题栏拖动 + 位置记忆 (ZMStore 'infoPos')
     window.addEventListener('resize', onResize);
   }
 
@@ -2739,9 +3515,6 @@
     els.overlay.height = Math.round(vh * dpr);
     els.overlay.style.width = vw + 'px';
     els.overlay.style.height = vh + 'px';
-    /* 山川志是自由浮窗: 窗口变小后原来的位置可能出视口 ⇒ 收回来 (不改用户记住的 pos, 只挪本次) */
-    if (infoPos) applyInfoPos(clampInfoPos(infoPos.l, infoPos.t));
-    else if (!els.info.classList.contains('hidden')) placeInfoAt(null, null);
   }
 
   /* ---------- 主循环 ---------- */
@@ -2786,7 +3559,9 @@
       drawOverlay();
       frameCount++;
       /* R11: 小地图已完全交给独立模块 (自带 rAF + 节流), 主循环不再为它做任何事 ——
-         这里只剩「统计」的 1.5s 节拍 (宗门录已删, 「距此」不再需要随相机刷新)。 */
+         这里只剩「统计」的 1.5s 节拍。
+         ⚠ 2026-09-23: 原同节拍的 updateSectPanel() 已删 —— 本宗面板显示的是
+         玩家**自己的资产** (来自 PlayerSect 表), 不是「距此多少格」, 不随相机刷新。 */
       statsTimer += dt;
       if (statsTimer > 1.5) {
         statsTimer = 0;
@@ -2807,11 +3582,13 @@
       overlayCtx: $('overlay').getContext('2d'),
       glcanvas: $('glcanvas'),
       minimap: $('minimap'),
+      setEra: $('setEra'),              // 岁次显示 (原题名牌 #era, 2026-11-24 迁到设置弹窗)
       stats: $('stats'),
-      /* 山川志 (2026-11-24: 题名牌/宗门录已删, 它们的元素引用一并去掉) */
       info: $('info'),
+      /* 拖动把手 = 山川志标题栏; ✕ 单独命中不触发拖动 (见 bindInfoDrag) */
+      infoGrip: (function () { var el = $('info'); return el ? el.querySelector('h3') : null; })(),
       infoBody: $('infoBody'),
-      infoGrip: document.querySelector('#info h3')
+      sectBody: $('sectBody')
     };
     /* 山川志的位置: 上次拖过就回到原处; 从没拖过 ⇒ 预置在右下 (绝不再落回左下角,
        那里是小地图)。boot 就摆好, 免得第一次弹出时才从 (0,0) 跳过去。 */
@@ -2917,11 +3694,63 @@
            一次 applySettings 就同时完成: 变量更新 + 复选框回填 + 静态层置脏。 */
       applySettings();
       S.settings.on(applySettings);
+      /* 图层5 人物分布: 注入依赖 (全部是 main.js 内既有函数/状态), 内部自行订阅 people 开关。 */
+      PeopleLayer.init({
+        geo: function () { return geo; },
+        view: function () { return { dpr: dpr, zoom: cam.zoom,
+          vw: els.app.clientWidth, vh: els.app.clientHeight, x: cam.x, y: cam.y }; },
+        tileToWorld: MC.tileToWorld,
+        hexDist: hexDist,
+        hexPath: hexPath,
+        esc: esc,
+        forceRescan: function () { lastStream.x = NaN; forceStaticDirty(); }
+      });
       bindInput();
+      bindPlaceUI();          // 卜居: 顶栏按钮 / 起名 / 品阶 / Esc (2026-09-23 方案 §4.4)
+      /* 卜居的 headless 验收通道 (仅 DEBUG; 与 set=1 / sel= 同类 —— 鼠标悬停与点按钮
+         在无头环境里模拟都不可靠, 而这套 UI 的"事实"必须能读数):
+           ?place=1          开局即进卜居模式
+           ?placeat=q,r      直接指定落点并发一次校验 (预览/提示文案可截图)
+           ?placename=xxx    预填名号 (提交验收用)          */
+      if (DEBUG && urlParams.get('place') === '1') {
+        enterPlace(true);
+        var pnm = urlParams.get('placename');
+        if (pnm && $('placeName')) $('placeName').value = pnm;
+        var ptier = urlParams.get('placetier');
+        if (ptier && $('placeTier')) {
+          $('placeTier').value = String(+ptier || 1);
+          placeMode.tier = +ptier || 1;
+        }
+        if (urlParams.get('placeat') != null) {
+          var pa = urlParams.get('placeat').split(',');
+          placeAt = { q: +pa[0] || 0, r: +(pa[1] || 0) || 0 };
+          sendPlaceCheck();
+        }
+      }
       initMinimap();          // R11: 挂载独立小地图模块 (可热拔插, 见 minimap-vein.js)
+      initInfoCard();         // 注入「他人聚落详情卡」数据源 (infocard.js, 暂不渲染)
+      initRoster();           // 挂载「众生录」角色窗口 (roster.js, 数据源 = 服务端 /api/characters)
+      renderMySect();         // 本宗面板: 开局先落引导态 (未立宗)
+      /* 登录回填 —— 服务端 LoginResponse 带「我的聚落」(主宗 + 附属城镇), 它决定:
+           ① 左侧按钮显隐 (有宗 ⇒ 隐「卜居」显「拓土」) ② 本宗面板 + 附属清单 ③ 回宗按钮。
+         ⚠ fireLogin 传的是**整个 lr**, 这里拆包成 applyMyPlaces(places, townMax)。
+         ⚠ 首次登录与换世重登都会走这条钩子 (见 mapclient.fireLogin)。 */
+      MC.onLogin(function (lr) { if (lr) applyMyPlaces(lr.myPlaces, lr.townMax); });
+
+      /* ---- Tick 框架: 世界时钟 (帧 7) ----
+         纪律 (设计 §6): **绝不每 tick 一问** —— 那等于把服务端的懒调度白做了。
+         做法 = 每 CLOCK_SYNC_EVERY_TICKS 个本地 tick 校一次**绝对 tick**, 之间用
+         `ratePerSecond` 本地插值 (rAF 里按墙钟外推)。时钟只用**单调**墙钟外推,
+         绝不用 Date.now() 回落 (系统时间跳变会让世界瞬移)。
+         ⚠ 失败只停更, 不清零显示 —— 显示旧值 << 显示「0年」或空白。 */
+      clockSyncLoop();
+
       /* 调试: ?set=1 开局即展开设置弹窗 (headless 无法点齿轮 —— 与 plaqdbg/sel 同类)。
          仅 DEBUG 生效, 不进产品路径。 */
       if (DEBUG && urlParams.get('set') === '1') openSettings(true);
+      /* 调试: ?roster=1 开局即展开「众生录」窗口 (headless 无法点顶栏按钮 —— 与 set=1 同类)。
+         数据是异步 fetch ⇒ 这里只负责开窗, 内容到货后由 roster.js 自己渲染。 */
+      if (DEBUG && urlParams.get('roster') === '1' && window.SectRoster) window.SectRoster.open();
 
       /* R10: 调试句柄仅 DEBUG 模式 (debug=1 / capture=1) 暴露 */
       if (DEBUG) {
@@ -3097,14 +3926,29 @@
             veinRings: statVeinRingRows.slice(0, 80),
             bridges: statBridge, waterQuads: statWaterQuads,
             factionsOn: FAC_OK, settleVer: settleVer,
-            /* 点选态: headless 用 Input.dispatchMouseEvent 点一下, 再读 sel
-               即知朱砂标记落在哪一格 (宗门录已删, 不再有 sectPin)。无点击时为 null。 */
+            /* 点选态: headless 用 Input.dispatchMouseEvent 点一下即可读回
+               「朱砂标记落在哪一格」。无点击时为 null。
+               ⚠ 2026-09-23: 原 sectPin (宗门录选中哪一座) 已删 —— 择宗闭环下线。 */
             sel: selMark ? [selMark.q, selMark.r] : null,
-            infoOpen: !!els.info && !els.info.classList.contains('hidden'),
-            infoPos: els.info ? (function () {
-              var r = els.info.getBoundingClientRect();
-              return [Math.round(r.left), Math.round(r.top)];
-            })() : null,
+            /* 本宗面板态: null = 未立宗 (面板显示引导文案); 立宗后为 PlayerSect 行。 */
+            mySect: mySect ? { id: mySect.id, name: mySect.name, q: mySect.q, r: mySect.r } : null,
+            /* 卜居 (2026-09-23 方案 §4.4): headless 无法悬停/点按钮 ⇒ 靠这三个读数
+               验收「模式开着没 / 落点校验的结论 / 领地圈开关」。 */
+            placeMode: !!placeMode,
+            placeAt: placeAt ? [placeAt.q, placeAt.r] : null,
+            placeOk: placeRes ? !!placeRes.ok : null,
+            placeReason: placeRes ? placeRes.reason : '',
+            placeNear: placeRes ? (placeRes.near || []).length : 0,
+            placeBlocker: placeRes && placeRes.blocker
+              ? { id: placeRes.blocker.id, dist: placeRes.blocker.dist, need: placeRes.blocker.need }
+              : null,
+            domainOn: showDomain,
+            /* 他人详情卡模块 (web/js/infocard.js) 是否就位 + 数据源是否已接。
+               当前不渲染, 只证明"模块可用、等 UI 接线"。 */
+            infoCard: (window.InkInfoCard && window.InkInfoCard.probe) ? window.InkInfoCard.probe() : null,
+            /* 众生录 (web/js/roster.js): 窗口开没开 / 数据到货没 / 选中谁 ——
+               headless 无法点顶栏按钮, 这三条事实只能靠探针读。 */
+            roster: (window.SectRoster && window.SectRoster.probe) ? window.SectRoster.probe() : null,
             zoom: +cam.zoom.toFixed(3), camTile: [Math.round(cam.x), Math.round(cam.y)]
           };
         };

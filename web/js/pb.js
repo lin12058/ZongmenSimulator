@@ -338,8 +338,9 @@
    *   服务端契约: Server/Zongmen/Domain/MapMessages.cs (WsFrame 起始)。
    * ============================================================ */
 
-  var FRAME = { LOGIN: 1, TILE: 2, PING: 3, SCRIPT: 4 };
-  var MASK = { CHUNK: 1, REGION: 2, SETTLE: 4, POI: 8, COMM: 16, ALL: 31 };
+  var FRAME = { LOGIN: 1, TILE: 2, PING: 3, SCRIPT: 4, PLACE_CHECK: 5, PLACE_COMMIT: 6,
+                CLOCK_QUERY: 7, CLOCK_PUSH: 7 };   // 7 同号: 方向由上下文区分 (同其余)
+  var MASK = { CHUNK: 1, REGION: 2, SETTLE: 4, POI: 8, COMM: 16, PEOPLE: 32, ALL: 63 };
 
   /* ---------------- 微型编码器 (仅覆盖本协议所需) ---------------- */
   function Writer() { this.a = []; }              // 字节数组 (Array<number> → Uint8Array)
@@ -406,12 +407,207 @@
 
   function decodeLoginResponse(buf) {
     var r = new Reader(new Uint8Array(buf));
-    var m = { ok: false, err: '', account: '' };
+    var m = { ok: false, err: '', account: '', myPlaces: [], townMax: 0 };
     while (r.p < r.end) {
       var t = r.tag();
       if (t.field === 1) m.ok = (t.wire === 0) ? r.vi() === 1 : (r.skip(t.wire), false);
       else if (t.field === 2) m.err = rdStr(r, t);
       else if (t.field === 3) m.account = rdStr(r, t);
+      /* 4 = repeated SettlementDto (我的聚落: 主宗 + 附属城镇)。⚠ 与 PlaceCommitResponse.sect
+         同一个 wire 布局 (SettlementDto 1..16) ⇒ 复用 parsePlaceEntity, 不另写一份解析器
+         (两份解析器 = 迟早漂移)。空数组 = 尚未立宗。 */
+      else if (t.field === 4) {
+        var pl = r.vi(), pe = r.p + pl;
+        m.myPlaces.push(parsePlaceEntity(r.b.subarray(r.p, pe)));
+        r.p = pe;
+      }
+      else if (t.field === 5) m.townMax = rdInt32(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+
+  /* ---------------- 玩家宗门放置 (帧 5/6, 方案 §4.1/§4.2) ----------------
+     与 Login/Pong 同口径: 载荷恒**明文** protobuf (不 gzip) —— 客户端按帧类型
+     判别压缩, 帧 5/6 解出的是明文, 别再套一层 gunzip。
+     契约: Server/Zongmen/Domain/MapMessages.cs 的 PlaceCheck / PlaceCommit 系列。 */
+  /* encodePlaceCheck({seed,q,r,seq,excludeId,type}) */
+  function encodePlaceCheck(o) {
+    var w = new Writer();
+    if (o.seed) wstr(w, 1, o.seed);
+    wtag(w, 2, 0); wzz(w, o.q | 0);
+    wtag(w, 3, 0); wzz(w, o.r | 0);
+    wtag(w, 4, 0); wvi(w, o.seq || 0);
+    if (o.excludeId) wstr(w, 5, o.excludeId);
+    if (o.type) wstr(w, 6, o.type);        // 城市扩张: 'town'/'village'; 空 = 立宗
+    return w.done();
+  }
+  /* encodePlaceCommit({seed,q,r,name,tier,seq,idemKey,type}) */
+  function encodePlaceCommit(o) {
+    var w = new Writer();
+    if (o.seed) wstr(w, 1, o.seed);
+    wtag(w, 2, 0); wzz(w, o.q | 0);
+    wtag(w, 3, 0); wzz(w, o.r | 0);
+    if (o.name) wstr(w, 4, o.name);
+    wtag(w, 5, 0); wvi(w, Math.max(1, Math.min(3, o.tier | 0)) || 1);
+    wtag(w, 6, 0); wvi(w, o.seq || 0);
+    if (o.idemKey) wstr(w, 7, o.idemKey);
+    if (o.type) wstr(w, 8, o.type);        // 城市扩张: 同 encodePlaceCheck
+    return w.done();
+  }
+  function rdInt32(r, t, dflt) { return (t.wire === 0) ? r.vi() : (dflt == null ? 0 : dflt); }
+  function rdSInt32(r, t) { return (t.wire === 0) ? r.zz() : 0; }
+  function rdBool(r, t) { return (t.wire === 0) ? r.vi() === 1 : false; }
+  function rdF32(r, t) { return (t.wire === 5) ? r.f32() : 0; }
+
+  /* ---------------- 帧 7: 世界时钟 (Tick 框架 §10 接线点 #6) ----------------
+     契约: Server/Zongmen/Domain/MapMessages.cs → ClockQueryRequest / ClockQueryResponse
+     ⚠ 载荷**恒明文**, 不 gzip (包 < 64B, 压缩净亏; 且帧类型即压缩约定不可混用)。
+     ⚠ 客户端纪律 (设计 §6): 每 ~10 tick 校一次**绝对 tick**, 之间靠 RatePerSecond
+       本地插值 —— 别每 tick 一次往返, 那是把懒调度白做了。 */
+  function encodeClockQuery(o) {
+    var w = new Writer();
+    if (o && o.seq) { wtag(w, 1, 0); wvi(w, o.seq); }
+    return w.done();
+  }
+  function decodeClockQueryResponse(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = {
+      seq: 0, tick: 0, year: 0, month: 0, day: 0, season: 0,
+      seasonName: '', monthName: '', desc: '', ratePerSecond: 0, monoMs: 0, pending: 0, err: ''
+    };
+    while (r.p < r.end) {
+      var t = r.tag();
+      switch (t.field) {
+        case 1: m.seq = rdInt32(r, t); break;
+        case 2: m.tick = (t.wire === 0) ? r.zz() : 0; break;   // ⚠ Tick 是 ZigZag (sint64)
+        case 3: m.year = rdInt32(r, t); break;
+        case 4: m.month = rdInt32(r, t); break;
+        case 5: m.day = rdInt32(r, t); break;
+        case 6: m.season = rdInt32(r, t); break;
+        case 7: m.seasonName = rdStr(r, t); break;
+        case 8: m.monthName = rdStr(r, t); break;
+        case 9: m.desc = rdStr(r, t); break;
+        case 10: m.ratePerSecond = rdInt32(r, t); break;
+        case 11: m.monoMs = rdInt32(r, t); break;
+        case 12: m.pending = rdInt32(r, t); break;
+        case 13: m.err = rdStr(r, t); break;
+        default: r.skip(t.wire);
+      }
+    }
+    return m;
+  }
+  /* ⚠ 契约里 **只有 Q/R/RegionI/RegionJ/Ca/Cb 是 ZigZag** (sint32), 其余 int 都是
+     普通 varint。混用会静默读出「看着像数字但全错」的值 (tier 3 → -2, need 8 → 4,
+     ms 450 → -225) —— 这类错不会抛异常, 只会让前端画错颜色/前端判断全反。 */
+  function decodePlaceBlock(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { id: '', type: '', tier: 0, q: 0, r: 0, dist: 0, need: 0, name: '' };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.id = rdStr(r, t);
+      else if (t.field === 2) m.type = rdStr(r, t);
+      else if (t.field === 3) m.tier = rdInt32(r, t);
+      else if (t.field === 4) m.q = rdSInt32(r, t);
+      else if (t.field === 5) m.r = rdSInt32(r, t);
+      else if (t.field === 6) m.dist = rdInt32(r, t);
+      else if (t.field === 7) m.need = rdInt32(r, t);
+      else if (t.field === 8) m.name = rdStr(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  /* BlockRef: 1 ca (sint32) 2 cb (sint32) */
+  function decodeBlockRef(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { ca: 0, cb: 0 };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.ca = rdSInt32(r, t);
+      else if (t.field === 2) m.cb = rdSInt32(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  function decodePlaceCheckResponse(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { ok: false, reason: '', q: 0, r: 0, regionI: 0, regionJ: 0, deep: false,
+              onVein: false, veinD: 0, spirit: 0, spiritMin: 0, biome: 0, elev: 0,
+              blocker: null, near: [], seq: 0, quota: 0, quotaMax: 0, err: '',
+              /* 城市扩张 (字段 20~27) */
+              type: '', anchorQ: 0, anchorR: 0, hasAnchor: false,
+              maxR: 0, anchorDist: 0, towns: 0, townMax: 0 };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.ok = rdBool(r, t);
+      else if (t.field === 2) m.reason = rdStr(r, t);
+      else if (t.field === 3) m.q = rdSInt32(r, t);
+      else if (t.field === 4) m.r = rdSInt32(r, t);
+      else if (t.field === 5) m.regionI = rdSInt32(r, t);
+      else if (t.field === 6) m.regionJ = rdSInt32(r, t);
+      else if (t.field === 7) m.deep = rdBool(r, t);
+      else if (t.field === 8) m.onVein = rdBool(r, t);
+      else if (t.field === 9) m.veinD = rdInt32(r, t);
+      else if (t.field === 10) m.spirit = rdF32(r, t);
+      else if (t.field === 11) m.spiritMin = rdF32(r, t);
+      else if (t.field === 12) m.biome = rdInt32(r, t);
+      else if (t.field === 13) m.elev = rdF32(r, t);
+      else if (t.field === 14) {
+        var len = r.vi(), eN = r.p + len;
+        m.blocker = decodePlaceBlock(r.b.subarray(r.p, eN));
+        r.p = eN;
+      }
+      else if (t.field === 15) {
+        var len2 = r.vi(), eN2 = r.p + len2;
+        m.near.push(decodePlaceBlock(r.b.subarray(r.p, eN2)));
+        r.p = eN2;
+      }
+      else if (t.field === 16) m.seq = r.vi();
+      else if (t.field === 17) m.quota = rdInt32(r, t);
+      else if (t.field === 18) m.quotaMax = rdInt32(r, t);
+      else if (t.field === 19) m.err = rdStr(r, t);
+      else if (t.field === 20) m.type = rdStr(r, t);
+      /* ⚠ 21/22 是坐标 ⇒ ZigZag (契约里只有 Q/R/Region/Ca/Cb/AnchorQ/AnchorR 是 sxint32) */
+      else if (t.field === 21) m.anchorQ = rdSInt32(r, t);
+      else if (t.field === 22) m.anchorR = rdSInt32(r, t);
+      else if (t.field === 23) m.hasAnchor = rdBool(r, t);
+      else if (t.field === 24) m.maxR = rdInt32(r, t);
+      else if (t.field === 25) m.anchorDist = rdInt32(r, t);
+      else if (t.field === 26) m.towns = rdInt32(r, t);
+      else if (t.field === 27) m.townMax = rdInt32(r, t);
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  function decodePlaceCommitResponse(buf) {
+    var r = new Reader(new Uint8Array(buf));
+    var m = { ok: false, reason: '', sect: null, regionI: 0, regionJ: 0, roadVer: 0,
+              ms: 0, seq: 0, err: '', blocks: [], roads: 0, idemKey: '', places: 0, towns: 0 };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.ok = rdBool(r, t);
+      else if (t.field === 2) m.reason = rdStr(r, t);
+      else if (t.field === 3) {
+        var len = r.vi(), eN = r.p + len;
+        /* SettlementDto 与 PlaceEntity 的 wire 布局逐字段相同 (1..16) ⇒ 复用同一个解析器 */
+        m.sect = parsePlaceEntity(r.b.subarray(r.p, eN));
+        r.p = eN;
+      }
+      else if (t.field === 4) m.regionI = rdSInt32(r, t);
+      else if (t.field === 5) m.regionJ = rdSInt32(r, t);
+      else if (t.field === 6) m.roadVer = r.vi();
+      else if (t.field === 7) m.ms = rdInt32(r, t);
+      else if (t.field === 8) m.seq = r.vi();
+      else if (t.field === 9) m.err = rdStr(r, t);
+      else if (t.field === 10) {
+        var l2 = r.vi(), e2 = r.p + l2;
+        m.blocks.push(decodeBlockRef(r.b.subarray(r.p, e2)));
+        r.p = e2;
+      }
+      else if (t.field === 11) m.roads = rdInt32(r, t);
+      else if (t.field === 12) m.idemKey = rdStr(r, t);
+      else if (t.field === 13) m.places = rdInt32(r, t);
+      else if (t.field === 14) m.towns = rdInt32(r, t);
       else r.skip(t.wire);
     }
     return m;
@@ -423,7 +619,7 @@
   function decodeTileResponse(buf) {
     var r = new Reader(new Uint8Array(buf));
     var m = { i: 0, j: 0, mask: 0, deniedMask: 0, err: '', seq: 0, revs: [],
-              chunk: null, regions: [], settle: null, poi: null, comms: [] };
+              chunk: null, regions: [], settle: null, poi: null, comms: [], people: null };
     while (r.p < r.end) {
       var t = r.tag();
       switch (t.field) {
@@ -445,8 +641,38 @@
         case 12: m.settle = parseEntityData(r.bin(rdLen(r, t))); break;
         case 13: m.poi = parseEntityData(r.bin(rdLen(r, t))); break;
         case 14: m.comms.push(decodeCommMsg(r.bin(rdLen(r, t)))); break;
+        case 15: m.people = parsePeopleData(r.bin(rdLen(r, t))); break;   // 图层5: 地图人物分布
         default: r.skip(t.wire);
       }
+    }
+    return m;
+  }
+
+  /* ---------------- PeopleData (图层5) ----------------
+     Server/Zongmen/Domain/MapMessages.cs 的 PeopleData / PeopleTileDto。
+     ⚠ **稀疏** —— 只带 n>0 的格; 全量按格发会把块响应撑大且全是 0。 */
+  function parsePeopleData(u8) {
+    var r = new Reader(u8);
+    var m = { tiles: [] };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1 && t.wire === 2) m.tiles.push(parsePeopleTile(r.bin(rdLen(r, t))));
+      else r.skip(t.wire);
+    }
+    return m;
+  }
+  /* PeopleTileDto: 1q 2r sint32 | 3n int32 | 4ps int64 */
+  function parsePeopleTile(u8) {
+    var r = new Reader(u8);
+    var m = { q: 0, r: 0, n: 0, ps: 0 };
+    while (r.p < r.end) {
+      var t = r.tag();
+      if (t.field === 1) m.q = rdSInt(r, t);
+      else if (t.field === 2) m.r = rdSInt(r, t);
+      else if (t.field === 3) m.n = rdInt(r, t);
+      /* ps 是 int64, 但量级 = 单格人数 × 单人战力 ≈ 6e4 ≪ 2^53 ⇒ 用 vi 累加安全 */
+      else if (t.field === 4) m.ps = rdInt(r, t);
+      else r.skip(t.wire);
     }
     return m;
   }
@@ -526,9 +752,9 @@
      「单个元素」, 由调用方 push。切勿写成「容器套 field1 条目」:
      ResourceQuantDto 的 field1 恰是 string, 会被误判为条目而把 UTF-8
      字节当子消息解 → wire=7 之类 desync。 */
-  function parseBuilding(u8) {                 // BuildingDto: 1q 2r zz | 3kind | 4terrain | 5tier
+  function parseBuilding(u8) {                 // BuildingDto: 1q 2r zz | 3kind | 4terrain | 5tier | 6lv(演化等级)
     var br = new Reader(u8);
-    var o = { q: 0, r: 0, kind: '', terrain: '', tier: 0 };
+    var o = { q: 0, r: 0, kind: '', terrain: '', tier: 0, lv: 0 };
     while (br.p < br.end) {
       var tb = br.tag();
       if (tb.field === 1) o.q = rdSInt(br, tb);
@@ -536,6 +762,7 @@
       else if (tb.field === 3) o.kind = rdStr(br, tb);
       else if (tb.field === 4) o.terrain = rdStr(br, tb);
       else if (tb.field === 5) o.tier = rdInt(br, tb);
+      else if (tb.field === 6) o.lv = rdInt(br, tb);
       else br.skip(tb.wire);
     }
     return o;
@@ -595,8 +822,18 @@
     encodeTileRequest: encodeTileRequest,
     encodeLogin: encodeLogin,
     encodeScriptRequest: encodeScriptRequest,
+    encodePlaceCheck: encodePlaceCheck,
+    encodePlaceCommit: encodePlaceCommit,
     decodeScriptPack: decodeScriptPack,
     decodeLoginResponse: decodeLoginResponse,
-    decodeTileResponse: decodeTileResponse
+    decodeTileResponse: decodeTileResponse,
+    /* 玩家宗门放置 (帧 5/6; 载荷明文 protobuf, 不 gzip) */
+    decodePlaceCheckResponse: decodePlaceCheckResponse,
+    decodePlaceCommitResponse: decodePlaceCommitResponse,
+    decodePlaceBlock: decodePlaceBlock,
+    decodeBlockRef: decodeBlockRef,
+    /* Tick 框架: 世界时钟 (帧 7; 载荷明文 protobuf, 不 gzip) */
+    encodeClockQuery: encodeClockQuery,
+    decodeClockQueryResponse: decodeClockQueryResponse
   };
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));

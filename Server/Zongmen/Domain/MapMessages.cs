@@ -57,6 +57,10 @@ public sealed class BuildingDto
     [ProtoMember(3)] public string Kind { get; set; } = "";      // 码头/农田/矿山/民房…
     [ProtoMember(4)] public string Terrain { get; set; } = "";   // 地皮: 灵枢/水岸/良田/矿脉/林地/灼壤/村落/core
     [ProtoMember(5)] public int Tier { get; set; }
+    /* ★ v4 建筑等级 (2026-10-10 · b 方案): 由 (人口 / 资源紧缺度) 派生的 **演化等级** (1..3)。
+       ⚠ 与 Tier 语义不同, 不可混用: Tier = 骨架建筑自身的档 (seed 派生, 旧口径);
+         Lv = 演化等级 (前端据此画「楼/规模」)。仅 settle 包带 (区域包不带 ⇒ 默认 1)。 */
+    [ProtoMember(6)] public int Lv { get; set; }
 }
 
 [ProtoContract]
@@ -213,6 +217,61 @@ public static class WsFrame
        mapgen 三件套 (noise/mapgen-config/mapgen)。走 WS 而非新增静态挂载,
        保证「单真源」: 浏览器拿到的永远是服务端当前 bundle, 不会与前端副本漂移。 */
     public const byte Script = 4;
+    /* ---- 玩家宗门放置 (2026-09-23 方案 §4.1) ----
+       与 Login/Tile 同例: **请求与响应共用同一个类型号** (方向由上下文区分)。
+       PlaceCheck  = 悬停即问 (高频, 只读, 不落库)
+       PlaceCommit = 确认落子 (低频, 写: 落库 + 重算道路 + 版本号前进)
+       ⚠ 7 号 (CityQuery) 是 P2「城市迭代」的预留位, 本轮**不实现** —— 别占。 */
+    public const byte PlaceCheck = 5;
+    public const byte PlaceCommit = 6;
+
+    /* ---- Tick 框架 (2026-09-26 方案 §10 接线点 #6) ----
+       帧 7 = 世界时钟。请求 = ClockQueryRequest (空载荷即可, 载荷仅带 Seq),
+       响应 = ClockQueryResponse (服务端当前 tick + 年月日季节 + 描述)。
+
+       ⚠ **恒明文, 不 gzip**: 时钟包 < 64 字节, gzip 头尾开销净亏; 更重要的是
+         「按帧类型判压缩」这条既有纪律 —— 混用会让客户端解错。与 Login/Pong/Place 同口径。
+
+       客户端用法 (设计 §6): 每 ~10 tick 校一次绝对 tick, 之间靠 `RatePerSecond`
+       本地插值 (1 tick/秒), 避免每 tick 一次往返。 */
+    public const byte ClockQuery = 7;
+    public const byte ClockPush = 7;   // 同号: 方向由上下文区分 (同 Login/Tile/Place)
+}
+
+/// <summary>Tick 框架: 时钟查询 (帧 7, C→S)。空载荷亦可, Seq 仅用于回显配对。</summary>
+[ProtoContract]
+public sealed class ClockQueryRequest
+{
+    [ProtoMember(1)] public uint Seq { get; set; }
+}
+
+/// <summary>
+/// Tick 框架: 时钟响应 (帧 7, S→C)。
+/// ⚠ 字段与 <c>Zongmen.Time.ClockSnapshot</c> 一一对应, 但**故意不复用那个类型** ——
+///   协议 DTO 与运行时快照解耦, 免得给快照加个内部字段就悄悄改了线格式。
+/// </summary>
+[ProtoContract]
+public sealed class ClockQueryResponse
+{
+    [ProtoMember(1)] public uint Seq { get; set; }
+    /// <summary>服务端权威 tick (1 tick = 1 游戏日)。</summary>
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public long Tick { get; set; }
+    [ProtoMember(3)] public int Year { get; set; }
+    [ProtoMember(4)] public int Month { get; set; }
+    [ProtoMember(5)] public int Day { get; set; }
+    /// <summary>0=春 1=夏 2=秋 3=冬。</summary>
+    [ProtoMember(6)] public int Season { get; set; }
+    [ProtoMember(7)] public string SeasonName { get; set; } = "";
+    [ProtoMember(8)] public string MonthName { get; set; } = "";
+    /// <summary>人读描述, 如「第1年 春 二月 一日」。</summary>
+    [ProtoMember(9)] public string Desc { get; set; } = "";
+    /// <summary>每秒推进多少 tick (demo 恒 1); 客户端本地插值用。</summary>
+    [ProtoMember(10)] public int RatePerSecond { get; set; }
+    /// <summary>服务端单调毫秒 (客户端可据此校准时钟偏移; 0 = 未提供)。</summary>
+    [ProtoMember(11)] public long MonoMs { get; set; }
+    /// <summary>队列中待执行 job 数 (诊断/可选展示)。</summary>
+    [ProtoMember(12)] public long Pending { get; set; }
+    [ProtoMember(13)] public string Err { get; set; } = "";
 }
 
 [ProtoContract]
@@ -241,7 +300,11 @@ public enum TileMask : uint
     Settle = 1 << 2,    // 0x04 聚落实体
     Poi = 1 << 3,       // 0x08 景点实体
     Comm = 1 << 4,      // 0x10 灵脉群落
-    All = Chunk | Region | Settle | Poi | Comm   // 0x1F
+    /* 0x20 地图人物分布 (2026-10-11 方案 v2): 每格人数 + 该格战力总和。
+       ⚠ 纯派生、**不落库**; 只在开启「人力热力图」时才请求 (前端按需带该位)。
+       ⚠ 加这一位 ⇒ All 由 0x1F 变 0x3F, 判据里几处硬编码 31/30 必须同批改 (否则假红)。 */
+    People = 1 << 5,
+    All = Chunk | Region | Settle | Poi | Comm | People   // 0x3F
 }
 
 [ProtoContract]
@@ -257,6 +320,17 @@ public sealed class LoginResponse
     [ProtoMember(1)] public bool Ok { get; set; }
     [ProtoMember(2)] public string Err { get; set; } = "";
     [ProtoMember(3)] public string Account { get; set; } = "";
+    /// <summary>本账号在**当前世**的全部聚落 (主宗 + 附属城镇); 空 = 尚未立宗。
+    /// 为什么挂在登录响应而不是新开一帧: 前端需要这份数据的唯一时机就是「刚连上、
+    /// 还没画任何东西」—— 它决定「卜居 / 拓土」显示哪一个、本宗面板画什么。
+    /// 新开一帧要多一轮往返 (还得与 Tile 请求抢序), 而登录帧本来就是这一刻发的。
+    /// ⚠ 必须带 seed 语义: 这里回的是 `_ledger.Current().Round` 的资产; 前端拿它
+    ///   与自己的 worldSeed 对齐 (退场世的数据绝不显示)。</summary>
+    [ProtoMember(4)] public List<SettlementDto> MyPlaces { get; set; } = [];
+    /// <summary>附属城镇数上限 (0 = 不限, 见 ZongmenOptions.PlayerTownMaxPerSect)。
+    /// ⚠ 扩张**半径**刻意不在这里 —— 它的真源是引擎 CFG.EXPAND_R, 只经 meta.expandR 下发
+    ///   (前端 boot 时就拿到了 geo)。同一个常数两处下发 = 迟早漂移。</summary>
+    [ProtoMember(5)] public int TownMax { get; set; }
 }
 
 [ProtoContract]
@@ -268,7 +342,8 @@ public sealed class TileRequest
     [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int J { get; set; }
     [ProtoMember(5)] public uint Mask { get; set; }            // 0 或 ALL = 全量
     [ProtoMember(6)] public uint Seq { get; set; }             // 客户端关联序号, 响应回显
-    /// <summary>客户端已持有的各图层 rev (按 TileMask 位序: 0=Chunk..4=Comm; 0=未持有)。</summary>
+    /// <summary>客户端已持有的各图层 rev (按 TileMask 位序: 0=Chunk, 1=Region, 2=Settle,
+    /// 3=Poi, 4=Comm, 5=People; 0=未持有)。⚠ 与 <c>TileResponse.Revs</c> 同序、同长(6)。</summary>
     [ProtoMember(7)] public List<int> LastRevs { get; set; } = [];
 }
 
@@ -328,6 +403,24 @@ public sealed class RegionData
     [ProtoMember(4)] public List<RoadDto> Roads { get; set; } = [];
 }
 
+/// <summary>地图人物分布 (图层5 People, 2026-10-11 方案 v2): 一格的人数与战力总和。
+/// ⚠ **稀疏** —— 只带 n&gt;0 的格 (绝大多数格没人); 全量按格发会把块响应撑大且全是 0。
+/// ⚠ 纯派生 (seed+聚落人口), **绝不落库**; 由 MapWorldService 请求时现算 + 进程内 LRU。</summary>
+[ProtoContract]
+public sealed class PeopleTileDto
+{
+    [ProtoMember(1, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(3)] public int N { get; set; }        // 该格人数 (≤64)
+    [ProtoMember(4)] public long Ps { get; set; }      // 该格战力总和 (热力图上色依据)
+}
+
+[ProtoContract]
+public sealed class PeopleData
+{
+    [ProtoMember(1)] public List<PeopleTileDto> Tiles { get; set; } = [];
+}
+
 [ProtoContract]
 public sealed class TileResponse
 {
@@ -337,7 +430,7 @@ public sealed class TileResponse
     [ProtoMember(4)] public uint DeniedMask { get; set; }      // 未登录被拒的图层位
     [ProtoMember(5)] public string Err { get; set; } = "";
     [ProtoMember(6)] public uint Seq { get; set; }             // 回显请求序号
-    /// <summary>各图层当前 rev (按 TileMask 位序 0..4), 供客户端下次带 LastRevs。</summary>
+    /// <summary>各图层当前 rev (按 TileMask 位序 0..5), 供客户端下次带 LastRevs。</summary>
     [ProtoMember(7)] public List<int> Revs { get; set; } = [];
 
     /* ---- 图层子消息 (字段缺省 = 未请求 / rev 未变, 设计 §4) ---- */
@@ -346,6 +439,7 @@ public sealed class TileResponse
     [ProtoMember(12)] public SettleData? Settle { get; set; }     // 图层2
     [ProtoMember(13)] public PoiData? Poi { get; set; }           // 图层3
     [ProtoMember(14)] public List<byte[]> Comms { get; set; } = [];        // 图层4: CommunityPack 原始 protobuf
+    [ProtoMember(15)] public PeopleData? People { get; set; }     // 图层5: 地图人物分布 (纯派生, 不落库)
 }
 
 /// <summary>世界键规约: 所有持久化内容按 种子 隔离。</summary>
@@ -366,4 +460,165 @@ public static class WorldKeys
     /// <summary>城镇足迹包 (Phase3): 建筑/产出/风格, 独立持久化 (会随事件演化)。</summary>
     public static string Settle(string seed, int i, int j)
         => $"w:{SeedPrefix(seed)}:settle:{i}:{j}";
+}
+
+/* ============================================================
+ * 玩家宗门放置协议 (2026-09-23 方案 §4.2)
+ * ------------------------------------------------------------
+ * 两条路径的分工:
+ *   PlaceCheck  = 只读, 悬停即问 (前端 ≥150ms 节流)。判据 5~7 (深海/灵脉/领地)
+ *                 在引擎里算, 判据 1~3/9 (seed/登录/配额/名字) 在服务端叠上去。
+ *   PlaceCommit = 写。服务端**重新**跑一遍全部判据 (前端的 check 只是提示,
+ *                 绝不可信), 再落库 + 引擎侧重算道路 + 版本号前进, 最后返回
+ *                 「客户端必须重拉的块」清单。
+ * ⚠ 客户端对**已加载**的块不会自动重拉 (main.js updateStreaming 的入队条件是
+ *   `!chunkData.has(key)`) ⇒ PlaceCommitResponse.Blocks 是让新宗门/新路立刻可见的
+ *   唯一手段, 服务端只 BumpBlockRev 是不够的。
+ * ============================================================ */
+
+/// <summary>落点校验请求 (帧 5, C→S, 明文 protobuf)。</summary>
+[ProtoContract]
+public sealed class PlaceCheckRequest
+{
+    [ProtoMember(1)] public string Seed { get; set; } = "";
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(3, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(4)] public uint Seq { get; set; }
+    /// <summary>「原地重建/升级」时豁免自己的聚落 id (P0 恒空)。</summary>
+    [ProtoMember(5)] public string ExcludeId { get; set; } = "";
+    /// <summary>要建的聚落类型 (城市扩张 · 2026-09-23):
+    /// 空/"sect" = 立宗; "town"/"village" = 拓土 (附属城镇, 白名单见引擎 CFG.EXPAND_TYPES)。
+    /// ⚠ 扩张的**锚点与半径不由前端给** —— 服务端从 PlayerSect 台账取主宗 + 引擎
+    ///   CFG.EXPAND_R 推出来再送进引擎。前端传了也无效 (同 DOMAIN_R 的规矩)。</summary>
+    [ProtoMember(6)] public string Type { get; set; } = "";
+}
+
+/// <summary>领地被侵占的元凶 (前端标红用)。</summary>
+[ProtoContract]
+public sealed class PlaceBlockDto
+{
+    [ProtoMember(1)] public string Id { get; set; } = "";
+    [ProtoMember(2)] public string Type { get; set; } = "";
+    [ProtoMember(3)] public int Tier { get; set; }
+    [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(5, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    /// <summary>新落点到它的中心距 (格)。</summary>
+    [ProtoMember(6)] public int Dist { get; set; }
+    /// <summary>它的领地半径 (格, DOMAIN_R)。判定 = Dist &lt; Need ⇒ 拒绝。</summary>
+    [ProtoMember(7)] public int Need { get; set; }
+}
+
+/// <summary>附近一座聚落的领地圈 (前端画环用; 与 blocker 同形状但语义不同)。</summary>
+[ProtoContract]
+public sealed class PlaceDomainDto
+{
+    [ProtoMember(1)] public string Id { get; set; } = "";
+    [ProtoMember(2)] public string Type { get; set; } = "";
+    [ProtoMember(3)] public int Tier { get; set; }
+    [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(5, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(6)] public int Dist { get; set; }
+    [ProtoMember(7)] public int Need { get; set; }
+    [ProtoMember(8)] public string Name { get; set; } = "";
+}
+
+/// <summary>落点校验响应 (帧 5, S→C, 明文 protobuf)。</summary>
+[ProtoContract]
+public sealed class PlaceCheckResponse
+{
+    [ProtoMember(1)] public bool Ok { get; set; }
+    /// <summary>拒绝原因码: deep_water / on_vein / too_close / spirit_too_low /
+    /// world_stale / need_login / quota_exceeded / bad_coord / bad_name /
+    /// too_frequent / too_far (超出本宗辖域) / bad_type (类型不在白名单) /
+    /// no_sect (拓土但尚未立宗) / "" (可建)。</summary>
+    [ProtoMember(2)] public string Reason { get; set; } = "";
+    [ProtoMember(3, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(5, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int RegionI { get; set; }
+    [ProtoMember(6, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int RegionJ { get; set; }
+    [ProtoMember(7)] public bool Deep { get; set; }
+    [ProtoMember(8)] public bool OnVein { get; set; }
+    [ProtoMember(9)] public int VeinD { get; set; }
+    [ProtoMember(10)] public float Spirit { get; set; }
+    [ProtoMember(11)] public float SpiritMin { get; set; }
+    [ProtoMember(12)] public int Biome { get; set; }
+    [ProtoMember(13)] public float Elev { get; set; }
+    [ProtoMember(14)] public PlaceBlockDto? Blocker { get; set; }
+    [ProtoMember(15)] public List<PlaceDomainDto> Near { get; set; } = [];
+    [ProtoMember(16)] public uint Seq { get; set; }
+    /// <summary>本账号本世已立宗门数 / 上限 (前端在按钮上做提示)。
+    /// ⚠ 扩张档语义**换成附属城镇数**: Quota = 已建附属数, QuotaMax = 上限 (0 = 不限)。</summary>
+    [ProtoMember(17)] public int Quota { get; set; }
+    [ProtoMember(18)] public int QuotaMax { get; set; }
+    [ProtoMember(19)] public string Err { get; set; } = "";
+    /* ---- 城市扩张 (2026-09-23 用户: 选完宗门后可建附属城镇, 距本宗不超过一个区块) ---- */
+    /// <summary>本次校验用的类型 (回显请求): "sect" = 立宗 / "town"|"village" = 拓土。</summary>
+    [ProtoMember(20)] public string Type { get; set; } = "";
+    /// <summary>本宗中心 (扩张的锚点)。HasAnchor=false 时这两个数无意义 (尚未立宗/立宗档)。</summary>
+    [ProtoMember(21, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int AnchorQ { get; set; }
+    [ProtoMember(22, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int AnchorR { get; set; }
+    /// <summary>锚点是否有效 —— 前端据此决定画不画「本宗辖域环」。</summary>
+    [ProtoMember(23)] public bool HasAnchor { get; set; }
+    /// <summary>扩张半径上限 (格); 0 = 立宗档不上限。</summary>
+    [ProtoMember(24)] public int MaxR { get; set; }
+    /// <summary>落点到本宗的实测六边距; 立宗档恒 0 (由 type/HasAnchor 区分「不适用」)。
+    /// ⚠ 刻意**不用 -1 当哨兵**: 负 int32 在 protobuf 里是 10 字节 varint, 前端
+    ///   JS 的 varint 累加会溢出 2^53 ⇒ 读出一个巨大的正数 (哨兵失效)。</summary>
+    [ProtoMember(25)] public int AnchorDist { get; set; }
+    /// <summary>已建附属城镇数 (前端显示"附属 N"与上限提示)。</summary>
+    [ProtoMember(26)] public int Towns { get; set; }
+    /// <summary>附属城镇数上限 (0 = 不限)。</summary>
+    [ProtoMember(27)] public int TownMax { get; set; }
+}
+
+/// <summary>落子提交请求 (帧 6, C→S, 明文 protobuf)。</summary>
+[ProtoContract]
+public sealed class PlaceCommitRequest
+{
+    [ProtoMember(1)] public string Seed { get; set; } = "";
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Q { get; set; }
+    [ProtoMember(3, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int R { get; set; }
+    [ProtoMember(4)] public string Name { get; set; } = "";
+    /// <summary>宗门档位 1~3 (下品/中品/上品); 决定领地半径档 (DOMAIN_R.sect1/2/3)。</summary>
+    [ProtoMember(5)] public int Tier { get; set; } = 1;
+    [ProtoMember(6)] public uint Seq { get; set; }
+    /// <summary>幂等键 (前端每次「点确认」生成一个; 同键重发直接回放上次响应,
+    /// 不再落库、不再重算道路 —— 这是「同步重算 ~450ms 时用户狂点」的兜底)。</summary>
+    [ProtoMember(7)] public string IdemKey { get; set; } = "";
+    /// <summary>要建的聚落类型 (空/"sect" = 立宗; "town"/"village" = 拓土)。见 PlaceCheckRequest.Type。</summary>
+    [ProtoMember(8)] public string Type { get; set; } = "";
+}
+
+[ProtoContract]
+public sealed class BlockRef
+{
+    [ProtoMember(1, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Ca { get; set; }
+    [ProtoMember(2, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int Cb { get; set; }
+}
+
+/// <summary>落子提交响应 (帧 6, S→C, 明文 protobuf)。</summary>
+[ProtoContract]
+public sealed class PlaceCommitResponse
+{
+    [ProtoMember(1)] public bool Ok { get; set; }
+    [ProtoMember(2)] public string Reason { get; set; } = "";
+    /// <summary>落成的宗门实体 (与 Settle 图层同形状 ⇒ 前端可先用它乐观上屏)。</summary>
+    [ProtoMember(3)] public SettlementDto? Sect { get; set; }
+    [ProtoMember(4, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int RegionI { get; set; }
+    [ProtoMember(5, DataFormat = ProtoBuf.DataFormat.ZigZag)] public int RegionJ { get; set; }
+    /// <summary>重算后的道路版本号 (单调递增; 前端可用它做诊断/握手)。</summary>
+    [ProtoMember(6)] public long RoadVer { get; set; }
+    /// <summary>服务端本次同步重算耗费的毫秒 (实测 400~450ms 属预期)。</summary>
+    [ProtoMember(7)] public int Ms { get; set; }
+    [ProtoMember(8)] public uint Seq { get; set; }
+    [ProtoMember(9)] public string Err { get; set; } = "";
+    /// <summary>⚠ **必须重拉**的块清单 (>0 个)。理由见本区头注释。</summary>
+    [ProtoMember(10)] public List<BlockRef> Blocks { get; set; } = [];
+    /// <summary>挂在玩家宗门上的道路条数 (诊断)。</summary>
+    [ProtoMember(11)] public int Roads { get; set; }
+    [ProtoMember(12)] public string IdemKey { get; set; } = "";
+    /// <summary>落成后该账号在本世的聚落总数 (主宗 + 附属) —— 前端据此刷新「附属 N」提示。</summary>
+    [ProtoMember(13)] public int Places { get; set; }
+    /// <summary>落成后该账号的附属城镇数。</summary>
+    [ProtoMember(14)] public int Towns { get; set; }
 }

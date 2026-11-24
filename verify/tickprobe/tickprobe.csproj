@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       判据宿主 (Tick 框架专用)。
+       ⚠ 为什么不直接在 verify/*.mjs 里重写一遍 C# 逻辑:
+         那样测的是「两份实现是否一致」, 而不是「C# 实现是否正确」——
+         正是工程既有教训「参照系不能是被测规则自己」要避免的。
+       本宿主直接**引用服务端工程**, 由 Node 侧驱动 (stdin JSON → stdout JSON),
+       于是 check_*.mjs 断言的是真实生产代码。
+       ============================================================ -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>tickprobe</AssemblyName>
+    <RootNamespace>Zongmen.Verify</RootNamespace>
+    <!-- 引用了 Web SDK 工程, 这里只是控制台宿主 -->
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Server\Zongmen\Zongmen.csproj" />
+  </ItemGroup>
+
+</Project>
