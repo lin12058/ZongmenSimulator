@@ -158,3 +158,12 @@
 - ⚠ 后台实例/服务**活不过一个回合** ⇒ 起实例+跑实机判据必须同回合（长命令 `run_in_background=true`）。⚠ `git stash` A/B：`web/js/store.js` 有 **CRLF 伪修改**挡 `stash pop` ⇒ 先 `git checkout -- <该文件>`。基线默认**离线 30 + 在线 6**；`--only=`/`--skip=` 是**子串匹配**；**rc=2=跳过**；⚠ **别 kill 用户 8140**。
 - ⚠ 判据四防：①绝对值阈值必假红 ⇒ 改 **A/B 归因** ②参照系不能是被测规则自己的目标函数 ③复算须与实现**同容差语义** ④源码守卫判「赋值点所在**整个函数体**」且**必须先剥注释**。⚠ 几何对齐优先**数值探针**+离线复算；分桶用**卡方**；**判据自己的断言也会错**（已 2 次）。
 
+## 小队面板 UI 细则（2026-11-25 从 `MEMORY.md` 迁入，口径未改）
+- ⚠ **品阶色只能作用在文字节点**：裸 `.q1{color}` 会命中图标方块 ⇒ 字色=底色。只写 `.ws-n/.bc-n/.ii-n/.qk-n.qN`；图标一律 `.ws-g/.rp-g/.qk-g.qN { background; color: 浅色 }`。
+- ⚠ CSS 注入：面板 init 在 DOMContentLoaded，那时 `document.currentScript` 已是 null ⇒ IIFE **解析时**存 `SELF`，否则 css 404 且控制台不报错。⚠ 别在 init 后同步量 `getComputedStyle`（CSS 异步注入）⇒ 样式断言放 200ms 轮询块。
+- 能力页内嵌背包 = **两步**：点格只选中 + 出详情卡（`#pcInfo` 夹在分类与网格之间），再点「装备/替换/服用/研习」才动手。药物 `M.useItem`；换装对比 `M.compareGear()`；`pawn.vit={hp,mp}` + `M.vitalOf()`；属性不存（天赋+装备+特质现算）。
+- 入口 = **每队一条独立纸签 `.ce-item` 上下堆叠**（条尾本队人数，当前队放大成 tab）；点哪条 ⇒ 开面板 + `scrollIntoView` + `.flash`。
+- ⚠ `eatClick` 只吃**拖动松手后的那一次** click，不能写成时间窗（否则切队/解散被吞）。
+- ⚠ 法宝换装只动 `queue[0]`，不可 unshift 后塞背包（同对象双存）；卸法宝时队列还有件 ⇒ 槽位换下一件（不是空槽）。
+- 验收台：`verify/_crew_harness.html?test=1`（148 条）；先 `node verify/_crew_static.mjs 8199`；headless 必带独立 `--user-data-dir`（否则 exit=21 输出空）。正常演示参数 `?crew=1` / `?crewtab=` / `?crewcount=3..9` / `?qksel=eq|pill` / `?squads=N`。
+
