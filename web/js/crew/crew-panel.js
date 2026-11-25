@@ -1529,7 +1529,10 @@
     for (i = 0; i < state.pawns.length; i++) prio[state.pawns[i].id] = state.pawns[i].prio;
     var src = state.squads || [];
     for (i = 0; i < src.length; i++) {
-      squads.push({ id: src[i].id, name: src[i].name, members: src[i].members.slice() });
+      /* ⚠ settle (驻地) 一并存: 本机存档只服务「界面偏好」, 但它是整份数组的副本,
+         少了这个字段就会在下次 load() 时把驻地洗掉 (与服务端契约同一条纪律)。 */
+      squads.push({ id: src[i].id, name: src[i].name, members: src[i].members.slice(),
+                    settle: typeof src[i].settle === 'string' ? src[i].settle : '' });
     }
     S.write(LS_NS, {
       sel: selId, tab: tab, prio: prio, filter: filter,
@@ -1560,7 +1563,8 @@
       for (var si = 0; si < saved.squads.length; si++) {
         var ss = saved.squads[si];
         if (!ss || !Array.isArray(ss.members)) continue;
-        list.push({ id: String(ss.id || ('sq' + (si + 1))), name: ss.name, members: ss.members.slice() });
+        list.push({ id: String(ss.id || ('sq' + (si + 1))), name: ss.name, members: ss.members.slice(),
+                    settle: typeof ss.settle === 'string' ? ss.settle : '' });
       }
       if (list.length) state.squads = list;
     }
@@ -1667,7 +1671,8 @@
       pawns: state ? state.pawns.length : 0,
       /* 多小队: 结构 / 当前队 / 界面上真的画出来的东西 */
       squads: state && state.squads ? state.squads.map(function (s) {
-        return { id: s.id, name: s.name, n: s.members.length, members: s.members.slice() };
+        return { id: s.id, name: s.name, n: s.members.length, members: s.members.slice(),
+                 settle: s.settle || '' };
       }) : [],
       curSquad: state ? state.curSquad : null,
       curSquadName: sq ? sq.name : null,

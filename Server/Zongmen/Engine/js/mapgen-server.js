@@ -539,7 +539,22 @@
     peopleBlockJson: function (ca, cb) {
       return JSON.stringify({ ca: ca | 0, cb: cb | 0, tiles: peopleBlockTiles(ca | 0, cb | 0) });
     },
-    peopleAtJson: peopleAtJson
+    peopleAtJson: peopleAtJson,
+    /* ---- 招募候选池 (Engine/js/chargen.js · global.Chargen) ----
+       为什么在本模块转一道而不让 C# 直接 `script.Chargen.genPoolJson(...)`:
+         · 世界层 VM 的出口统一是 `root.<fn>` (Invoke switch 全是 root.*);
+         · Chargen 是**另一个命名空间的完整 API** (genRoot/genTalents/selfTest…), 直接暴露给
+           C# 会让 `verify/check_js_exports.mjs` 要求「每个函数型导出都有 case」—— 那 13 个
+           纯计算出口全得进白名单, 而且下一个人会以为它们都该被跨 VM 调用。
+         这里只转发**一个** JSON 出口, C# 侧就一条 case。
+       ⚠ 延迟到调用时取 global.Chargen: bundle 序里 chargen.js 排在**本文件之后**。 */
+    chargenPoolJson: function (optsJson) {
+      var CG = global.Chargen;
+      if (!CG || typeof CG.genPoolJson !== 'function') {
+        throw new Error('chargen.js 未加载 (bundle 应含 Engine/js/chargen.js, 排在 mapgen-server.js 之后)');
+      }
+      return CG.genPoolJson(optsJson);
+    }
   };
 
   /* ============================================================

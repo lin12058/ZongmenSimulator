@@ -195,12 +195,21 @@
       /* 神通 */
       var arts = p.arts && p.arts.slots;
       if (!Array.isArray(arts)) warnings.push(tag + ': 缺 arts.slots, 按空处理');
-      else if (M && (arts.length < M.CFG.ART_MIN || arts.length > M.CFG.ART_MAX)) {
-        warnings.push(tag + ': 神通 ' + arts.length + ' 格 (应为 ' + M.CFG.ART_MIN + '~' + M.CFG.ART_MAX + ')');
+      else if (M) {
+        /* ⚠ 已学格数可以是 0 (凡人·未习) —— 旧断言拿 ART_MIN 卡它, 会把整批新人生成告警。
+           真正要卡的是「格数上限 cap ∈ 3~4」与「已学 ≤ cap」。 */
+        var capV = Math.round(num(p.arts && p.arts.cap, arts.length));
+        if (capV < M.CFG.ART_MIN || capV > M.CFG.ART_MAX) {
+          warnings.push(tag + ': 神通格数 ' + capV + ' (应为 ' + M.CFG.ART_MIN + '~' + M.CFG.ART_MAX + ')');
+        } else if (arts.length > capV) {
+          warnings.push(tag + ': 已学神通 ' + arts.length + ' > 格数 ' + capV);
+        }
       }
 
       /* 修为 / 气血 */
-      var expMax = 600 + Math.round(sum * 6);
+      /* 上限优先用契约 expMax (源数据); 缺省按旧公式 600 + 天赋×6 */
+      var declaredMax = Math.round(num(p.expMax, 0));
+      var expMax = declaredMax > 0 ? declaredMax : 600 + Math.round(sum * 6);
       var exp = num(p.exp, -1);
       if (exp < 0) warnings.push(tag + ': 缺 exp, 按 0 处理');
       else if (exp === 0) warnings.push(tag + ': exp = 0 (探测会判越界, 面板按 0% 显示)');
@@ -379,13 +388,15 @@
         gender: str(src2.gender, '男'),
         realm: str(src2.realm, '炼气期 · 1 层'),
         exp: Math.max(0, Math.round(num(src2.exp, 1))),
+        /* 修为上限: 契约给了就照用 (招募生成器 = 炼气段 600), 缺省 0 ⇒ expOf 走旧公式 */
+        expMax: Math.max(0, Math.round(num(src2.expMax, 0))),
         root: { order: M.ELEMENTS.map(function (e) { return e.k; }), v: rv, main: Math.round(num(src2.root.main, 0)) || 0 },
         talents: { v: tv2, total: total },
         traits: traits,
         gear: gear,
         queue: queue,
         queueFrom: str(src2.queueFrom, queue.length > 1 ? '分神 ' + (queue.length - 1) : '本命一件'),
-        arts: { slots: artSlots, cap: Math.round(num(src2.arts && src2.arts.cap, artSlots.length)), from: str(src2.arts && src2.arts.from, '本命三格') },
+        arts: { slots: artSlots, cap: Math.max(M.CFG.ART_MIN, Math.round(num(src2.arts && src2.arts.cap, artSlots.length))), from: str(src2.arts && src2.arts.from, '本命三格') },
         mood: Math.max(0, Math.min(100, Math.round(num(src2.mood, 70)))),
         job: job,
         prio: prio
@@ -439,7 +450,10 @@
           if (havePawn[pid0] && ms0.indexOf(pid0) < 0) ms0.push(pid0);
         }
         if (ms0.length !== list0.length) out.warnings.push('squads[' + si + '] 有成员不在名单里, 已剔除');
-        sqOut.push({ id: sid, name: str(s0.name, '') || M.SQUAD_DEFAULT_NAMES[si] || '小队', members: ms0 });
+        /* `settle` = 队伍驻地聚落 id (招募闸用)。⚠ 必须透传: 这是服务端唯一依据,
+           丢一次会被当成「未绑定」并在下次招募时补绑到当时所在的聚落 (静默漂移, 不报错)。 */
+        sqOut.push({ id: sid, name: str(s0.name, '') || M.SQUAD_DEFAULT_NAMES[si] || '小队', members: ms0,
+                     settle: str(s0.settle, '') });
       }
     }
     if (!sqOut.length) {
@@ -561,6 +575,8 @@
         age: pm.age,
         realm: pm.realm,
         exp: pm.exp,
+        /* 0 = 契约没给上限 (旧 demo 存档), 前端按 600+天赋×6 推 */
+        expMax: Math.max(0, Math.round(num(pm.expMax, 0))),
         mood: pm.mood,
         root: { order: pm.root.order.slice(), v: pm.root.v.slice(), main: pm.root.main },
         talents: { v: cloneTalents(pm.talents.v), total: pm.talents.total },
@@ -596,7 +612,10 @@
       squadsOut.push({
         id: sqList[sq2].id,
         name: sqList[sq2].name,
-        members: (sqList[sq2].members || []).slice()
+        members: (sqList[sq2].members || []).slice(),
+        /* ⚠ 驻地必须原样回传 (服务端只认它判断「能不能在这招人」); 漏传虽被服务端兜底保留,
+           但一旦服务端那层兜底被移除就会静默漂移 —— 两侧都带上才是完整防线。 */
+        settle: typeof sqList[sq2].settle === 'string' ? sqList[sq2].settle : ''
       });
     }
     var curSqOut = state.curSquad || (squadsOut[0] ? squadsOut[0].id : 'squad-1');

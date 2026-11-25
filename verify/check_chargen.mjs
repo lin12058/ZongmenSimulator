@@ -27,8 +27,8 @@ function ok(name, cond, info) {
   else { fail++; console.log('FAIL ' + name + (info ? ' · ' + info : '')); }
 }
 
-/* D3 */
-ok('D3 VERSION 已 +1', G.VERSION === 2, 'v=' + G.VERSION);
+/* D3 ⚠ v3: 出身按聚落类型加权 (BG_BIAS) ⇒ 每升一版这里跟着改 */
+ok('D3 VERSION 已 +1', G.VERSION === 3, 'v=' + G.VERSION);
 
 /* C1 */
 const hg = G.TRAITS.find(t => t.k === 'insight');
@@ -119,6 +119,27 @@ ok('D9 非零项 < 20 被抓出来', bad9.some(x => x.includes('非零项最小'
 const pl = G.genPool({ worldSeed: 'w7', settle: { id: 'v9', type: 'village' }, round: 3 });
 const pl2 = G.genPool({ worldSeed: 'w7', settle: { id: 'v9', type: 'village' }, round: 3 });
 ok('D12 同参数池 seedKey 与候选人一致', pl.seedKey === pl2.seedKey && JSON.stringify(pl.candidates) === JSON.stringify(pl2.candidates), pl.seedKey);
+
+/* ── 出身偏置 (v3 BG_BIAS): 同种子下渔村必多渔家、仙城必多落第书生 ──
+   判据不写死比例, 只比「同一聚落类型内该出身的占比 > 另一类型」 —— 绝对值会随
+   权重微调而假红, 相对关系才是设计意图。 */
+function bgShare(type, key, n = 400) {
+  let hit = 0;
+  for (let i = 0; i < n; i++) {
+    const c = G.genCandidate({ worldSeed: 'bg', slot: i, settleType: type });
+    if (c.pawn.bgKey === key || c.meta.backgroundKey === key) hit++;
+  }
+  return hit / n;
+}
+const fishFisher = bgShare('fishing', 'fisher');
+const cityFisher = bgShare('city', 'fisher');
+const cityScholar = bgShare('city', 'scholar');
+const fishScholar = bgShare('fishing', 'scholar');
+ok('BG1 渔村渔家占比 > 仙城渔家', fishFisher > cityFisher,
+  (fishFisher * 100).toFixed(1) + '% vs ' + (cityFisher * 100).toFixed(1) + '%');
+ok('BG2 仙城书生占比 > 渔村书生', cityScholar > fishScholar,
+  (cityScholar * 100).toFixed(1) + '% vs ' + (fishScholar * 100).toFixed(1) + '%');
+ok('BG3 不传 settleType 仍能出人 (默认出身表)', !!G.genCandidate({ worldSeed: 'bg', slot: 0 }).pawn.name);
 
 console.log('\n== ' + pass + ' PASS / ' + fail + ' FAIL ==');
 process.exit(fail ? 1 : 0);

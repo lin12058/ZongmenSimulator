@@ -89,6 +89,11 @@ public abstract class JsvmModule
 /// ============================================================ */
 public static class JsvmBundles
 {
+    /// <summary>世界层 + 城市层共用的脚本清单 (顺序即加载序)。
+    /// ⚠ chargen.js 排在最后: 它是**独立 classic script** (无依存, 只挂 global.Chargen),
+    ///   放在 city-evo.js 之后可保证前面任何文件求值时都看不到它 (谁都不该在顶层用它)。
+    ///   它**不进** <c>ComputeEngineHash</c> / <c>EngineScriptOrder</c> ——
+    ///   生成器改动不该让世界库失效 (它不是地图引擎的一部分, 见招募方案 §9.4.3)。</summary>
     public static string[] WorldBacked(string engineJsDir, string cityJsDir) =>
     [
         Path.Combine(engineJsDir, "noise.js"),
@@ -96,5 +101,6 @@ public static class JsvmBundles
         Path.Combine(engineJsDir, "mapgen.js"),
         Path.Combine(engineJsDir, "mapgen-server.js"),
         Path.Combine(cityJsDir, "city-evo.js"),
+        Path.Combine(engineJsDir, "chargen.js"),
     ];
 }

@@ -2,12 +2,12 @@
 > **只钉跨模块契约 & 会静默误事的坑**，一行一条。细则分流：
 > `DETAILS-引擎与表现层.md`（引擎/灵脉/小地图/前端自算/渔村/归属/匾额/世界种子/建筑/**Core-Subsystems 详述**/**Tick**/**本机坑**）。
 > 跑法/验收/教训唯一真源 → skill `zongmen-verify-pipeline/`（`SKILL.md` 入口索引 + `references/*.md`，章号仍用 §4~§46；每日 → 同目录 `YYYY-MM-DD.md`）。
-> 方案档：立宗/城市扩张→`玩家宗门放置与城市迭代方案.md`§十；Tick→`docs/游戏时钟与Tick演化框架方案.md`(v2.1)；城市→`脚本化城市迭代-v2`+`城市演化-v4`；人物/分布→`待办事项/人物系统-资料调研.md`+`地图人物分布-实施方案.md`+`Subsystems/Characters/README.md`；战斗→`待办事项/战斗系统-资料调研.md`；**招募生成器→`docs/游戏设计/角色生成器-实施方案.md`**；**招募系统→`docs/游戏设计/招募系统-实施方案.md`**（2026-11-25 定案：每年 +10 / 上限 300 / 刷新 -10 / 招人 -10；池子快照落库防刷；弟子数=小队人数合计）。
+> 方案档：立宗/城市扩张→`玩家宗门放置与城市迭代方案.md`§十；Tick→`docs/游戏时钟与Tick演化框架方案.md`(v2.1)；城市→`脚本化城市迭代-v2`+`城市演化-v4`；人物/分布→`待办事项/人物系统-资料调研.md`+`地图人物分布-实施方案.md`+`Subsystems/Characters/README.md`；战斗→`待办事项/战斗系统-资料调研.md`；**招募生成器→`docs/游戏设计/角色生成器-实施方案.md`**；**招募系统→`docs/游戏设计/招募系统-实施方案.md`**（2026-11-26 v2 定案：产量=影响力(桩恒10)/上限=产量×30(当前300)/刷新 -30/招人 -50/初始 50；池子快照落库防刷；弟子数=小队人数合计；`Squads[].Settle` 驻地 —— 有队员只能在本队驻地招，否则 `wrong-settle`，无队员任意聚落可招；⚠ `squads` 整表替换会静默洗掉 settle）。
 
 ## 全局 / 架构
 - 坐标「格」(q,r)，渲染才 tileToWorld。.NET8(ClearScript.V8 7.4.5 + protobuf-net3 + SQLite/WAL)，Kestrel :8140。⚠ 引擎地基真源只在 `Engine/js/`，前端 `web/js/`，`city-evo.js` 在 `Subsystems/City/js/`。
 - ⚠★ 同一文件多条 Edit 同条消息 ⇒ **只有最后一条生效**（回执都成功，实测 4 次）⇒ 一文件一次一条，改完必 grep 复核（`replace_all` 同守）。
-- 参数真源 `mapgen-config.js`；bundle 序 `[noise,mapgen-config,mapgen,mapgen-server,city-evo]`；Node 侧同序且先 `global.window=globalThis`，漏加载=静默跑旧参数。改引擎 js ⇒ ①`sync_preview_inline.mjs --check` ②重启服务端 ③载荷变则停服清 `db/zongmen.sqlite*`。
+- 参数真源 `mapgen-config.js`；bundle 序 `[noise,mapgen-config,mapgen,mapgen-server,city-evo,chargen]`（chargen 排最后，**不进** `ComputeEngineHash`/`EngineScriptOrder` ⇒ 不使世界库失效）；Node 侧同序且先 `global.window=globalThis`，漏加载=静默跑旧参数。改引擎 js ⇒ ①`sync_preview_inline.mjs --check` ②重启服务端 ③载荷变则停服清 `db/zongmen.sqlite*`。
 - `edgeKeep` 是「保留」权重（衰减写 `1-edgeKeep`，写反=越浓越沉海）；半径真源 `MG.spiritEdgeWorld()`。
 - 存储：`Data(Key,Value BLOB)` WAL+250ms，只存 chunk/comm/settle（gzip+protobuf，键 `w:<seedHash16>:<kind>:<a>:<b>`）；Region 内存 LRU512；tile/fields 不落库。⚠ `PruneExcept` 静默删非活跃 seed 前缀 ⇒ 台账/玩家资产/演化状态**必须独立成表**（`WorldLedger`/`PlayerSectStore`/`CityStateStore`/`WorldClock`/`TickJob`/`TickPerf`）。
 - ⚠★ **V8 单线程**：`JsVm.Call` 全程持 `SemaphoreSlim _gate` ⇒ 一世界内不并行；并行度只来自多 VM(多 Scope)/多 seed。⚠ 每个新 JS 出口都要在**对应** `JsvmModule.Invoke` switch 加 case（世界层→`WorldModule`，子系统→各自 `*Module`），漏=`未知 JS 函数`（编译期不报）。守卫 `verify/check_js_exports.mjs`（三向闭合，含「改坏必红」自检）——C11 就是这么漏的 3 个。
@@ -47,6 +47,14 @@
 - 契约：单 `squad{members[]}`+`bag{items[]}`（多队升级 → 接口档 §12 三处）；装备存 itemId 引用、id 带 `srv-`；`/api/crew` 5 端点，`CrewStore` 独立 `Crew` 表（塞 `Data` 会被 `PruneExcept` 删）；patch 用原始 `JsonObject` 逐键合并；接后台必须 `setLocalTick(false)`。
 - 事件流（真源 `docs/小队背包数据接口.md` §14）：只发事件不发整份契约（PUT 降级导入/调试）；9 条 `squad.*`+`member.move`+`item.*`+`job.priority`，信封 `{v,id,seq,base,at,type,data}`；拖动过程零事件；`squad.create` 唯一非乐观。⚠ 代码未实现；**`member.recruit` 未定义**（接招募时补）。
 - 验收 `_crew_harness.html?test=1`（148 条）+ `_crew_static.mjs 8199`。
+
+## 招募系统（2026-11-26 落地：`/api/recruit/*` + `web/js/recruit/`）
+- 四端点 `GET state|pool?settle=` + `POST roll|hire`；**点数和 taken 按账号**（`X-Account`，缺省 `guest`），**crew 契约全局单份** ⇒ 驻地闸对全服可见、余额各自独立；`RecruitPoint`/`RecruitPool` 独立表（不塞 `Data`，`PruneExcept` 会删）。
+- ⚠★ 池子内容与账号无关（种子只吃 worldSeed/settle/rollNo）⇒ 越权只能靠账号，别指望"不同人看到不同人"；`taken` 也是每人一份（个人进度，不是公共池）。
+- 生成器出口只开**一个**：`mapgen-server.js` → `chargenPoolJson(optsJson)` → `Chargen.genPoolJson`，C# 只加 `"chargenPool"` 一条 case。把 `global.Chargen` 13 个函数直接暴露 = `check_js_exports.mjs` 一片红。
+- 写 Crew 一律 `CrewStore.Mutate`（锁内深拷贝→改→`Save`，失败退点）；`Patch` 里 `squads` 整表替换必须「旧 `settle` 非空则保留」。
+- 判据四条（都 `check_` 前缀、已入库）：`check_recruit_pool.mjs`(22, 纯 JS) / `check_recruit_api.mjs`(49, 需起服务) / `check_recruit_e2e.mjs <base> hire|roll`(17×2, headless) / `check_recruit_ui.mjs`(34, 源码守卫)。⚠ 正式脚本别用 `_` 前缀，会被 `.gitignore` 的 `verify/_*.mjs` 吞掉。
+- ⚠ 重置测试库要连 `-wal`/`-shm` 一起删（只 `cp` 主库 ⇒ 旧 WAL 被重放，看着新库其实带旧招募行）；起临时实例用 `Zongmen__Port` / `Zongmen__DbPath` 环境变量覆盖，别改 appsettings.json。
 
 ## ⚠ 构建 / 验证 / 本机坑（细则 → DETAILS + skill）
 - 三红线：① 清文件一律 Node `fs.unlinkSync` 绝对路径+basename/数量断言，先过 `git ls-files`，**禁 shell 通配与 `git rm`**（已 3 次误删，`verify/_*` 删后不可恢复）② `git push` 的代理要现场探：**2026-11-26 起直连 GitHub 不通**（`Recv failure: Connection was reset`），须走 `-c http.proxy=http://127.0.0.1:7897`（v2rayN，实测 200）；旧口径「必加 `-c http.proxy=` 绕代理」已失效。推前先 `curl -x http://127.0.0.1:<port> -m 6 https://github.com` 探 7897/12618 哪个通，别硬套 ③ 后台实例活不过一个回合 ⇒ 起实例+跑实机判据**同回合**，别 kill 用户 8140。

@@ -82,6 +82,10 @@ public sealed class WorldModule : JsvmModule
              本层只回 { q, r, n, base } —— 谁在哪一格、这一格几个人。 */
         "peopleBlockJson" => (string)root.peopleBlockJson(args[0], args[1]),
         "peopleAtJson" => (string)root.peopleAtJson(args[0], args[1]),
+        /* ---- 招募候选池 (2026-11-26 招募系统方案 §9.4) ----
+           只吃一个 opts JSON, 回整池快照 JSON。⚠ 实现在 mapgen-server.js 的转发出口里
+           (不直接碰 script.Chargen: 那会把整个生成器命名空间暴露成「每个函数都要有 case」)。 */
+        "chargenPool" => (string)root.chargenPoolJson(args[0]),
         _ => throw new InvalidOperationException($"世界层模块未知 JS 函数: {fn}")
     };
 }

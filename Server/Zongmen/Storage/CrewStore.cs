@@ -21,6 +21,10 @@ namespace Zongmen.Storage;
  *   (进面板读一次 / 玩家改动推一次), 不值得引入写队列。
  * ⚠ dbPath = null ⇒ 仅内存 (PersistEnabled=false 的降级), 行为一致, 重启归零。
  * ============================================================ */
+/// <summary>锁内原子变换的结果。Committed=false 且 Error=null ⇒ mutate 主动放弃 (业务校验不过)。
+/// Contract 在放弃时给的是**未改动**的现行契约 (仅供读, 不要在上面做写操作)。</summary>
+public sealed record MutateResult(bool Committed, CrewContract? Contract, string? Error);
+
 public sealed class CrewStore : IDisposable
 {
     private const string CsTemplate = "Data Source={0};Pooling=True";
@@ -228,13 +232,92 @@ public sealed class CrewStore : IDisposable
 
             /* --- squads / curSquad: 整表替换 ---
                ⚠ 队序与队内站位都是**数组顺序**, 逐元素合并没有意义 (拖动只是换位置);
-                 增删队也是整份换。所以这里不做 MergeInto, 直接替换。 */
-            if (patch["squads"] is JsonArray sgs) root["squads"] = sgs.DeepClone();
+                 增删队也是整份换。所以这里不做 MergeInto, 直接替换。
+               ⚠⚠ 但 `settle`(驻地) 必须**兜底保留旧值**: 前端拖动/改名会重发整个 squads
+                 数组, 只要它构造时漏了 settle, 按「空 = 未绑定」处理就会在下次 hire 时
+                 补绑到当时的聚落 ⇒ 驻地被悄悄改到别处 (不报错、不崩, 只是数据慢慢变错)。
+                 口径: 传空 + 旧值非空 ⇒ 保留旧值; 解绑只能显式(目前不提供)。 */
+            if (patch["squads"] is JsonArray sgs)
+            {
+                var oldSettle = new Dictionary<string, string>(StringComparer.Ordinal);
+                if (root["squads"] is JsonArray oldSq)
+                    foreach (var n in oldSq)
+                        if (n is JsonObject o && o["id"]?.ToString() is { Length: > 0 } oid)
+                            oldSettle[oid] = o["settle"]?.ToString() ?? "";
+
+                var sqNext = (JsonArray)sgs.DeepClone();
+                foreach (var n in sqNext)
+                {
+                    if (n is not JsonObject o) continue;
+                    var sid = o["id"]?.ToString() ?? "";
+                    var cur = o["settle"]?.ToString() ?? "";
+                    if (cur.Length == 0 && oldSettle.TryGetValue(sid, out var prev) && prev.Length > 0)
+                        o["settle"] = prev;
+                }
+                root["squads"] = sqNext;
+            }
             if (patch["curSquad"] is JsonNode csq) root["curSquad"] = csq.DeepClone();
 
             var next = root.Deserialize<CrewContract>(CrewJson.Options);
             if (next == null) { error = "合并结果无法解析"; return null; }
             return Save(next, id);
+        }
+    }
+
+    /// <summary>
+    /// 锁内原子「读 → 改 → Revision+1 → 落库」。**招募 hire 必须走这里**。
+    ///
+    /// 为什么不能「锁外 Get → 加人 → Save」: Save 是**全量覆盖**, 会吞掉前端 300ms 窗口里
+    /// 刚发的 patch (拖动/派活)。更糟的是两个并发 hire 各自读到旧的 squads 数组再各自写回,
+    /// 后写的那个把先写的人**整队覆盖掉** (丢人, 不报错)。
+    ///
+    /// mutate 返回 false = 主动放弃 (业务校验不过), 此时**不落库、Revision 不动**。
+    /// ⚠ 改的是**深拷贝**: mutate 抛异常 / 返回 false 都不会污染内存里的现行契约。
+    /// </summary>
+    public MutateResult Mutate(Func<CrewContract, bool> mutate, string id = DefaultId, bool createIfMissing = false)
+    {
+        lock (_gate)
+        {
+            EnsureLoaded();
+            CrewContract? baseC;
+            if (_mem.TryGetValue(id, out var row)) baseC = row.Contract;
+            else if (createIfMissing)
+                baseC = new CrewContract { Squad = new SquadDto { Id = id, Name = "小队" } };
+            else
+                return new MutateResult(false, null, "尚未写入小队数据, 先用 PUT /api/crew 灌一份");
+
+            /* 深拷贝: 序列化往返最省事 (契约很小), 且能顺带把 null 集合规范回默认值 */
+            CrewContract? work;
+            try
+            {
+                work = JsonSerializer.Deserialize<CrewContract>(
+                    JsonSerializer.Serialize(baseC, CrewJson.Options), CrewJson.Options);
+            }
+            catch (Exception ex)
+            {
+                return new MutateResult(false, null, "契约无法复制: " + ex.Message);
+            }
+            if (work == null) return new MutateResult(false, null, "契约无法复制");
+
+            /* ⚠ 客户端可能显式传 `"squads": null` ⇒ 反序列化把非空默认值覆盖成 null。
+               这里统一垫回空集合, 避免 mutate 闭包里 NRE (那会变成 500, 而不是业务错误码)。 */
+            work.Squad ??= new SquadDto { Id = id, Name = "小队" };
+            work.Squad.Members ??= new List<MemberDto>();
+            work.Bag ??= new BagDto();
+            work.Bag.Items ??= new List<ItemDto>();
+            work.Squads ??= new List<SquadGroupDto>();
+            foreach (var s in work.Squads)
+            {
+                s.Members ??= new List<string>();
+                s.Settle ??= "";
+            }
+
+            bool commit;
+            try { commit = mutate(work); }
+            catch (Exception ex) { return new MutateResult(false, null, "变换失败: " + ex.Message); }
+            if (!commit) return new MutateResult(false, baseC, null);
+
+            return new MutateResult(true, Save(work, id), null);
         }
     }
 

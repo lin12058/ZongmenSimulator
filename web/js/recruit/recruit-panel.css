@@ -1,0 +1,243 @@
+/* ============================================================
+ * recruit-panel.css — 招募面板样式 (纸签 / 墨色, 对齐既有 UI 体系)
+ * ------------------------------------------------------------
+ * 只作用于 #recruitWrap 内部 (rc- 前缀), 不动任何既有面板。
+ * 颜色取 index.html 的 :root 变量, 缺省值兜底 (本文件不依赖加载顺序)。
+ * ============================================================ */
+#recruitWrap {
+  position: fixed;
+  inset: 0;
+  z-index: 78;                     /* 高于众生录 (74) / 山川志 (45), 低于设置弹窗 (99) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#recruitWrap.hidden { display: none; }
+
+#recruitWrap .rc-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(38, 30, 20, 0.28);
+}
+
+#recruitWrap .rc-box {
+  position: relative;
+  width: min(560px, calc(100vw - 28px));
+  max-height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+  padding: 10px 16px 14px;
+  color: var(--ink, #2e2a24);
+}
+
+#recruitWrap .rc-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 15px;
+  font-weight: normal;
+  letter-spacing: 2px;
+  color: var(--ink, #2e2a24);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--panel-border, rgba(150,128,96,.55));
+}
+#recruitWrap .rc-title span { letter-spacing: 4px; }
+#recruitWrap .rc-x {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint, rgba(58,48,38,.44));
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-family: inherit;
+}
+#recruitWrap .rc-x:hover { color: var(--seal, #a63a2c); }
+
+#recruitWrap .rc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 2px 4px;
+  flex-wrap: wrap;
+}
+#recruitWrap .rc-settle {
+  font-size: 15px;
+  letter-spacing: 1px;
+}
+#recruitWrap .rc-points {
+  font-size: 12px;
+  color: var(--ink-soft, rgba(58,48,38,.75));
+}
+#recruitWrap .rc-points b {
+  color: var(--seal, #a63a2c);
+  font-size: 14px;
+  font-weight: normal;
+}
+#recruitWrap .rc-points i {
+  font-style: normal;
+  margin-left: 6px;
+  color: var(--ink-faint, rgba(58,48,38,.44));
+}
+
+#recruitWrap .rc-gate {
+  margin: 4px 0 6px;
+  padding: 6px 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #7d2f22;
+  background: rgba(166, 58, 44, 0.08);
+  border-left: 3px solid var(--seal, #a63a2c);
+}
+#recruitWrap .rc-gate.hidden { display: none; }
+
+#recruitWrap .rc-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px 8px;
+}
+#recruitWrap .rc-msg {
+  font-size: 12px;
+  color: var(--ink-soft, rgba(58,48,38,.75));
+}
+#recruitWrap .rc-msg.err { color: var(--seal, #a63a2c); }
+#recruitWrap .rc-msg.ok { color: #3f6b46; }
+
+#recruitWrap .rc-btn {
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 1px;
+  padding: 5px 12px;
+  color: var(--ink, #2e2a24);
+  background: rgba(255, 253, 246, 0.82);
+  border: 1px solid var(--panel-border, rgba(150,128,96,.55));
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+#recruitWrap .rc-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--seal, #a63a2c);
+}
+#recruitWrap .rc-btn:disabled,
+#recruitWrap .rc-btn.off {
+  color: var(--ink-faint, rgba(58,48,38,.44));
+  background: rgba(240, 234, 220, 0.55);
+  cursor: default;
+}
+#recruitWrap .rc-roll { border-color: var(--seal, #a63a2c); color: var(--seal, #a63a2c); }
+#recruitWrap .rc-roll:disabled { border-color: var(--panel-border, rgba(150,128,96,.55)); color: var(--ink-faint, rgba(58,48,38,.44)); }
+
+#recruitWrap .rc-list {
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 60px;
+  padding-right: 4px;
+  border-top: 1px dashed rgba(150, 128, 96, 0.4);
+}
+#recruitWrap .rc-empty {
+  padding: 22px 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--ink-faint, rgba(58,48,38,.44));
+  letter-spacing: 1px;
+}
+
+#recruitWrap .rc-card {
+  padding: 9px 6px 7px;
+  border-bottom: 1px dashed rgba(150, 128, 96, 0.35);
+}
+#recruitWrap .rc-card.taken { opacity: .55; }
+#recruitWrap .rc-card-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#recruitWrap .rc-name {
+  font-size: 15px;
+  letter-spacing: 1px;
+}
+#recruitWrap .rc-tag {
+  font-size: 11px;
+  color: var(--ink-faint, rgba(58,48,38,.44));
+}
+#recruitWrap .rc-bg { color: var(--ink-soft, rgba(58,48,38,.75)); }
+#recruitWrap .rc-card-mid {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--ink-soft, rgba(58,48,38,.75));
+}
+#recruitWrap .rc-card-low {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--ink-faint, rgba(58,48,38,.44));
+}
+#recruitWrap .rc-card-low em {
+  font-style: normal;
+  margin-left: 2px;
+  padding: 0 3px;
+  border: 1px solid rgba(150, 128, 96, 0.4);
+  font-size: 10px;
+}
+#recruitWrap .rc-card-act {
+  margin-top: 6px;
+  text-align: right;
+}
+
+#recruitWrap .rc-pick {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  padding: 9px 12px 11px;
+  background: rgba(252, 248, 238, 0.98);
+  border: 1px solid var(--panel-border, rgba(150,128,96,.55));
+  box-shadow: 0 6px 16px rgba(74, 55, 28, 0.22);
+}
+#recruitWrap .rc-pick.hidden { display: none; }
+#recruitWrap .rc-pick-cap {
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: var(--ink-soft, rgba(58,48,38,.75));
+  padding-bottom: 6px;
+}
+#recruitWrap .rc-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+#recruitWrap .rc-pick-item {
+  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+#recruitWrap .rc-pick-item i {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--ink-faint, rgba(58,48,38,.44));
+}
+#recruitWrap .rc-pick-cancel { margin-top: 8px; }
+
+@media (max-width: 520px) {
+  #recruitWrap .rc-box { max-height: 84vh; padding: 8px 11px 11px; }
+  #recruitWrap .rc-head { flex-direction: column; gap: 2px; }
+}
+
+/* 山川志 (#info) 里的「招募弟子」入口 —— 不属 #recruitWrap, 故单独开一条。
+   沿用全站 button 的基础样式, 只把宽度撑满、字距拉开, 与 .row 的排版对齐。 */
+#infoBody .info-recruit {
+  width: 100%;
+  margin: 2px 0 0;
+  padding: 4px 0;
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: var(--seal, #a63a2c);
+  border-color: var(--seal, #a63a2c);
+  cursor: pointer;
+}
+#infoBody .info-recruit:hover { background: rgba(166, 58, 44, 0.06); }

@@ -55,6 +55,13 @@ public sealed class SquadGroupDto
     public string Name { get; set; } = "";
     /// <summary>成员 id, **顺序即站位** (0 = 队首)。</summary>
     public List<string> Members { get; set; } = new();
+    /// <summary>队伍驻地聚落 id (`i_j_k`, 空 = 未绑定)。2026-11-26 招募系统方案 §4.1.1:
+    /// 有队员的队**只能在其驻地聚落招募**; 空 = 老存档, 首次 hire 时补绑当前聚落。
+    /// ⚠ `squads` 在 patch 里是整表替换 ⇒ 前端漏传这个字段会被服务端**保留旧值**处理
+    ///   (见 CrewStore.Patch), 否则驻地被悄悄改到别处 (静默漂移, 不报错)。</summary>
+    public string Settle { get; set; } = "";
+    /// <summary>只读输出投影: 驻地聚落名。**不落库**(每次由 settleId 反查引擎), 只给 UI 用。</summary>
+    public string SettleName { get; set; } = "";
 }
 
 /// <summary>小队: 编制 + 成员。没换人的情况下, 只有 Members 里的内容会变。</summary>
@@ -77,8 +84,11 @@ public sealed class MemberDto
     public int Age { get; set; } = 20;
     /// <summary>境界, 纯展示。不参与数值计算。</summary>
     public string Realm { get; set; } = "炼气期 · 1 层";
-    /// <summary>当前修为。上限 = 600 + 天赋总量 × 6 (前端现算)。</summary>
+    /// <summary>当前修为。上限见 <see cref="ExpMax"/> (缺省由前端按 600 + 天赋总量 × 6 推)。</summary>
     public int Exp { get; set; }
+    /// <summary>修为上限 (源数据)。0 / 缺省 = 前端按旧公式推 (600 + 天赋×6)。
+    /// 招募生成器给的是炼气段 600 (见 Engine/js/chargen.js CFG.EXP_STAGE_MAX)。</summary>
+    public int ExpMax { get; set; }
     public int Mood { get; set; } = 70;
 
     public RootDto Root { get; set; } = new();
@@ -107,7 +117,10 @@ public sealed class RootDto
 {
     /// <summary>灵根顺序, 固定 5 项 (jin/mu/shui/huo/tu)。可省略, 服务端按默认顺序解释。</summary>
     public List<string> Order { get; set; } = new();
-    /// <summary>五行吸收比例, **合计恒 100** (前端会对不齐的按比例归一)。</summary>
+    /// <summary>五行吸收比例。两种合法口径:
+    /// ① **合计恒 100** (旧 demo / 手工存档); ② **20 × 灵根系数量** (20/40/60/80/100,
+    /// 招募生成器的原始口径, 页面按比例归一到 100 显示纯度)。
+    /// 前端 hydrate 对不齐的一律按比例缩放 ⇒ 两种都能装。</summary>
     public List<int> V { get; set; } = new();
     /// <summary>主灵根下标 0~4。</summary>
     public int Main { get; set; }

@@ -31,8 +31,9 @@
 (function (global) {
   'use strict';
 
-  /* ⚠ 改语义就 +1: 灵根含义(0/20 二值)/特质表/天赋分布三处已变更 ⇒ v:1 与新数据必须可区分 (审查 D3) */
-  var VERSION = 2;
+  /* ⚠ 改语义就 +1: 灵根含义(0/20 二值)/特质表/天赋分布三处已变更 ⇒ v:1 与新数据必须可区分 (审查 D3)
+     v3 (2026-11-26): 出身按聚落类型偏置 (BG_BIAS) + pawn.expMax 落契约 ⇒ 旧池快照按 v2 读 */
+  var VERSION = 3;
 
   /* ============================================================
    * 常量 —— 判据直接读这里, UI 不许再抄一份
@@ -172,6 +173,21 @@
     { k: 'scholar',  n: '落第书生', bias: ['mind', 'array'], weight: 7,  mood: [40, 70] }
   ];
   var BG_TOTAL = (function () { var s = 0, i; for (i = 0; i < BACKGROUNDS.length; i++) s += BACKGROUNDS[i].weight; return s; })();
+  /* ⚠ BG_TOTAL 只作「全局权重合计」的参考值 (旧口径/判据对照用), pickBackground 已按
+     settleType 现算总权重 ⇒ 这里不再参与抽取。 */
+
+  /* 出身偏置 (招募系统方案 §4.2, 2026-11-26): **乘在基础权重上的系数**, 键 = 聚落类型。
+     只影响「抽到哪个出身」的概率, 不改出身的任何字段 (bias 道 / mood 区间照旧)。
+     ⚠ 表里没列的类型 (poi / 未知) ⇒ 系数全 1 ⇒ 退回旧的全局权重。
+     ⚠ 偏置不能改变 rng 消耗次数: pickBackground 恒只掷一次 x = rng()*总权重,
+       否则「传不传 settleType」会让后面灵根/天赋/姓名整体平移 (审查 D11 同类坑)。 */
+  var BG_BIAS = {
+    village: { farmer: 2.0, hunter: 1.6, fisher: 0.8, smith: 0.8, healer: 0.6, wanderer: 1.2, scholar: 0.3 },
+    fishing: { farmer: 1.0, hunter: 0.9, fisher: 3.0, smith: 0.6, healer: 0.7, wanderer: 0.8, scholar: 0.3 },
+    town:    { farmer: 0.8, hunter: 0.9, fisher: 0.8, smith: 2.2, healer: 1.6, wanderer: 1.0, scholar: 1.4 },
+    city:    { farmer: 0.5, hunter: 0.6, fisher: 0.8, smith: 1.2, healer: 1.4, wanderer: 0.9, scholar: 2.2 },
+    sect:    { farmer: 0.9, hunter: 1.0, fisher: 0.9, smith: 1.0, healer: 1.5, wanderer: 0.8, scholar: 1.5 }
+  };
 
   var SURNAMES = ['沈', '陆', '顾', '谢', '裴', '苏', '宁', '温', '江', '柳', '岑', '褚',
                   '闵', '殷', '阮', '宋', '卫', '邵', '毕', '费', '鲁', '柏', '郝', '昌',
@@ -247,10 +263,20 @@
   }
   /* ⚠ 旧的 splitWeighted(按权重切余数) 已删: 灵根改成 0/20 二值后不再需要,
      留着只会被人再拿去切出 22/25/28 这种中间值。 */
-  function pickBackground(rng) {
-    var x = rng() * BG_TOTAL, acc = 0;
-    for (var i = 0; i < BACKGROUNDS.length; i++) {
-      acc += BACKGROUNDS[i].weight;
+  /* settleType 决定出身权重 (见 BG_BIAS); 缺省 = 旧的全局权重。
+     ⚠ 任何分支都只消耗一次 rng() ⇒ 调用方传 / 不传 settleType 不会平移后续随机流 */
+  function pickBackground(rng, settleType) {
+    var bias = BG_BIAS[settleType] || null;
+    var total = 0, i, w = [];
+    for (i = 0; i < BACKGROUNDS.length; i++) {
+      var k = bias ? (bias[BACKGROUNDS[i].k] == null ? 1 : bias[BACKGROUNDS[i].k]) : 1;
+      w.push(BACKGROUNDS[i].weight * k);
+      total += w[i];
+    }
+    if (!(total > 0)) return BACKGROUNDS[0];
+    var x = rng() * total, acc = 0;
+    for (i = 0; i < BACKGROUNDS.length; i++) {
+      acc += w[i];
       if (x <= acc) return BACKGROUNDS[i];
     }
     return BACKGROUNDS[0];
@@ -470,8 +496,9 @@
       }
     }
     /* ⚠ 出生地走**独立** rng: 与主随机流分开 ⇒ 传 / 不传 opts.background 不会平移后面的
-       灵根 / 天赋 / 姓名 (审查 D11: 原来差一次 rng 消耗, 只改出生地就换掉整个人) */
-    if (!bg) bg = pickBackground(mulberry32(seed ^ 0x85ebca6b));
+       灵根 / 天赋 / 姓名 (审查 D11: 原来差一次 rng 消耗, 只改出生地就换掉整个人)
+       ⚠ settleType 只影响权重表, 不改变 rng 消耗次数 (见 BG_BIAS) */
+    if (!bg) bg = pickBackground(mulberry32(seed ^ 0x85ebca6b), opts.settleType);
 
     var root = genRoot(rng, { element: opts.element });
     var tal = genTalents(rng, bg.bias);
@@ -500,6 +527,9 @@
       gender: gender,
       realm: CFG.REALM_FIXED + '期 · ' + layer + ' 层',
       exp: exp,
+      /* 修为上限: 炼气段 600。⚠ 契约 MemberDto 有同名字段 (expMax) ⇒ 前端 expOf 优先读它,
+         不再按「600 + 天赋×6」推 (那套是旧 demo 口径, 会让新人一进面板就显示 5%) */
+      expMax: expMax,
       mood: rint(rng, moodRange[0], moodRange[1]),
       root: { order: root.order, v: root.v, main: root.main },
       talents: { v: tal.v, total: tal.total },
@@ -587,6 +617,7 @@
           salt: 'c' + guard,
           surname: surname || undefined,
           element: st.element,
+          settleType: type,
           q: st.q, r: st.r
         });
         if (!used[cand.pawn.name]) break;
@@ -601,6 +632,19 @@
                 pop: st.pop == null ? null : st.pop, element: st.element == null ? null : st.element },
       candidates: out
     };
+  }
+
+  /* ============================================================
+   * JSON 薄封装 —— 供宿主 (C# WorldModule / Node 判据) 单参数调用
+   * ------------------------------------------------------------
+   * ⚠ 只做 parse / stringify, **不碰生成逻辑** (args 全是 JSON 字符串, 免去
+   *   ClearScript 侧的 dynamic 参数拼装与类型猜测)。
+   * opts 形状 = genPool 的入参: { worldSeed, round, settle:{id,type,pop,element,q,r} }
+   * ============================================================ */
+  function genPoolJson(optsJson) {
+    var opts = optsJson;
+    if (typeof optsJson === 'string') opts = optsJson ? JSON.parse(optsJson) : {};
+    return JSON.stringify(genPool(opts || {}));
   }
 
   /* ============================================================
@@ -770,6 +814,7 @@
     TRAITS: TRAITS,
     TRAIT_INDEX: TRAIT_INDEX,
     BACKGROUNDS: BACKGROUNDS,
+    BG_BIAS: BG_BIAS,
     STARTER: STARTER,
     hash32: hash32,
     seedOf: seedOf,
@@ -780,6 +825,7 @@
     traitWeight: traitWeight,
     genCandidate: genCandidate,
     genPool: genPool,
+    genPoolJson: genPoolJson,
     checkCandidate: checkCandidate,
     selfTest: selfTest,
     stats: stats

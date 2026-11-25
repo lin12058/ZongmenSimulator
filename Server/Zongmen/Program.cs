@@ -104,6 +104,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<TickPump>());
 builder.Services.AddSingleton(new CrewStore(
     options.PersistEnabled ? ZongmenPaths.ResolveDbPath(options, contentRoot) : null));
 
+/* 招募系统 (docs/游戏设计/招募系统-实施方案.md)
+   · 影响力: 目前是桩 (恒 10, 保底 1)。接影响力系统时只换 InfluenceProvider 实现,
+     RecruitStore 一行不改 (它只认 IInfluence 接口)。
+   · 招募值与候选池 = 两张**独立表** (RecruitPoint / RecruitPool), 理由同 Crew:
+     塞 Data 表会被 PruneExcept 静默删掉。 */
+builder.Services.AddSingleton<IInfluence>(new InfluenceProvider());
+builder.Services.AddSingleton(sp => new RecruitStore(
+    options.PersistEnabled ? ZongmenPaths.ResolveDbPath(options, contentRoot) : null,
+    sp.GetRequiredService<IInfluence>()));
+
 var app = builder.Build();
 
 /* 前端代理在前, /api/* 与 /ws/* 自动放行给端点 */
@@ -117,6 +127,17 @@ CrewEndpoints.Map(app, app.Services.GetRequiredService<CrewStore>());
 /* 只读时钟端点 (/api/clock)。⚠ 时钟是服务端资产, 前端只能读、不许自造。 */
 var _pump = app.Services.GetRequiredService<TickPump>();
 MapEndpoints.MapClock(app, _pump);
+
+/* 招募系统 (/api/recruit/*): state / pool / roll / hire。
+   ⚠ 时钟、世界种子、聚落身份全部由服务端自己查 —— 前端只给 settleId 与 slot。 */
+RecruitEndpoints.Map(
+    app,
+    app.Services.GetRequiredService<RecruitStore>(),
+    app.Services.GetRequiredService<CrewStore>(),
+    app.Services.GetRequiredService<MapWorldService>(),
+    _pump,
+    app.Services.GetRequiredService<WorldClockStore>(),
+    tickOptions);
 
 /* ★ 时钟挂到世界服务: 挂上即绑定当前世 (seed/round 来自 WorldLedger 台账)。
    ⚠ 必须在 app.Build() 之后 —— MapWorldService 是单例, 这里就是把两半接上的那一刻。 */

@@ -2470,6 +2470,15 @@
     row('润泽', (m.m * 100 | 0) + '%');
     var wd = m.waterD;
     row('去水', m.biome <= 1 ? '滨水' : wd >= 1 && wd <= 4 ? wd + ' 里' : '较远');
+
+    /* 招募入口 (2026-11-26): 只在「这一格真的是聚落」时出现 —— 秘境不招。
+       ⚠ 本面板只画按钮并带出 settleId, 真正的网络/面板逻辑在 web/js/recruit/ (同 infocard 的分工)。
+       ⚠ id 是服务端聚落身份 (i_j_k), 不是 q/r —— 服务端只认它。 */
+    if (hit && hit.ent && hit.ent.type !== 'poi') {
+      rows.push('<div class="sep"></div>');
+      rows.push('<div class="row"><button type="button" class="info-recruit" data-recruit="' +
+        esc(hit.ent.id) + '" data-rcname="' + esc(hit.ent.name || '') + '">招募弟子</button></div>');
+    }
     return rows.join('');
   }
   function requestTileInfo(tile, at) {
@@ -3505,6 +3514,22 @@
     });
     $('infoClose').addEventListener('click', hideInfo);
     bindInfoDrag();                        // 山川志: 标题栏拖动 + 位置记忆 (ZMStore 'infoPos')
+    /* 招募入口 (2026-11-26): 山川志正文里的「招募弟子」按钮 → 招募面板。
+       ⚠ 用事件委托: 正文每次查询都整体 innerHTML 重建, 直接绑按钮会随重建失效。
+       ⚠ 本文件只负责转交 settleId; 面板在哪、发什么请求全在 web/js/recruit/。 */
+    els.infoBody.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('[data-recruit]') : null;
+      if (!btn) return;
+      e.preventDefault();
+      var sid = btn.getAttribute('data-recruit');
+      var nm = btn.getAttribute('data-rcname') || '';
+      if (window.RecruitPanel && window.RecruitPanel.open) {
+        window.RecruitPanel.open(sid, nm);
+        hideInfo();                        // 招募面板是模态, 山川志让位 (拖到别处也不挡)
+      } else {
+        console.warn('招募面板未加载 (web/js/recruit/recruit-panel.js)');
+      }
+    });
     window.addEventListener('resize', onResize);
   }
 

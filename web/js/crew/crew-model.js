@@ -503,9 +503,11 @@
   }
   function overload(pawn) { return weightOf(pawn) > loadMax(pawn); }
 
-  /* 修为: 上限由天赋总量推, 进度演示给一个固定比例 (同一 seed 稳定) */
+  /* 修为: 上限优先用契约给的 expMax (源数据), 缺省才按旧公式推。
+     ⚠ 招募生成器给的是炼气段 600 (chargen.js CFG.EXP_STAGE_MAX); 旧公式 600+天赋×6
+       会让新人一进面板就显示个位数百分比 (天赋 120 ⇒ 分母 1320, 而 exp 上限只有 600)。 */
   function expOf(pawn) {
-    var max = 600 + Math.round(talentTotal(pawn) * 6);
+    var max = pawn && pawn.expMax > 0 ? pawn.expMax : 600 + Math.round(talentTotal(pawn) * 6);
     return { v: pawn.exp, max: max, pct: Math.round(pawn.exp / max * 100) };
   }
   /* 修炼速度倍率 (慧根 +6% / 天生道体 +10%): step 涨修为时乘上。
@@ -682,7 +684,11 @@
         taken[p.id] = 1;
         ids.push(p.id);
       }
-      out.push({ id: id, name: squadName(src.name), members: ids });
+      out.push({ id: id, name: squadName(src.name), members: ids,
+                 /* ⚠ 驻地必须原样带出来: 这是服务端判断「能不能在这招人」的唯一依据,
+                    丢一次就会被当成「未绑定」而补绑到当时所在的聚落 (静默漂移)。
+                    归一化补队/改名的分支一律不得抹掉它。 */
+                 settle: typeof src.settle === 'string' ? src.settle : '' });
     }
     /* 队 id 去重 (存档被手改会撞)
        ⚠ 审查 C2: 原循环体每次赋**同一个**值, 一旦该值已被前面的队占用就永不退出
@@ -1033,7 +1039,11 @@
         seen[p.traits[t].pair] = 1;
       }
       if (p.queue.length < CFG.TALISMAN_MIN || p.queue.length > CFG.TALISMAN_MAX) bad.push(p.name + ': 法宝队列 ' + p.queue.length);
-      if (p.arts.slots.length < CFG.ART_MIN || p.arts.slots.length > CFG.ART_MAX) bad.push(p.name + ': 神通格 ' + p.arts.slots.length);
+      /* 神通: **已学格数可以为 0** (招募生成器出的是「凡人·未习」), 只需 ≤ cap;
+         格数上限 cap 本身必须落在 3~4 (本命三格 / 四格)。旧断言拿 ART_MIN 去卡 slots.length,
+         把「0 已学」判成坏 —— 那正是新生成器一接就整片假红的原因。 */
+      if (p.arts.cap < CFG.ART_MIN || p.arts.cap > CFG.ART_MAX) bad.push(p.name + ': 神通格数 ' + p.arts.cap);
+      if (p.arts.slots.length > p.arts.cap) bad.push(p.name + ': 已学神通 ' + p.arts.slots.length + ' > 格数 ' + p.arts.cap);
       /* 槽位里的东西必须与槽位类型一致 (换装写错槽 = 面板上「刀装在头上」) */
       var keys = ['weapon', 'offhand', 'body', 'head', 'talisman'];
       for (var k2 = 0; k2 < keys.length; k2++) {

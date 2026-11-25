@@ -657,6 +657,14 @@
   <script src="js/crew/crew-model.js"></script>
   <script src="js/crew/crew-panel.js"></script>
   <script src="js/crew/crew-bridge.js"></script>
+  <!-- 招募面板 —— 独立插件 (照 crew 的姿势):
+       recruit-bridge.js = 网络层 (api/recruit/*), recruit-panel.js = 面板与交互
+       (CSS 由 <link> 引入, 不用 JS 注入)。入口在山川志的「招募弟子」按钮
+       (main.js 只负责调 RecruitPanel.open(settleId, name), 不渲染)。
+       ⚠ 必须排在 crew-bridge.js 之后: 招募成功后要调 CrewBridge.autoMount 重装契约。 -->
+  <link rel="stylesheet" href="js/recruit/recruit-panel.css">
+  <script src="js/recruit/recruit-bridge.js"></script>
+  <script src="js/recruit/recruit-panel.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>
