@@ -2,7 +2,7 @@
 > **只钉跨模块契约 & 会静默误事的坑**，一行一条。细则分流：
 > `DETAILS-引擎与表现层.md`（引擎/灵脉/小地图/前端自算/渔村/归属/匾额/世界种子/建筑/**Core-Subsystems 详述**/**Tick**/**本机坑**）。
 > 跑法/验收/教训唯一真源 → skill `zongmen-verify-pipeline/`（`SKILL.md` 入口索引 + `references/*.md`，章号仍用 §4~§46；每日 → 同目录 `YYYY-MM-DD.md`）。
-> 方案档：立宗/城市扩张→`玩家宗门放置与城市迭代方案.md`§十；Tick→`docs/游戏时钟与Tick演化框架方案.md`(v2.1)；城市→`脚本化城市迭代-v2`+`城市演化-v4`；人物/分布→`待办事项/人物系统-资料调研.md`+`地图人物分布-实施方案.md`+`Subsystems/Characters/README.md`；战斗→`待办事项/战斗系统-资料调研.md`；**招募生成器→`docs/游戏设计/角色生成器-实施方案.md`**。
+> 方案档：立宗/城市扩张→`玩家宗门放置与城市迭代方案.md`§十；Tick→`docs/游戏时钟与Tick演化框架方案.md`(v2.1)；城市→`脚本化城市迭代-v2`+`城市演化-v4`；人物/分布→`待办事项/人物系统-资料调研.md`+`地图人物分布-实施方案.md`+`Subsystems/Characters/README.md`；战斗→`待办事项/战斗系统-资料调研.md`；**招募生成器→`docs/游戏设计/角色生成器-实施方案.md`**；**招募系统→`docs/游戏设计/招募系统-实施方案.md`**（2026-11-25 定案：每年 +10 / 上限 300 / 刷新 -10 / 招人 -10；池子快照落库防刷；弟子数=小队人数合计）。
 
 ## 全局 / 架构
 - 坐标「格」(q,r)，渲染才 tileToWorld。.NET8(ClearScript.V8 7.4.5 + protobuf-net3 + SQLite/WAL)，Kestrel :8140。⚠ 引擎地基真源只在 `Engine/js/`，前端 `web/js/`，`city-evo.js` 在 `Subsystems/City/js/`。
@@ -10,7 +10,7 @@
 - 参数真源 `mapgen-config.js`；bundle 序 `[noise,mapgen-config,mapgen,mapgen-server,city-evo]`；Node 侧同序且先 `global.window=globalThis`，漏加载=静默跑旧参数。改引擎 js ⇒ ①`sync_preview_inline.mjs --check` ②重启服务端 ③载荷变则停服清 `db/zongmen.sqlite*`。
 - `edgeKeep` 是「保留」权重（衰减写 `1-edgeKeep`，写反=越浓越沉海）；半径真源 `MG.spiritEdgeWorld()`。
 - 存储：`Data(Key,Value BLOB)` WAL+250ms，只存 chunk/comm/settle（gzip+protobuf，键 `w:<seedHash16>:<kind>:<a>:<b>`）；Region 内存 LRU512；tile/fields 不落库。⚠ `PruneExcept` 静默删非活跃 seed 前缀 ⇒ 台账/玩家资产/演化状态**必须独立成表**（`WorldLedger`/`PlayerSectStore`/`CityStateStore`/`WorldClock`/`TickJob`/`TickPerf`）。
-- ⚠★ **V8 单线程**：`JsVm.Call` 全程持 `SemaphoreSlim _gate` ⇒ 一世界内不并行；并行度只来自多 VM(多 Scope)/多 seed。⚠ 每个新 JS 出口都要在**对应** `JsvmModule.Invoke` switch 加 case（世界层→`WorldModule`，子系统→各自 `*Module`），漏=`未知 JS 函数`（编译期不报）。
+- ⚠★ **V8 单线程**：`JsVm.Call` 全程持 `SemaphoreSlim _gate` ⇒ 一世界内不并行；并行度只来自多 VM(多 Scope)/多 seed。⚠ 每个新 JS 出口都要在**对应** `JsvmModule.Invoke` switch 加 case（世界层→`WorldModule`，子系统→各自 `*Module`），漏=`未知 JS 函数`（编译期不报）。守卫 `verify/check_js_exports.mjs`（三向闭合，含「改坏必红」自检）——C11 就是这么漏的 3 个。
 - ⚠⚠★ **DI 循环藏在手写 factory lambda = 静默死锁**（绕过容器检测 ⇒ 不抛异常/进程活着/不监听/零日志；声明式 `AddSingleton` 反而会抛）。定位：`netstat` 无监听 + **绕代理** `curl` + log 0 字节 ⇒ `Program.cs` 插 `Stopwatch` 桩。
 - ⚠ ClearScript 7.4.5 ⇒ `IArrayBuffer` 只有 `byte[]` 重载。`pben.js` 挂载点：✅ bundle 数组；❌ `EngineScriptOrder`/`ComputeEngineHash`。
 
