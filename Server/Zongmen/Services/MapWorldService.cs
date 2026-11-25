@@ -79,6 +79,30 @@ public sealed class MapWorldService : IDisposable
          不是「世界内容」; 一旦落库, 淘汰后 ReadSqlBackfill 会把旧包捞回来。 */
     private readonly LruCache<PeopleData> _peopleCache = new(1024);
 
+    /// <summary>人物战力所属子系统的 V8 Scope。
+    /// ⚠ 审查 D28: 原来是方法里的 `const string CharactersVmScope = "characters"` ——
+    ///   子系统改名 / 改 scope 后, /api/people 与人物图层在**运行时** 500 (编译期不报)。
+    ///   现在从注册表按子系统名解析 (ISubsystem.Name 的契约就是「目录名 = Scope 名」),
+    ///   解析不到就**明确抛**并说清缺什么, 而不是等到某一帧才炸。</summary>
+    private string? _charactersScope;
+    private string CharactersVmScope
+    {
+        get
+        {
+            if (_charactersScope is not null) return _charactersScope;
+            foreach (var s in _subsystems.All)
+            {
+                if (s.Name == "characters" && s.Module is not null)
+                {
+                    _charactersScope = s.Module.Scope;
+                    return _charactersScope;
+                }
+            }
+            throw new InvalidOperationException(
+                "未找到子系统 characters 的 V8 模块 —— 人物图层与 /api/people 依赖它 (SubsystemRegistry 缺行?)");
+        }
+    }
+
     /// <summary>tile 缓存条目: 值 + 生成时的 VM 道路版本号 (T4) + 服务端落点世代 (P)。</summary>
     private sealed record TileEntry(byte[] Gz, long RoadVer, int PlaceVer);
 
@@ -142,7 +166,7 @@ public sealed class MapWorldService : IDisposable
     ///   而被 Remove (静默停止演化)。故这里枚举**两个** kind, 不做任何「按需省略」。
     /// ⚠ 结果做短时缓存 (默认 60s): 对账每 360 tick 才跑一次, 但枚举会扫窗口内全部区域格;
     ///   缓存对**对账**安全 (只增删 job 集合, 不重置其 NextTick/Phase), 城变多时也稳。</summary>
-    private IReadOnlyList<(string EntityId, Time.TickJobKind Kind)> ProvideExpectedJobs(string seed, int round, long tick)
+    private IReadOnlyList<(string EntityId, Time.TickJobKind Kind)>? ProvideExpectedJobs(string seed, int round, long tick)
     {
         var now = Environment.TickCount64;
         lock (_expectedGate)
@@ -150,6 +174,8 @@ public sealed class MapWorldService : IDisposable
             if (_expectedCache != null && now - _expectedAtMs < 60_000) return _expectedCache;
         }
         var list = new List<(string, Time.TickJobKind)>();
+        var cells = 0;
+        var failed = 0;
         try
         {
             var span = Math.Max(1, _opt.Tick.EvolveSpanRegions);
@@ -159,12 +185,21 @@ public sealed class MapWorldService : IDisposable
             {
                 for (var j = -span; j <= span; j++)
                 {
+                    cells++;
                     string json;
                     /* ⚠ 必须用 citySettlementsJson (带 type) 而不是 settleJson (不带 type):
                        这里靠 type 过滤 poi, 用 settleJson 会因 type=="" 而不过滤 ⇒
                        给秘境也排演化 job (白跑, 且秘境没有足迹/资源 ⇒ 逻辑上无意义)。 */
                     try { json = lease.Vm.Call("citySettlementsJson", i, j); }
-                    catch { continue; }
+                    catch (Exception ex)
+                    {
+                        /* ⚠ 不能空 catch continue (2026-11-25 修 S4): 全格失败时 list 会变成
+                           **空集而不是 null** ⇒ 对账把它当「本世不该有 job」⇒ 全删。
+                           这里逐格留痕 + 计数, 由下方「过半失败」判据整体降级为未知。 */
+                        failed++;
+                        Console.Error.WriteLine($"[tick] ExpectedJobs 单格枚举失败 ({i},{j}): {ex.GetType().Name}: {ex.Message}");
+                        continue;
+                    }
                     using var d = JsonDocument.Parse(json);
                     if (!d.RootElement.TryGetProperty("settlements", out var towns) ||
                         towns.ValueKind != JsonValueKind.Array) continue;
@@ -183,8 +218,20 @@ public sealed class MapWorldService : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[tick] ExpectedJobs 枚举失败: {ex.GetType().Name}: {ex.Message}");
-            return _expectedCache ?? Array.Empty<(string, Time.TickJobKind)>();
+            /* ⚠ 返回 null (=「本世应该有哪些 job」未知) ⇒ 泵跳过本轮对账。
+               旧实现返回 `_expectedCache ?? 空集`: 缓存为空时就是拿空集去对账 = 全删。 */
+            Console.Error.WriteLine($"[tick] ExpectedJobs 枚举失败 (整体) ⇒ 本轮跳过对账: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+
+        /* ⚠⚠ 过半格失败 ⇒ 这份 list 不可信, 按「未知」处理。
+           失效场景: VM 淘汰竞态 / bundle 漏文件 / 出口分支丢失 —— 都不抛异常到外层,
+           只会让每个格各自抛 ⇒ list 虽「非 null」却近乎空集 ⇒ 下一个对账周期
+           (默认 360 tick) 把本世所有 TownEvolve/TradeEdge job 删掉 ⇒ 整世演化静默停摆。 */
+        if (failed > 0 && failed * 2 >= Math.Max(1, cells))
+        {
+            Console.Error.WriteLine($"[tick] ExpectedJobs 失败过半 ({failed}/{cells} 格) ⇒ 本轮跳过对账");
+            return null;
         }
         lock (_expectedGate) { _expectedCache = list; _expectedAtMs = Environment.TickCount64; }
         return list;
@@ -193,6 +240,12 @@ public sealed class MapWorldService : IDisposable
     /// <summary>
     /// 把**当前世**绑定到时钟泵 (启动 / 换世后都要调)。
     /// ⚠ 拿不到当前世 ⇒ 什么都不做 (不造一个假世界)。时钟是服务端资产, 与种子同级。
+    /// ⚠⚠ 这里**绝不清理**任何轮次的子系统世态 (2026-11-25 修 S2):
+    ///   本方法在启动路径上被调一次 (`AttachTickPump`), 那时 `_ledger.Current()` 正是
+    ///   「要保留的那一世」。旧实现在这里 `ClearWorld(cur.Round)` 并把日志写成
+    ///   「换世清空…上一世」, 实际是**每次重启都删掉当前世的 CityState**
+    ///   ⇒ `EnsureInitialized` 按骨架重建初始人口 ⇒ 演化几十天的成果归零。
+    ///   清旧世统一走 <see cref="SwitchWorld"/>, 那里知道「旧 round」到底是哪一世。
     /// </summary>
     public void BindCurrentWorldToTick()
     {
@@ -201,15 +254,6 @@ public sealed class MapWorldService : IDisposable
         try
         {
             var cur = _ledger.Current();
-            /* ★ 换世清空各子系统的世态 (依赖倒置: Core 不认识 City, 由注册表遍历)。
-               ⚠ 清的是「上一世」的状态 —— 与新世的实体 id 可能同名
-                 (城 id 是 `{区域i}_{区域j}_u{n}`, 跨世会重复!) ⇒ 不清就是**跨世串味**:
-                 新世第 0 天的一座城带着上一世演化了几十年的人口继续跑。
-               ⚠ 各子系统必须实现「只删该轮次」而不是全清 —— 万一将来支持
-                 同时保留多世 (回看/回滚), 全清会误删别的世。 */
-            var removed = _subsystems.ClearWorld(cur.Round);
-            if (removed > 0)
-                Console.WriteLine($"[tick] 换世清空子系统世态: 第 {cur.Round} 世 {removed} 行 (避免跨世串味)");
             lock (_expectedGate) { _expectedCache = null; _expectedAtMs = 0; }
             pump.BindWorld(cur.Seed, cur.Round);
         }
@@ -219,6 +263,42 @@ public sealed class MapWorldService : IDisposable
                否则「时间不走」会变成一个无声的谜。 */
             Console.Error.WriteLine($"[tick] 绑定当前世失败: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 换世 (2026-11-25 修 S3): 解绑旧世 (flush 时钟 + 脏 job) → 清**旧 round** 的子系统世态
+    /// → 绑定新世。三步缺一不可:
+    ///   · 只 `_ledger.Next()` 而不重绑 ⇒ 泵的 `_binding` 还是旧 seed/round, 旧世继续写
+    ///     CityState、继续烧 V8, 新世没有 job (`_lastReconcileTick` 只在 BindWorld 里设),
+    ///     `/api/clock` 报旧世时间 ⇒ 玩家看到「换世了但时间不动、城市永不演化」。
+    ///   · 不清旧世 ⇒ 新旧世城 id 同名 (`{区域i}_{区域j}_u{n}`) ⇒ 跨世串味。
+    ///   · 清**新**世 ⇒ 刚换就归零 (正是 S2 的坑), 所以这里传的是旧 round。
+    /// </summary>
+    public void SwitchWorld(int oldRound)
+    {
+        try { _tickPump?.UnbindWorld(); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[tick] 换世解绑失败: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        if (oldRound > 0)
+        {
+            var removed = _subsystems.ClearWorld(oldRound);
+            if (removed > 0)
+                Console.WriteLine($"[tick] 换世清空子系统世态: 第 {oldRound} 世 {removed} 行 (避免跨世串味)");
+        }
+        else
+        {
+            Console.WriteLine("[tick] 换世: 无旧世可清 (ledger 为空), 直接绑定新世");
+        }
+
+        /* 换世后这些进程内缓存都按旧世的输入算出来过 —— 必须整表作废, 否则新世的地图
+           会带着旧世的聚落/人物读数 (它们不落库, 只能整清)。 */
+        _peopleCache.Clear();
+        _blockLayersCache.Clear();
+
+        BindCurrentWorldToTick();
     }
 
     public MapWorldService(ZongmenOptions opt, string contentRoot, SubsystemRegistry subsystems)
@@ -365,10 +445,15 @@ public sealed class MapWorldService : IDisposable
     ///   不清 _mem/SQLite 会在缓存淘汰后经 ReadSqlBackfill 把**旧人口**的包捞回来,
     ///   画面上表现为「演化一会儿又跳回原值」。故这里复用同一套 EvictWithGate + Bump。
     /// ⚠ 必须由**调用方**保证在 tick 泵线程外调用时的线程安全 (EvictWithGate 自带 per-key 门闩)。</summary>
-    public void MarkSettleDirty(string seed, int i, int j)
+    public void MarkSettleDirty(string seed, int ri, int rj)
     {
-        EvictWithGate(seed, i, j);
-        BumpBlockRev(seed, i, j, TileMask.Settle | TileMask.Poi);
+        EvictWithGate(seed, ri, rj);
+        /* ⚠⚠ 入参是**区域格** (f×REGION_M), 而 rev 的键是**区块格** (f×CHUNK_S + 六边形最近心归属)。
+           两套坐标系是多对多: 一个区域格会落进好几个区块, 一个区块也画着好几个区域格的聚落。
+           旧实现把区域下标直接当块下标传进来 ⇒ 在一个**不存在的块键**上 +1, 真正包含该区域的块
+           rev 不变 ⇒ 客户端带旧 lastRevs 重拉时 Need(bit)=false ⇒ 服务端缺省下发 settle/poi
+           ⇒ 建筑/人口演化**永久不可见** (无异常、无日志)。这正是上面 C5 契约描述的失效模式。 */
+        BumpRegionBlocks(seed, ri, rj, TileMask.Settle | TileMask.Poi);
         /* ★ 图层5（人物分布）的**第二处**钩子：它以 (seed, 区块) 缓存在进程内 _peopleCache 里，
            而它的输入（聚落人口）**会随 tick 演化** ⇒ 光作废落库包是不够的，进程内 LRU 也必须清，
            否则热力图永远显示旧人数（BumpBlockRev 只解决「客户端带旧 rev 重拉」，服务端 Get
@@ -376,6 +461,70 @@ public sealed class MapWorldService : IDisposable
            这里整清（容量仅 1024，且只有用户开热力图时才有热度，重建按需懒发生）。 */
         _peopleCache.Clear();
     }
+
+    /* ---------------- 区域格 → 区块格 (2026-11-25 修 S1) ----------------
+       几何参数**不在这里写死**: CHUNK_S / REGION_M 的真源是 Engine/js/mapgen.js,
+       由 metaJson 一并下发 (前端画图读的也是同一份)。这里只缓存一次
+       (两者都是与 seed 无关的编译期常量)。
+       ⚠ 区块归属在引擎里是 chunkOfTile (四候选最近心 + 固定平局序), 不是简单四舍五入;
+         这里刻意用**超集**近似 —— 对任一 tile q 必有 ca ∈ { floor(q/S), floor(q/S)+1 },
+         于是区域方阵的块区间 = [floor(qmin/S), floor(qmax/S)+1]。多标一块只是让客户端
+         多拉一次内容相同的块, 漏标才是永久陈旧。 */
+    private (int ChunkS, int RegionM)? _geoCached;
+    private readonly object _geoGate = new();
+
+    private (int ChunkS, int RegionM) GeoParams(string seed)
+    {
+        lock (_geoGate)
+        {
+            if (_geoCached.HasValue) return _geoCached.Value;
+            /* 兜底值 = 现引擎参数, 只在 metaJson 取不到时用 (会打日志, 不是静默)。 */
+            var chunkS = 21;
+            var regionM = 18;
+            try
+            {
+                using var lease = World(seed);
+                using var d = JsonDocument.Parse(lease.Vm.Call("metaJson"));
+                var r = d.RootElement;
+                if (r.TryGetProperty("chunkS", out var cs) && cs.TryGetInt32(out var v1) && v1 > 0) chunkS = v1;
+                if (r.TryGetProperty("regionM", out var rm) && rm.TryGetInt32(out var v2) && v2 > 0) regionM = v2;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[dirty] 读引擎几何参数失败, 用兜底 CHUNK_S={chunkS} REGION_M={regionM}: "
+                                      + $"{ex.GetType().Name}: {ex.Message}");
+            }
+            _geoCached = (chunkS, regionM);
+            return _geoCached.Value;
+        }
+    }
+
+    /// <summary>把某**区域格**的内容变化, 折算成「哪些**区块格**的 rev 必须前进」并逐块 Bump。
+    /// ⚠ PAD 与引擎侧 dirtyBlocksFor 的 DIRTY_BLOCK_PAD 同口径: 一个区块的 settle 层还会带上
+    ///   CHUNK_SCAN + REGION_M 内的邻格聚落, 所以光标「包含该区域的那一块」也会漏
+    ///   —— 别的块里画着同一座城, 那块不 Bump 就停在旧人口上。</summary>
+    private void BumpRegionBlocks(string seed, int ri, int rj, TileMask layers)
+    {
+        var (S, M) = GeoParams(seed);
+        const int Pad = 4;
+        var q0 = ri * M;
+        var q1 = q0 + M - 1;
+        var r0 = rj * M;
+        var r1 = r0 + M - 1;
+        var ca0 = FloorDiv(q0, S) - Pad;
+        var ca1 = FloorDiv(q1, S) + 1 + Pad;
+        var cb0 = FloorDiv(r0, S) - Pad;
+        var cb1 = FloorDiv(r1, S) + 1 + Pad;
+        for (var ca = ca0; ca <= ca1; ca++)
+            for (var cb = cb0; cb <= cb1; cb++)
+                BumpBlockRev(seed, ca, cb, layers);
+    }
+
+    /// <summary>真正的「块坐标」入口 (调用方已持有区块格)。与
+    /// <see cref="MarkSettleDirty"/> 分两个名字, 就是为了让「传的是哪套坐标」在调用点可读。</summary>
+    public void MarkBlocksDirty(string seed, int ca, int cb, TileMask layers) => BumpBlockRev(seed, ca, cb, layers);
+
+    private static int FloorDiv(int v, int d) => v >= 0 ? v / d : -((-v + d - 1) / d);
 
     /* ---------------- 区块 ---------------- */
     public byte[] GetChunkBytes(string seed, int ca, int cb)
@@ -880,10 +1029,7 @@ public sealed class MapWorldService : IDisposable
      * ============================================================ */
     private PeopleData BuildPeopleLayer(string seed, int ca, int cb)
     {
-        /* ⚠ 本文件唯一一处与子系统的**字符串耦合**: 人物战力归 characters 子系统
-           (只有它的 V8 载了 chargen-core.js)。值 = CharactersModule.CharactersScope。
-           为什么不写类型引用: Core(Services) 不许引用具体子系统类型 (ISubsystem 契约)。 */
-        const string CharactersVmScope = "characters";
+        /* 人物战力归 characters 子系统 (只有它的 V8 载了 chargen-core.js) —— scope 见下面的属性。 */
 
         var key = "ppl:" + WorldKeys.SeedPrefix(seed) + ":" + ca + ":" + cb;
         var hit = _peopleCache.Get(key);
@@ -1187,7 +1333,15 @@ public sealed class MapWorldService : IDisposable
          变的只是「这个字符串从哪来」(服务端发, 而不是前端 Date.now() 造)。 */
     public string WorldCurrentJson() => WorldJson(_ledger.Current(), "current");
 
-    public string WorldNextJson() => WorldJson(_ledger.Next(), "next");
+    /// <summary>另启一世 (轮次 +1 + 新种子)。⚠ 必须走 <see cref="SwitchWorld"/> (S3):
+    /// 只改台账不重绑时钟 ⇒ 新世永不推进、旧世在后台继续跑 (这是设置弹窗的正常操作路径)。</summary>
+    public string WorldNextJson()
+    {
+        var oldRound = _ledger.Count() == 0 ? 0 : _ledger.Current().Round;
+        var json = WorldJson(_ledger.Next(), "next");
+        SwitchWorld(oldRound);
+        return json;
+    }
 
     public string WorldListJson(int n) => JsonSerializer.Serialize(new
     {
@@ -1637,6 +1791,10 @@ public sealed class MapWorldService : IDisposable
             EvictWithGate(seed, i, j);
         }
         _blockLayersCache.Clear();
+        /* ⚠ 审查 C14: 人物层按 (seed, 区块) 缓存在**进程内** (_peopleCache), 输入是聚落人口。
+           放置宗门/城镇会改变该区域的人口派生结果 ⇒ 不清就继续显示落点前的人口,
+           直到下一次 tick 演化 (约 6 分钟) 或 LRU 淘汰。tick 路径的 MarkSettleDirty 清了, 这里漏了。 */
+        _peopleCache.Clear();
 
         const TileMask hot = TileMask.Region | TileMask.Settle | TileMask.Poi | TileMask.Comm;
         foreach (var (ca, cb) in blocks) BumpBlockRev(seed, ca, cb, hot);
@@ -1748,15 +1906,17 @@ public sealed class MapWorldService : IDisposable
     {
         _maintCts.Cancel();
         try { _maintTask.Wait(1000); } catch { /* 忽略 */ }
+        /* ★ 顺序: ① 停自维护循环 → ② 关子系统 → ③ 排空并关闭地图缓存/SQLite → ④ 台账与内存缓存。
+           ⚠ 审查 D29: 原来的代码与自己的注释**相反** (先 _sql.Dispose() 再 _subsystems.Dispose()),
+             子系统各有独立连接串、自己 flush ⇒ 先关地图库不会立刻坏, 但注释与实现不一致本身就是坑;
+             真出问题时会去改「按注释对的那一半」, 越改越乱。以注释为准。
+           子系统台账的释放交给注册表 —— Core 不认识具体子系统类型。 */
+        _subsystems.Dispose();
         _host.Dispose();
         _sql?.Flush();              // P6: 退出前排空批量写入, 尽量落库
         _sql?.Dispose();
         _ledger.Dispose();
         _sects.Dispose();
-        /* ★ 子系统台账的释放交给注册表 —— Core 不认识具体子系统类型。
-           ⚠ 必须在 _sql.Dispose() **之前**: 各子系统用的是独立的连接串 (同库不同表),
-             但它们自己 flush; 这里只保证「先关子系统, 再关地图缓存」。 */
-        _subsystems.Dispose();
         _mem.Dispose();
         _maintCts.Dispose();
     }

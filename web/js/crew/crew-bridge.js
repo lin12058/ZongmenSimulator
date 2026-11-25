@@ -49,6 +49,12 @@
 
   /* ---------------- 小工具 ---------------- */
   function isObj(x) { return x && typeof x === 'object' && !Array.isArray(x); }
+  /* 背包格数夹断: 0 会让所有 cell 判越界, 天文数字会让 new Array() 炸掉 */
+  function clampCap(v) {
+    var n = Math.round(num(v, 0));
+    if (!(n >= 1)) n = 1;
+    return Math.min(96, n);
+  }
   function num(x, d) { return typeof x === 'number' && isFinite(x) ? x : d; }
   function str(x, d) { return typeof x === 'string' ? x : (d == null ? '' : d); }
 
@@ -73,7 +79,8 @@
 
     if (errors.length) return { ok: false, errors: errors, warnings: warnings };
 
-    var bagCap = num(c.bag.capacity, M ? M.CFG.STASH_COLS * M.CFG.STASH_ROWS : 48);
+    /* ⚠ 格子数唯一真源 = bag.capacity (审查 C15); 夹到 1..96 防手改的 0 / 天文数字 */
+    var bagCap = clampCap(num(c.bag.capacity, M ? M.CFG.STASH_COLS * M.CFG.STASH_ROWS : 48));
 
     /* ---- 物品: id 唯一 / cell 不冲突 ---- */
     var byId = {}, cellUsed = {};
@@ -102,6 +109,9 @@
 
     /* ---- 成员 ---- */
     var mid = {};
+    /* 一件物品只能被「一个槽 / 一个人的队列」引用 (审查 C18):
+       原来只校验 id 存在, 重复引用会挂到多处; dump 又按 id 去重只导一次 ⇒ 静默丢件 + 两处共享副作用。 */
+    var itemRef = {};
     for (var m = 0; m < members.length; m++) {
       var p = members[m], tag = 'members[' + m + ']';
       if (!isObj(p)) { errors.push(tag + ' 不是对象'); continue; }
@@ -155,17 +165,15 @@
         }
       }
 
-      /* 装备引用 */
+      /* 队列先登记 (法宝槽 = 队列首位是内部不变量, 那一处不算重复) */
       var eq = p.equip || {};
-      for (var s = 0; s < SLOTS.length; s++) {
-        var ref = eq[SLOTS[s]];
-        if (ref == null) continue;
-        if (!byId[ref]) errors.push(tag + ': 槽位 ' + SLOTS[s] + ' 引用了不存在的物品 ' + ref);
-      }
       if (!Array.isArray(p.queue)) warnings.push(tag + ': 缺 queue, 按空队列处理');
       else {
         for (var k = 0; k < p.queue.length; k++) {
-          if (!byId[p.queue[k]]) errors.push(tag + ': 法宝队列引用了不存在的物品 ' + p.queue[k]);
+          var qid = p.queue[k];
+          if (!byId[qid]) { errors.push(tag + ': 法宝队列引用了不存在的物品 ' + qid); continue; }
+          if (itemRef[qid]) errors.push(tag + ': 物品 ' + qid + ' 被 ' + itemRef[qid] + ' 和本队队列同时引用');
+          else itemRef[qid] = tag + '.queue';
         }
         if (M && (p.queue.length < M.CFG.TALISMAN_MIN || p.queue.length > M.CFG.TALISMAN_MAX)) {
           warnings.push(tag + ': 法宝队列 ' + p.queue.length + ' 件 (应为 ' + M.CFG.TALISMAN_MIN + '~' + M.CFG.TALISMAN_MAX + ')');
@@ -173,6 +181,15 @@
         if (p.queue.length && eq.talisman && eq.talisman !== p.queue[0]) {
           warnings.push(tag + ': equip.talisman 与 queue[0] 不一致, 以 queue[0] 为准');
         }
+      }
+      /* 槽位引用 (在队列之后登记, 才能识别「同一件既穿在身上又在队列里」) */
+      for (var s = 0; s < SLOTS.length; s++) {
+        var ref = eq[SLOTS[s]];
+        if (ref == null) continue;
+        if (!byId[ref]) { errors.push(tag + ': 槽位 ' + SLOTS[s] + ' 引用了不存在的物品 ' + ref); continue; }
+        if (SLOTS[s] === 'talisman' && Array.isArray(p.queue) && p.queue[0] === ref) continue;
+        if (itemRef[ref]) errors.push(tag + ': 物品 ' + ref + ' 被 ' + itemRef[ref] + ' 与槽位 ' + SLOTS[s] + ' 同时引用');
+        else itemRef[ref] = tag + '.' + SLOTS[s];
       }
 
       /* 神通 */
@@ -214,7 +231,9 @@
     var out = { ok: v.ok, errors: v.errors, warnings: v.warnings, state: null };
     if (!v.ok || !M) return out;
 
-    var bagCap = M.CFG.STASH_COLS * M.CFG.STASH_ROWS;
+    /* ⚠ 与 validate 必须同一口径 (审查 C15): 原来校验读 bag.capacity、装载写死 48,
+       capacity=54 时 cell=50 过校验却放不下, capacity=40 时 cell=44 本可放却判越界 */
+    var bagCap = clampCap(num(c.bag.capacity, M.CFG.STASH_COLS * M.CFG.STASH_ROWS));
 
     /* 1. 物品实例表 (id → 内部 item) */
     var index = {};
@@ -239,7 +258,7 @@
 
     /* 2. 背包格子: 有 cell 的按位放, 没 cell 的依次补空位 */
     var stash = new Array(bagCap).fill(null);
-    var overflow = [];
+    var overflow = [];      // 有 cell 冲突 / 装不下 ⇒ 先攒着, 最后进 state.overflow
     for (var j = 0; j < items.length; j++) {
       var s2 = items[j], inst = index[s2.id];
       if (!inst) continue;
@@ -258,7 +277,13 @@
         if (!stash[autoCell]) { stash[autoCell] = overflow[o]; placed = true; }
         autoCell++;
       }
-      if (!placed) out.warnings.push('背包溢出: ' + overflow[o].n + ' 未放入 (容量 ' + bagCap + ')');
+      if (!placed) {
+        /* ⚠ 审查 C16: 原来只 push 一条 warning, 物品既不在 stash 也不在 gear/queue ⇒
+           下一份 dump 里直接消失 (静默丢件)。现在放进 state.overflow, dump 照样导出。 */
+        if (!out.state) out.state = {};
+        (out.state.overflow || (out.state.overflow = [])).push(overflow[o]);
+        out.warnings.push('背包溢出: ' + overflow[o].n + ' 暂存溢出区 (容量 ' + bagCap + ')');
+      }
     }
 
     /* 3. 成员 */
@@ -367,9 +392,13 @@
       };
 
       /* 当前气血/灵力: 上限由 attrs 现算, 这里只存当前值 */
+      /* ⚠ 缺 vit 时不建对象, dump 又写 {hp:0,mp:0} ⇒ 一次往返后 vitalOf 夹到 0, 面板 0% (审查 C17)。
+         这里先记「缺」, 等 attrs 能算上限了再补满 (见第 4 步)。 */
       var vit = isObj(src2.vit) ? src2.vit : null;
       if (vit) {
         pawn.vit = { hp: Math.round(num(vit.hp, 0)), mp: Math.round(num(vit.mp, 0)) };
+      } else {
+        pawn.vitMissing = true;
       }
       pawns.push(pawn);
     }
@@ -377,23 +406,70 @@
     /* 4. 副作用: 修 vit 到上限内 (attrs 需要完整 pawn) */
     for (var pi = 0; pi < pawns.length; pi++) {
       var pv0 = pawns[pi];
-      if (!pv0.vit) continue;
       var aa = M.attrs(pv0);
+      if (!pv0.vit) {
+        /* 契约没给 vit ⇒ 按**满**处理 (原来留空, dump 成 0/0, 再装就 0%) */
+        pv0.vit = { hp: aa.hp, mp: aa.mp };
+        delete pv0.vitMissing;
+        continue;
+      }
       pv0.vit.hp = Math.max(0, Math.min(aa.hp, pv0.vit.hp));
       pv0.vit.mp = Math.max(0, Math.min(aa.mp, pv0.vit.mp));
     }
 
+    /* 4b. 多小队分组 (2026-11-25 修 S5)
+       ⚠ 契约分两层: 平面 `squad.members` (全员名单, 老后端/老存档也这么给) + 可选 `squads[]`
+         (谁在哪队 / 队内第几位 / 队名 / 队序)。成员归属的唯一真源仍是 `squads[].members`
+         的**数组顺序** —— 不另存 position, 两份数据一定会漂。
+       ⚠ 缺 `squads[]` ⇒ 退化成「一队装全员」(与 normalizeSquads 的补队口径一致);
+         旧实现**只**造单队字段 ⇒ 多队分组、站位、队名一次往返全丢。 */
+    var havePawn = {}, sqOut = [], sqSeen = {}, si, h0;
+    for (h0 = 0; h0 < pawns.length; h0++) havePawn[pawns[h0].id] = 1;
+    var sqSrc = Array.isArray(c.squads) ? c.squads : null;
+    if (sqSrc) {
+      for (si = 0; si < sqSrc.length; si++) {
+        var s0 = isObj(sqSrc[si]) ? sqSrc[si] : {};
+        var sid = str(s0.id, 'sq' + (si + 1));
+        /* 队 id 撞了就换一个 —— 留给 normalizeSquads 去撞只会触发它的去重分支 */
+        while (sqSeen[sid]) { sid = sid + '_' + (si + 1); }
+        sqSeen[sid] = 1;
+        var ms0 = [], list0 = Array.isArray(s0.members) ? s0.members : [];
+        for (var m0 = 0; m0 < list0.length; m0++) {
+          var pid0 = list0[m0];
+          if (havePawn[pid0] && ms0.indexOf(pid0) < 0) ms0.push(pid0);
+        }
+        if (ms0.length !== list0.length) out.warnings.push('squads[' + si + '] 有成员不在名单里, 已剔除');
+        sqOut.push({ id: sid, name: str(s0.name, '') || M.SQUAD_DEFAULT_NAMES[si] || '小队', members: ms0 });
+      }
+    }
+    if (!sqOut.length) {
+      var allIds = [];
+      for (h0 = 0; h0 < pawns.length; h0++) allIds.push(pawns[h0].id);
+      sqOut.push({ id: 'sq1', name: M.SQUAD_DEFAULT_NAMES[0], members: allIds });
+    }
+    var curSq = str(c.curSquad, ''), curOk = false;
+    for (si = 0; si < sqOut.length; si++) if (sqOut[si].id === curSq) curOk = true;
+    if (!curOk) curSq = sqOut[0].id;
+
     out.state = {
       revision: num(c.revision, 0),
-      squadId: str(c.squad.id, 'squad-1'),
-      squadName: str(c.squad.name, '小队'),
+      squadId: curSq,
+      squadName: (function () {
+        for (var q0 = 0; q0 < sqOut.length; q0++) if (sqOut[q0].id === curSq) return sqOut[q0].name;
+        return str(c.squad.name, '小队');
+      })(),
+      squads: sqOut,
+      curSquad: curSq,
       capacity: Math.round(num(c.squad.capacity, M.CFG.STASH_ROWS)),
       pawns: pawns,
       jobs: (Array.isArray(c.jobs) && c.jobs.length) ? c.jobs : M.JOBS.slice(),
       stash: stash,
+      overflow: (out.state && out.state.overflow) || [],
       tickAt: 0
     };
     lastContract = JSON.parse(JSON.stringify(c));
+    /* 本地 rev 跟着契约走: 事件里的 base 必须等于「客户端看到的 rev」(§14.8) */
+    EV.base = num(c.revision, 0);
     return out;
   }
 
@@ -440,6 +516,8 @@
       for (var s = 0; s < SLOTS.length; s++) pushItem(pw.gear[SLOTS[s]], null, pw.id);
       for (var q = 0; q < pw.queue.length; q++) pushItem(pw.queue[q], null, pw.id);
     }
+    /* 溢出区 (装不进格子的东西) 也必须导出, 否则一次往返就丢 (审查 C16) */
+    for (var ov = 0; ov < (state.overflow || []).length; ov++) pushItem(state.overflow[ov], null, null);
 
     /* 2. 成员 */
     var oldMembers = {};
@@ -492,19 +570,51 @@
         queueFrom: pm.queueFrom,
         arts: { slots: pm.arts.slots.map(function (a) { return { n: a.n, rank: a.rank, cost: a.cost }; }),
                 cap: pm.arts.cap, from: pm.arts.from },
-        vit: { hp: pm.vit ? pm.vit.hp : 0, mp: pm.vit ? pm.vit.mp : 0 },
+        /* 一律走 vitalOf: 缺 vit 时按上限算, 不再写 0/0 (审查 C17) */
+        vit: (function () {
+          var vv = M && M.vitalOf ? M.vitalOf(pm) : null;
+          return vv ? { hp: vv.hp, mp: vv.mp } : { hp: pm.vit ? pm.vit.hp : 0, mp: pm.vit ? pm.vit.mp : 0 };
+        })(),
         activity: activity,
         prio: clonePrio(pm.prio)
       });
     }
 
+    /* 多小队 (2026-11-25 修 S5): 队序 + 队名 + 队内站位照 state.squads **原样**导出。
+       ⚠ 旧 dump 把全量 pawns 塞进单个 squad ⇒ 分组/队名/站位/当前队一次往返全丢。
+       ⚠ 手改过 / 新招进来的弟子由 normalizeSquads 收回第一队, 保证「导出的人一个都不少」。 */
+    var squadsOut = [], sqList = state.squads;
+    if (M && M.normalizeSquads) sqList = M.normalizeSquads(state);
+    if (!Array.isArray(sqList) || !sqList.length) {
+      sqList = [{
+        id: state.squadId || 'squad-1',
+        name: state.squadName || '小队',
+        members: state.pawns.map(function (pp) { return pp.id; })
+      }];
+    }
+    for (var sq2 = 0; sq2 < sqList.length; sq2++) {
+      squadsOut.push({
+        id: sqList[sq2].id,
+        name: sqList[sq2].name,
+        members: (sqList[sq2].members || []).slice()
+      });
+    }
+    var curSqOut = state.curSquad || (squadsOut[0] ? squadsOut[0].id : 'squad-1');
+
     var out = {
       version: VERSION,
       revision: num(state.revision, 0),
       updatedAt: Date.now(),
+      squads: squadsOut,
+      curSquad: curSqOut,
       squad: {
-        id: state.squadId || 'squad-1',
-        name: state.squadName || '小队',
+        /* 这一棵是**向后兼容的单队视图**: id/name 指向当前队, members 仍是**全员平面名单**
+           (hydrate 从 c.squad.members 建 pawns, 少一个人就少一个弟子) —— 分组信息在 squads[]。 */
+        id: curSqOut,
+        name: (function () {
+          for (var q1 = 0; q1 < squadsOut.length; q1++) if (squadsOut[q1].id === curSqOut) return squadsOut[q1].name;
+          return state.squadName || '小队';
+        })(),
         capacity: state.capacity || (M ? M.CFG.STASH_ROWS : 8),
         members: members
       },
@@ -592,22 +702,99 @@
     return out;
   }
 
-  /* ---- 事件: 玩家改数据 → 后端要知道 ---- */
+  /* ---- 事件流 (契约: docs/小队背包数据接口.md §14) ----
+     ⚠ 只发事件, **不发整份 contract** (§14.0): 整份契约会把服务端正在跑的 activity/vit 覆盖回去,
+       业务规则被复制到两端, 冲突也无法定位。
+     信封 {v,id,seq,base,at,type,data}; data 只放 id 与目标值, 禁放派生值 (§14.3)。
+     ⚠ 只有接了后台 (autoMount 成功 / configureEvents 显式打开) 才入队: 纯前端演示态没有写通道,
+       入队只会攒成一坨没人取的内存垃圾。 */
   var listeners = [];
+  var EV = {
+    enabled: false,
+    endpoint: '/api/crew/events',
+    v: 1,
+    seq: 0,
+    base: 0,
+    queue: [],
+    timer: 0,
+    windowMs: 300,        // §14.8: 攒 300ms 合并窗口
+    maxBatch: 20,
+    sending: false,
+    lastError: null
+  };
+  var evtCounter = 0;
 
-  function emit(kind, detail) {
-    var ev = { kind: kind, at: Date.now(), detail: detail || null, contract: null };
+  function evtId() {
+    evtCounter++;
+    var rnd = Math.floor(Math.random() * 0x100000).toString(36);
+    return 'evt_' + Date.now().toString(36) + '_' + evtCounter.toString(36) + rnd;
+  }
+
+  /* 一条事件 = 一次用户意图。type 见 §14.4, data 只放 id + 目标值。 */
+  function notify(type, data) {
+    var ev = {
+      v: EV.v, id: evtId(), seq: ++EV.seq, base: EV.base,
+      at: Date.now(), type: String(type || ''), data: data || {}
+    };
+    if (EV.enabled) { EV.queue.push(ev); scheduleFlush(); }
     for (var i = 0; i < listeners.length; i++) {
-      try {
-        /* 延迟到调用方用完栈再 dump, 避免事件里拿到半截状态 */
-        (function (fn, e2) {
-          setTimeout(function () {
-            e2.contract = getContract();
-            try { fn(e2); } catch (err) { console.error('[crew] onChange 抛错', err); }
-          }, 0);
-        })(listeners[i], ev);
-      } catch (err) { console.error('[crew] onChange 失败', err); }
+      try { listeners[i](ev); } catch (err) { console.error('[crew] onChange 抛错', err); }
     }
+    return ev;
+  }
+
+  function scheduleFlush() {
+    if (!EV.enabled || EV.timer) return;
+    EV.timer = setTimeout(function () { EV.timer = 0; flushEvents(); }, EV.windowMs);
+  }
+
+  /* 发一批 (最多 20 条)。网络/业务失败都**留在队列**重发 —— 幂等键保证不会重复执行 (§14.7) */
+  function flushEvents() {
+    if (!EV.enabled || EV.sending || !EV.queue.length) return Promise.resolve(null);
+    var batch = EV.queue.splice(0, EV.maxBatch);
+    EV.sending = true;
+    return fetch(EV.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base: EV.base, events: batch })
+    }).then(function (r) {
+      return r.json().catch(function () { return null; });
+    }).then(function (res) {
+      EV.sending = false;
+      EV.lastError = null;
+      if (!res) { EV.queue = batch.concat(EV.queue); return null; }
+      /* §14.8 冲突: 服务端整份回推 ⇒ 本地整份重装, 队列作废 (这些意图已经过期) */
+      if (res.resync && res.state) {
+        EV.queue.length = 0;
+        /* ⚠ 顺序: mount → hydrate 会用 state.revision 把 base 重设回旧值,
+           所以服务端 rev 必须在 mount **之后**落地 (§14.8 step 4: 本地 rev 跟上服务端) */
+        mount(res.state, { localTick: false });
+        EV.base = num(res.rev, EV.base);
+        return res;
+      }
+      if (res.ok) EV.base = num(res.rev, EV.base + 1);
+      else EV.queue = batch.concat(EV.queue);
+      return res;
+    }).catch(function (e) {
+      EV.sending = false;
+      EV.lastError = String(e && e.message || e);
+      EV.queue = batch.concat(EV.queue);
+      console.warn('[crew] 事件发送失败 (留队列 ' + EV.queue.length + '): ' + EV.lastError);
+      return null;
+    });
+  }
+
+  function configureEvents(opts) {
+    opts = opts || {};
+    if (typeof opts.enabled === 'boolean') EV.enabled = opts.enabled;
+    if (opts.endpoint) EV.endpoint = opts.endpoint;
+    if (opts.base != null) EV.base = num(opts.base, EV.base);
+    if (opts.queue === true) scheduleFlush();
+    return eventState();
+  }
+  function eventState() {
+    return { enabled: EV.enabled, endpoint: EV.endpoint, base: EV.base, seq: EV.seq,
+             pending: EV.queue.length, sending: EV.sending, lastError: EV.lastError };
   }
 
   function onChange(fn) {
@@ -616,27 +803,56 @@
   }
 
   /* 包装写操作: 面板里 `var M = g.CrewModel` 存的是对象引用,
-     替换属性后它照样走包装版 —— UI 代码零改动。 */
+     替换属性后它照样走包装版 —— UI 代码零改动。
+     ⚠ 审查 C7: 原来只包 4 个 (equip/unequip/useItem/cyclePriority), movePawn 漏了;
+       type 用简写 use/prio 与契约 item.use/job.priority 不符; detail.args 塞的是**对象引用**
+       (序列化时变成整个 pawn / 整格 stash), 契约要的是 id。 */
   var wrapped = false;
   function wrapWrites() {
     if (wrapped) return;
     var M = model();
     if (!M) return;
     wrapped = true;
-    var names = ['equip', 'unequip', 'useItem', 'cyclePriority'];
-    var kinds = { equip: 'equip', unequip: 'unequip', useItem: 'use', cyclePriority: 'prio' };
-    for (var i = 0; i < names.length; i++) {
-      (function (name) {
-        var orig = M[name];
+    var specs = [
+      { name: 'equip', type: 'item.equip', pre: function (a) {
+          var stash = a[1], idx = Math.round(num(a[2], -1)), it = stash && stash[idx];
+          return it ? { pawnId: a[0] && a[0].id, itemId: it.id } : null;
+        } },
+      { name: 'unequip', type: 'item.unequip', pre: function (a) {
+          return a[0] ? { pawnId: a[0].id, slot: str(a[2], '') } : null;
+        } },
+      { name: 'useItem', type: 'item.use', pre: function (a) {
+          var stash = a[1], idx = Math.round(num(a[2], -1)), it = stash && stash[idx];
+          return it ? { pawnId: a[0] && a[0].id, itemId: it.id } : null;
+        } },
+      { name: 'cyclePriority', type: 'job.priority',
+        pre: function (a) { return a[0] ? { pawnId: a[0].id, jobId: str(a[1], ''), value: 0 } : null; },
+        post: function (data, res) { data.value = Math.max(0, Math.min(4, Math.round(num(res, 0)))); return data; } },
+      { name: 'movePawn', type: 'member.move', pre: function (a) {
+          return a[1] ? { pawnId: a[1], toSquadId: str(a[2], ''),
+                          toPos: a[3] == null ? null : Math.round(num(a[3], 0)) } : null;
+        } }
+    ];
+    for (var i = 0; i < specs.length; i++) {
+      (function (spec) {
+        var orig = M[spec.name];
         if (typeof orig !== 'function') return;
-        M[name] = function () {
+        M[spec.name] = function () {
+          /* ⚠ 数据必须在**调用前**抓 (审查 C7): equip/useItem 会把 stash[idx] 换成旧装备,
+             调用后再读拿到的是「换下来的那件」, 事件里的 itemId 就指向了错的物品。 */
+          var data = null;
+          if (spec.pre) { try { data = spec.pre(arguments); } catch (e) { data = null; } }
           var res = orig.apply(M, arguments);
-          if (res && res.ok !== false) {
-            emit(kinds[name], { args: Array.prototype.slice.call(arguments, 0, 2), res: res });
+          /* ⚠ 不能写 `if (res && ...)`: cyclePriority 合法返回 **0** (优先级 0 = 不干),
+             0 是 falsy ⇒ 那一次「把活关掉」的事件永远发不出去。只认显式失败。 */
+          var failed = (res === false) || (!!res && res.ok === false);
+          if (!failed) {
+            if (spec.post && data) { try { data = spec.post(data, res); } catch (e) { /* 保持 pre 结果 */ } }
+            if (data) notify(spec.type, data);
           }
           return res;
         };
-      })(names[i]);
+      })(specs[i]);
     }
   }
 
@@ -654,6 +870,8 @@
       .then(function (c) {
         /* 从后台拿的数据一律关掉本地推进: 谁在干什么由服务端说了算 */
         var res = mount(c, { localTick: false });
+        /* 拉到后台契约 ⇒ 说明有服务端, 打开事件通道 (演示态不开) */
+        if (res.ok) EV.enabled = true;
         if (!res.ok) console.error('[crew] 契约装载失败', res.errors);
         else if (res.warnings.length) console.warn('[crew] 契约告警', res.warnings);
         return res;
@@ -669,6 +887,10 @@
     mount: mount,
     patch: patch,
     onChange: onChange,
+    notify: notify,
+    flushEvents: flushEvents,
+    configureEvents: configureEvents,
+    eventState: eventState,
     getContract: getContract,
     autoMount: autoMount,
     wrapWrites: wrapWrites

@@ -285,8 +285,19 @@ public sealed class JsVmPool : IDisposable
     {
         lock (_lock)
         {
-            foreach (var vm in _vms.Values) vm.Dispose();
+            /* ⚠ 审查 C12: LRU 淘汰 (EvictLocked) 遵守了「在途不 Dispose」, 进程级 Dispose 却没遵守。
+               Dispose 一个正在跑 Call 的 V8ScriptEngine 会**直接崩进程** (JsVm 文件头写着),
+               而关机时 ApplicationStopping 只 UnbindWorld、不等当前 tick ⇒ 并发路径真实存在。
+               跳过在途实例并留痕: 它们由进程退出回收, 比带崩进程好。 */
+            var busy = 0;
+            foreach (var vm in _vms.Values)
+            {
+                if (vm.InFlight > 0) { busy++; continue; }
+                vm.Dispose();
+            }
             _vms.Clear();
+            if (busy > 0)
+                Console.Error.WriteLine($"[jsvm] 退出时仍有 {busy} 个 VM 正在执行 JS, 已跳过 Dispose (交给进程退出回收)");
         }
     }
 }

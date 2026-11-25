@@ -109,7 +109,7 @@ public sealed class TickPump : BackgroundService
     /// 返回 `(EntityId, Kind)[]`; ⚠ **未注册（null）= 「本世有哪些 job」无人知晓 ⇒ 跳过对账**,
     ///   绝不退回演示心跳 —— 那是 2026-10-11 之前的旧行为, 会造出注定失败的 job
     ///   （详见 <see cref="TickOptions.EnableDemoHeartbeat"/> 的教训）。</summary>
-    public Func<string, int, long, IReadOnlyList<(string EntityId, TickJobKind Kind)>>? ExpectedJobsProvider { get; set; }
+    public Func<string, int, long, IReadOnlyList<(string EntityId, TickJobKind Kind)>?>? ExpectedJobsProvider { get; set; }
 
     /// <summary>P2: job 执行**成功后**的回调 (写派生层/推进区块 rev 的挂点)。
     /// ⚠ 由 TickPump 在 ApplyOutcome 里调用 ⇒ 这正是方案要求的「唯一写世界入口」。
@@ -195,8 +195,12 @@ public sealed class TickPump : BackgroundService
 
     // ══ 主循环 ═══════════════════════════════════════════════════════
 
+    /* ⚠ 主机的停止令牌: tick 体 (RunOnce/Execute) 拿不到 ExecuteAsync 的形参, 存一份给它。 */
+    private CancellationToken _stopToken = CancellationToken.None;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _stopToken = stoppingToken;
         if (!_opt.TickEnabled)
         {
             _log.LogInformation("[tick] TickEnabled=false，时钟不启动");
@@ -293,7 +297,9 @@ public sealed class TickPump : BackgroundService
                 TickRunReport report;
                 try
                 {
-                    report = _executor.Execute(batch, nowTick, _metrics, CancellationToken.None);
+                    /* ⚠ 审查 D27: 原来传 CancellationToken.None ⇒ 一个含 49 格扫描的 tick
+                       在关机时无法打断。stoppingToken 在 ExecuteAsync 里存进 _stopToken。 */
+                    report = _executor.Execute(batch, nowTick, _metrics, _stopToken);
                 }
                 catch (Exception ex)
                 {
@@ -481,8 +487,13 @@ public sealed class TickPump : BackgroundService
         {
             try
             {
+                var expectedList = provider(b.Seed, b.Round, tick);
+                /* ⚠ provider 返回 null = 「本世应该有哪些 job」**未知** (它内部已留痕) ⇒ 跳过对账。
+                   下面 foreach 见到 null 会抛 NullReferenceException 被 catch 成「provider 失败」,
+                   语义虽然一样, 但会多刷一条 LogError 把「未知」伪装成「崩了」。 */
+                if (expectedList is null) return null;
                 var list = new List<TickJob>();
-                foreach (var (entityId, kind) in provider(b.Seed, b.Round, tick))
+                foreach (var (entityId, kind) in expectedList)
                 {
                     if (string.IsNullOrEmpty(entityId)) continue;
                     list.Add(_registry.NewJob(b.Seed, b.Round, entityId, kind, tick));

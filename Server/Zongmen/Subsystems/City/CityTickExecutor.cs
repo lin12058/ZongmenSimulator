@@ -114,6 +114,14 @@ public sealed class CityTickExecutor : ITickExecutor
             var vm = lease.Vm;
             foreach (var job in mine)
             {
+                /* ⚠ 审查 D27: 关机时不许硬等整批跑完 (49 格扫描 × N 城)。
+                   剩下的 job 报「未应用」交给上层 DeferUnapplied 顺延 —— 静默跳过
+                   等于这几城的这一天凭空消失。 */
+                if (ct.IsCancellationRequested)
+                {
+                    outcomes.Add(new TickOutcome(job, false, "stopping", 0, 0, 0));
+                    continue;
+                }
                 var jsSw = Stopwatch.StartNew();
                 int bytesIn = 0, bytesOut = 0;
                 try

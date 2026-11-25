@@ -77,10 +77,15 @@
     return null;
   }
   function curPawn() { return pawnById(selId) || (state && state.pawns[0]) || null; }
+  /* ⚠ 名字缺失时 charAt 会抛 TypeError, 而两页都是整页 innerHTML 赋值 ⇒ 一条脏数据让整页空白 (审查 D20) */
+  function avChar(p) { return String((p && p.name) || '').charAt(0) || '?'; }
   function isMobile() { return !!(g.matchMedia && g.matchMedia('(max-width: 760px)').matches); }
   function qText(v) { return M.QUALITY[(v || 1) - 1] + '品'; }
-  function wt(v) { return (Math.round(v * 10) / 10).toFixed(1); }
-  function fmt(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+  /* ⚠ 任何数值进来都先过 finite 兜底 (审查 D19): 缺 w 会显示「重 NaN」,
+     缺 exp 会显示「修为 undefined/1000 (NaN%)」 */
+  function numOr(v, d) { return typeof v === 'number' && isFinite(v) ? v : d; }
+  function wt(v) { return (Math.round(numOr(+v, 0) * 10) / 10).toFixed(1); }
+  function fmt(n) { return String(numOr(n, 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
   /* ---------- 样式注入 ---------- */
   function injectCss() {
@@ -234,8 +239,13 @@
       if (cell) { stashSel = +cell.getAttribute('data-idx'); renderBagPage(); return; }
       var act = e.target.closest ? e.target.closest('[data-act]') : null;
       if (!act) return;
-      if (act.getAttribute('data-act') === 'equip') doEquip();
-      else if (act.getAttribute('data-act') === 'unequip') doUnequip(act.getAttribute('data-slot'));
+      /* ⚠ 本页详情卡对丹药/功法就输出 data-act="use" (showStashDetail), 与能力页同一个按钮形状。
+         旧实现只处理 equip/unequip ⇒ 点「服用 / 研习」直接落到 else 之外, 什么也不发生
+         (不弹提示、不消耗、无任何反馈 —— 用户只会以为界面卡了)。 */
+      var a = act.getAttribute('data-act');
+      if (a === 'equip') doEquip();
+      else if (a === 'unequip') doUnequip(act.getAttribute('data-slot'));
+      else if (a === 'use') doUse();
     });
 
     /* 任务页: 优先级矩阵 */
@@ -259,6 +269,10 @@
     isOpen = !!v;
     els.panel.classList.toggle('open', isOpen);
     els.entry.classList.toggle('off', isOpen);
+    /* ⚠ 审查 D23: 关闭态只有 opacity:0 ⇒ 看不见但还能 tab 进去、读屏也会念。
+       aria-hidden 管无障碍树, inert 管 Tab 序列与点击 (老浏览器没有 inert 就只降级成 aria-hidden)。 */
+    els.panel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+    if ('inert' in els.panel) els.panel.inert = !isOpen;
     syncMask();
     if (isOpen) { renderAll(); startTick(); } else stopTick();
   }
@@ -294,7 +308,8 @@
     var nSq = state.squads ? state.squads.length : 1;
     els.sub.innerHTML = '<b>' + nSq + '</b> 支小队 · <b>' + state.pawns.length + '</b> 人 · 心境 <b>' +
       Math.round(mood / Math.max(1, state.pawns.length)) + '</b> · 在役 <b>' + busy +
-      '</b> · 负重 <b>' + wt(M.teamWeight(state)) + '</b>';
+      /* ⚠ 审查 D18: 头行是「全宗含背包」, 队头是「本队穿戴」—— 两个口径不能都叫「负重」 */
+      '</b> · 全宗负重 <b>' + wt(M.teamWeight(state)) + '</b>';
   }
 
   /* ---------- 属性行: 六项一行 (队伍/能力共用形状, 只是字号不同) ---------- */
@@ -350,13 +365,13 @@
     var arts = [], j;
     for (j = 0; j < p.arts.slots.length; j++) arts.push(p.arts.slots[j].n);
     var e = M.expOf(p), v = M.vitalOf(p);
-    return '<div class="rp-row' + (p.id === selId ? ' cur' : '') + '" data-id="' + p.id + '" role="button" tabindex="0">' +
-      '<span class="rp-av">' + esc(p.name.charAt(0)) + '</span>' +
+    return '<div class="rp-row' + (p.id === selId ? ' cur' : '') + '" data-id="' + esc(p.id) + '" role="button" tabindex="0">' +
+      '<span class="rp-av">' + esc(avChar(p)) + '</span>' +
       '<span class="rp-main">' +
         '<span class="rp-line"><b class="rp-n">' + esc(p.name) + '</b>' +
           '<em class="rp-meta">' + esc(p.role) + ' · ' + esc(p.realm) + '</em>' +
           '<span class="rp-exp">修为 ' + fmt(e.v) + '</span>' +
-          '<button type="button" class="rp-mvb" data-act="mv" data-pawn="' + p.id + '" ' +
+          '<button type="button" class="rp-mvb" data-act="mv" data-pawn="' + esc(p.id) + '" ' +
             'title="移到其他小队">移</button>' +
         '</span>' +
         '<span class="rp-attrs">' + attrStrip(p, 'ra', max) + '</span>' +
@@ -385,7 +400,7 @@
         '<span class="sq-grip" aria-hidden="true"></span>' +
         '<span class="sq-n">' + esc(sq.name) + '</span>' +
         '<em class="sq-c">' + list.length + ' 人</em>' +
-        '<span class="sq-wt">负重 ' + wt(M.teamWeight(list)) + '</span>' +
+        '<span class="sq-wt" title="只算本队穿戴，不含宗门背包">穿戴 ' + wt(M.teamWeight(list)) + '</span>' +
         (total > 1
           ? '<button type="button" class="sq-x' + (delAsk === sq.id ? ' ask' : '') + '" data-sqdel="' + esc(sq.id) + '" ' +
             'title="' + (delAsk === sq.id ? '再点一次确认解散' : '解散此小队（人回第一队）') + '">' +
@@ -436,12 +451,23 @@
   /* ---------- 队伍页动作 ---------- */
   /* 跳到某一支小队那一段: 设当前队 + 高亮闪一下 + 滚到段首
      (入口条点队名、新建队、点队头都走这里) */
+  /* ⚠ 审查 C4: 不要用 '.sq-sec[data-sq="' + id + '"]' 拼选择器 —— id 里带引号会抛
+     SyntaxError, 整个点击处理直接失效; 渲染侧用了 esc(), 读写必须同一套。 */
+  function findSec(id) {
+    var list = els.squad ? els.squad.querySelectorAll('.sq-sec') : [];
+    for (var i = 0; i < list.length; i++) if (list[i].getAttribute('data-sq') === id) return list[i];
+    return null;
+  }
+
   function jumpToSquad(id, noScroll) {
     if (!state || !M.squadById(state, id)) return;
     state.curSquad = id;
     moveFor = null;
+    /* ⚠ 审查 C20: 原来只 renderEntry ⇒ 入口条亮新队、队伍页仍高亮旧队,
+       只剩 1.5s 的 flash 短暂指认; 顺带清掉残留的「移到」菜单 (moveFor 已置空) */
     renderEntry();
-    var sec = els.squad.querySelector('.sq-sec[data-sq="' + id + '"]');
+    renderSquadPage();
+    var sec = findSec(id);
     if (!sec) { save(); return; }
     var olds = els.squad.querySelectorAll('.sq-sec.flash');
     for (var i = 0; i < olds.length; i++) olds[i].classList.remove('flash');
@@ -468,6 +494,7 @@
     updateSub();
     renderSquadPage();
     jumpToSquad(id);                            // 新建后直接滚到新段
+    notifyEvent('squad.create', { name: name });
     toast('新建「' + name + '」 · 用弟子行尾的「移」把人调进来');
   }
   function removeSquad(id) {
@@ -485,6 +512,9 @@
       toast('再点一次「确认」解散 · 人不会丢');
       return;
     }
+    /* ⚠ 审查 C3: × 换成「确认」是原地改字、按钮右边缘不动 ⇒ 双击第二下直接命中这里。
+       解法不是时间窗 (那会把正常操作也挡住), 而是**换位置**: 确认态按钮用 CSS order:-1
+       跳到队头最左, 双击第二下落在原来的位置 (队名/空白) 上, 打不中。见 .sq-x.ask */
     delAsk = null;
     clearTimeout(delAskTimer);
     var gone = sqs.splice(at, 1)[0];
@@ -494,6 +524,7 @@
     updateSub();
     renderSquadPage();
     save();
+    notifyEvent('squad.disband', { squadId: id, toSquadId: sqs[0].id });
     toast('已解散「' + gone.name + '」 · ' + gone.members.length + ' 人回到「' + sqs[0].name + '」');
   }
   /* 移空提示: 小队没人了, 背包不跟着消失 —— 全宗只有一份背包, 负重归 0 */
@@ -517,7 +548,7 @@
 
   /* 双击队头 → 就地改名 (≤4 字; 回车/失焦提交, Esc 取消) */
   function beginRename(sqId) {
-    var sec = els.squad.querySelector('.sq-sec[data-sq="' + sqId + '"]');
+    var sec = findSec(sqId);
     var sq = M.squadById(state, sqId);
     if (!sec || !sq) return;
     var n = sec.querySelector('.sq-hd .sq-n');
@@ -539,7 +570,11 @@
       inp.parentNode.removeChild(inp);
       n.style.display = '';
       renderSquadPage();
-      if (commit) { save(); toast('已改名为「' + sq.name + '」'); }
+      if (commit) {
+        save();
+        notifyEvent('squad.rename', { squadId: sqId, name: sq.name });
+        toast('已改名为「' + sq.name + '」');
+      }
     };
     inp.addEventListener('keydown', function (ev) {
       if (ev.isComposing) return;                      // 输入法选字时的回车不算提交
@@ -562,13 +597,21 @@
    * · 松手读 DOM 顺序 → onDone(ids) 写回数据层
    * ⚠ 拖动结束浏览器还会补一次 click ⇒ eatClick() 吃掉, 否则一拖就跳进能力页
    * ============================================================ */
-  var _drag = null, _eatClick = false, _eatTimer = 0;
-  /* 只吃「拖动松手后紧跟的那一次」click:
-     ⚠ 不能做成 500ms 时间窗 —— 窗口内所有点击都会被吞 (连解散/切队都点不动) */
+  var _drag = null, _eatClick = false, _eatTimer = 0, _eatAt = 0;
+  /* 只吃「拖动松手后紧跟的那一次」click。
+     ⚠ 审查 D22: 原实现就是一个 400ms 时间窗 (标志 + 定时器), 窗口内玩家点解散/切队也照样被吞。
+        现在窗口收到 120ms —— 浏览器补发的 click 在同一任务后立即到达, 人手连点至少 200ms。 */
   function eatClick() {
     if (!_eatClick) return false;
     _eatClick = false;
-    return true;
+    clearTimeout(_eatTimer);
+    return Date.now() - _eatAt < 120;
+  }
+  function markEatClick() {
+    _eatClick = true;
+    _eatAt = Date.now();
+    clearTimeout(_eatTimer);
+    _eatTimer = setTimeout(function () { _eatClick = false; }, 120);
   }
 
   function bindSortables() {
@@ -691,9 +734,7 @@
     var drops = st.secs.querySelectorAll('.sq-sec.drop');
     for (var i = 0; i < drops.length; i++) drops[i].classList.remove('drop');
     try { st.secs.releasePointerCapture(st.id); } catch (e) { /* noop */ }
-    _eatClick = true;                                  // 松手后浏览器补的 click 要吃掉
-    clearTimeout(_eatTimer);
-    _eatTimer = setTimeout(function () { _eatClick = false; }, 400);
+    markEatClick();                                    // 松手后浏览器补的 click 要吃掉
     applyPawnDrop(st);
   }
 
@@ -720,6 +761,20 @@
     }
     var from = M.squadById(state, st.fromSq), to = M.squadById(state, st.toSq);
     var emptied = !!(from && from.members.length === 0);
+    /* §14.6: 一次拖动 = 一条 member.move, 只发被拖的那个人 */
+    if (st.el && st.toSq) {
+      var draggedId = st.el.getAttribute ? st.el.getAttribute('data-id') : null;
+      var posOut = 0;
+      for (i = 0; i < lists.length; i++) {
+        if (lists[i].getAttribute('data-sq') !== st.toSq) continue;
+        var rowsOut = lists[i].querySelectorAll('.rp-row');
+        for (j = 0; j < rowsOut.length; j++) {
+          if (rowsOut[j].getAttribute('data-id') === draggedId) { posOut = j; break; }
+        }
+        break;
+      }
+      if (draggedId) notifyEvent('member.move', { pawnId: draggedId, toSquadId: st.toSq, toPos: posOut });
+    }
     updateSub();
     renderSquadPage();
     save();
@@ -767,16 +822,14 @@
     st.host.classList.remove('sorting');
     document.body.classList.remove('crew-sorting');
     try { st.host.releasePointerCapture(st.id); } catch (e) { /* noop */ }
-    _eatClick = true;                                  // 松手后浏览器补的那一次 click 要吃掉
-    clearTimeout(_eatTimer);
-    _eatTimer = setTimeout(function () { _eatClick = false; }, 400);
+    markEatClick();                                    // 松手后浏览器补的那一次 click 要吃掉
     var ids = [], i;
     for (i = 0; i < st.host.children.length; i++) {
       var k = st.host.children[i];
       if (!k.classList || !k.classList.contains(st.cls)) continue;
       ids.push(st.cls === 'sq-sec' ? k.getAttribute('data-sq') : k.getAttribute('data-id'));
     }
-    if (st.done) st.done(ids, st.host);
+    if (st.done) st.done(ids, st.host, st.el);
   }
 
   document.addEventListener('pointermove', function (e) {
@@ -838,13 +891,20 @@
     renderSquadPage();
     save();
   }
-  function applySquadOrder(ids) {
+  function applySquadOrder(ids, host, el) {
     var list = [], i;
     for (i = 0; i < ids.length; i++) { var s = M.squadById(state, ids[i]); if (s) list.push(s); }
     for (i = 0; i < state.squads.length; i++) if (list.indexOf(state.squads[i]) < 0) list.push(state.squads[i]);
     state.squads = list;
     renderSquadPage();
     save();
+    /* §14.6: 拖队头 = 1 条 squad.move (只发被拖的那一支, 不是整份顺序) */
+    var movedId = el && el.getAttribute ? el.getAttribute('data-sq') : null;
+    if (movedId) {
+      for (i = 0; i < list.length; i++) {
+        if (list[i].id === movedId) { notifyEvent('squad.move', { squadId: movedId, toIndex: i }); break; }
+      }
+    }
   }
 
   /* 五个装备位的缩略图标 (队伍页一行摆完); 空位用淡色槽名首字占位 */
@@ -878,7 +938,7 @@
 
     var hero =
       '<div class="pc-hero">' +
-        '<div class="pc-av">' + esc(p.name.charAt(0)) + '</div>' +
+        '<div class="pc-av">' + esc(avChar(p)) + '</div>' +
         '<div class="pc-id">' +
           '<div class="pc-name">' + esc(p.name) + '</div>' +
           '<div class="pc-meta">' + esc(p.role) + ' · ' + esc(p.realm) + ' · ' + p.age + ' 岁 ' + esc(p.gender) + '</div>' +
@@ -900,7 +960,7 @@
     for (i = 0; i < order.length; i++) {
       var sk = order[i], it = p.gear[sk];
       wear += '<button type="button" class="wear-slot' + (it ? '' : ' empty') + '" data-slot="' + sk + '" ' +
-        'title="' + esc(M.SLOT_NAMES[sk]) + (it ? ' · ' + it.n : ' · 空') + '">' +
+        'title="' + esc(M.SLOT_NAMES[sk]) + (it ? ' · ' + esc(it.n) : ' · 空') + '">' +
         '<span class="ws-k">' + M.SLOT_NAMES[sk] + '</span>' +
         (it ? '<span class="ws-g q' + it.q + '">' + esc(it.ch) + '</span>' +
               '<span class="ws-n q' + it.q + '">' + esc(it.n) + '</span>' +
@@ -974,9 +1034,11 @@
     '</div>';
   }
 
+  /* data-bar = 稳定句柄: 实时刷新 (updateVitals) 按它定位, 不靠 nth-child 顺序 */
   function barRow(label, cur, max, cls, text) {
+    cur = numOr(cur, 0); max = numOr(max, 1);
     var pct = Math.max(0, Math.min(100, Math.round(cur / Math.max(1, max) * 100)));
-    return '<div class="pb ' + cls + '" title="' + label + ' ' + cur + ' / ' + max + '（' + pct + '%）">' +
+    return '<div class="pb ' + cls + '" data-bar="' + (cls || 'hp') + '" title="' + label + ' ' + cur + ' / ' + max + '（' + pct + '%）">' +
       '<span class="pb-k">' + label + '</span>' +
       '<span class="pb-g"><i style="width:' + pct + '%"></i></span>' +
       '<span class="pb-v">' + (text || (cur + '/' + max)) + '</span></div>';
@@ -1060,8 +1122,13 @@
     }
     var trRows = '';
     for (i = 0; i < p.traits.length; i++) {
+      /* ⚠ 审查 C10: 有些特质文案承诺了数值, 但游戏里还没有对应系统 (食量/昼夜/突破…)。
+         不标出来, 玩家会一直等一个不会发生的变化。 */
+      var pend = M.PENDING_TRAITS ? M.PENDING_TRAITS[p.traits[i].n] : null;
       trRows += '<div class="tr-row"><span class="tr ' + p.traits[i].kind + '">' + esc(p.traits[i].n) + '</span>' +
-        '<span class="tr-v">' + esc(p.traits[i].v) + '</span></div>';
+        '<span class="tr-v">' + esc(p.traits[i].v) +
+          (pend ? '<em class="tr-pend" title="「' + esc(pend) + '」系统还没做，这一条暂时只作记录">未开放·' + esc(pend) + '</em>' : '') +
+        '</span></div>';
     }
     var artRows = '';
     for (i = 0; i < p.arts.slots.length; i++) {
@@ -1132,8 +1199,10 @@
       '</div>' +
       '<div class="bag-cap"><i style="width:' + pct + '%"></i></div>' +
       '<div class="bag-filter">' + fbar + '</div>' +
-      '<div class="bag-grid stash-grid">' + cells + '</div>' +
-      '<div id="stkInfo" class="item-info"></div>';
+      /* ⚠ 审查 C19: 详情卡原在 6x8 网格之后 (约 480px 高), 768px 窗口里点第一行物品后
+         卡片与「装备」按钮都在可视区外 ⇒ 玩家以为没反应。与能力页同序: 筛选 → 详情 → 网格 */
+      '<div id="stkInfo" class="item-info"></div>' +
+      '<div class="bag-grid stash-grid">' + cells + '</div>';
     showStashDetail();
   }
 
@@ -1289,6 +1358,11 @@
   /* ---------- 活节点更新 ---------- */
   function updateLive() {
     if (!state) return;
+    /* ★ 气血/灵力/心境/修为 是**全页签**都会变的量 (startTick 每 500ms 推进, 约 6s 掉一次)。
+       旧实现只在 tab==='work' 时重绘节点 ⇒ 停在队伍页/能力页时血条、灵力条、心境永久定格,
+       非点一下不跳变。这里改成「就地改 style / 文本」: 不重建 DOM, 所以不会打断拖动,
+       也不会把滚动位置弹回顶部。 */
+    updateVitals();
     var cp = curPawn();
     if (tab === 'work' && cp) {
       var jid2 = cp.job && cp.job.jobId ? cp.job.jobId : null;
@@ -1306,6 +1380,50 @@
       renderCrewList();
     }
     updateSub();
+  }
+
+  /* ---------- 血量/心境/修为的「就地刷新」(不重绘) ---------- */
+  function paintRowVit(row, v) {
+    var vs = row.querySelectorAll('.rp-vit');
+    for (var k = 0; k < vs.length; k++) {
+      var isMp = vs[k].classList.contains('mp');
+      var cur = isMp ? v.mp : v.hp;
+      var max = isMp ? v.maxMp : v.maxHp;
+      var pct = isMp ? v.mpPct : v.hpPct;
+      var b = vs[k].querySelector('b');
+      if (b) b.style.width = pct + '%';
+      var u = vs[k].querySelector('u');
+      if (u) u.textContent = cur + '/' + max;
+      vs[k].title = (isMp ? '灵力 ' : '气血 ') + cur + ' / ' + max + '（' + pct + '%）';
+    }
+  }
+  function paintBar(host, key, label, cur, max, text) {
+    var el = host.querySelector('[data-bar="' + key + '"]');
+    if (!el) return;
+    var pct = Math.max(0, Math.min(100, Math.round(cur / Math.max(1, max) * 100)));
+    var tx = el.querySelector('.pb-v');
+    if (tx) tx.textContent = text;
+    /* innerHTML 里那条 <i> 是进度条本体 (barRow 输出的 .pb-g > i) */
+    var fill = el.querySelector('.pb-g i');
+    if (fill) fill.style.width = pct + '%';
+    el.title = label + ' ' + cur + ' / ' + max + '（' + pct + '%）';
+  }
+  function updateVitals() {
+    /* 队伍页: 每行两条 (气血 / 灵力) —— 能力页的条在换人/换装时会整页重绘, 这里只补「时间流逝」那部分 */
+    if (els.squad) {
+      var rows = els.squad.querySelectorAll('.rp-row');
+      for (var i = 0; i < rows.length; i++) {
+        var p = pawnById(rows[i].getAttribute('data-id'));
+        if (p) paintRowVit(rows[i], M.vitalOf(p));
+      }
+    }
+    var cp = curPawn();
+    if (!cp || !els.ability) return;
+    var v = M.vitalOf(cp), e = M.expOf(cp);
+    paintBar(els.ability, 'hp', '气血', v.hp, v.maxHp, v.hp + '/' + v.maxHp);
+    paintBar(els.ability, 'mp', '灵力', v.mp, v.maxMp, v.mp + '/' + v.maxMp);
+    paintBar(els.ability, 'mood', '心境', cp.mood, 100, cp.mood + '/100');
+    paintBar(els.ability, 'exp', '修为', e.v, e.max, fmt(e.v) + '/' + fmt(e.max));
   }
 
   /* ============================================================
@@ -1332,11 +1450,23 @@
     var res = M.unequip(p, state.stash, slot);
     if (!res.ok) { toast(res.why); return; }
     stashSel = res.stashIdx != null ? res.stashIdx : null;
-    renderAbilityPage();
-    renderBagPage();
-    renderSquadPage();
+    /* ⚠ 审查 D17: doEquip/doUse 都包了 withQkScroll, 这里漏了 ⇒ 能力页卸装备后内层背包滚回顶部 */
+    withQkScroll(function () {
+      renderAbilityPage();
+      renderBagPage();
+      renderSquadPage();
+    });
     toast('已卸下 ' + (it ? it.n : '') + ' → 全局背包');
   }
+  /* ---- 事件出口 (§14 的 9 条) ----
+     bridge 未加载 (纯面板演示) 或没接后台时静默; 接了就由 bridge 排队 + 合并窗口发送。
+     ⚠ 事件只放 id 与目标值, 不放派生值 (人数/负重/攻防)。 */
+  function notifyEvent(type, data) {
+    var B = g.CrewBridge;
+    if (!B || !B.notify) return;
+    try { B.notify(type, data); } catch (e) { /* 事件失败不许影响 UI */ }
+  }
+
   function toast(msg) {
     if (!msg) return;
     var t = $('crewToast');
@@ -1494,8 +1624,30 @@
     return g.CrewPanel;
   }
 
+  /* 拖动进行中数据被整体换掉 (bridge patch / 服务端推) ⇒ 必须作废拖动:
+     它抓的是**旧 DOM**, 按旧顺序写回新 state 会把人塞错队、把删掉的人写回来 (审查 C6)。 */
+  function abortDrags() {
+    var st = _pDrag;
+    if (st) {
+      if (st.timer) clearTimeout(st.timer);
+      try { st.secs.releasePointerCapture(st.id); } catch (e) { /* noop */ }
+      if (st.el && st.el.classList) st.el.classList.remove('dragging');
+      _pDrag = null;
+    }
+    var d = _drag;
+    if (d) {
+      if (d.timer) clearTimeout(d.timer);
+      try { d.host.releasePointerCapture(d.id); } catch (e) { /* noop */ }
+      if (d.el && d.el.classList) d.el.classList.remove('dragging');
+      if (d.host && d.host.classList) d.host.classList.remove('sorting');
+      _drag = null;
+    }
+    document.body.classList.remove('crew-sorting');
+  }
+
   function setSquad(data, keepSel) {
     if (!data || !data.pawns) return false;
+    abortDrags();
     if (!data.jobs) data.jobs = M.JOBS.slice();
     if (!data.stash) data.stash = new Array(M.CFG.STASH_COLS * M.CFG.STASH_ROWS).fill(null);
     M.normalizeSquads(data);
@@ -1568,9 +1720,11 @@
 
   g.CrewPanel = {
     init: function (o) { return init(o); },
-    open: function () { if (!inited) init(); setOpen(true); },
+    /* ⚠ 审查 D21: init() 可能返回 null (crew-model 没加载) ⇒ setOpen 里 els.panel 是 undefined,
+       直接 classList 抛 TypeError。close() 反而做了保护。 */
+    open: function () { if (!inited && !init()) return false; setOpen(true); return true; },
     close: function () { if (inited) setOpen(false); },
-    toggle: function () { if (!inited) init(); setOpen(!isOpen); },
+    toggle: function () { if (!inited && !init()) return false; setOpen(!isOpen); return true; },
     isOpen: function () { return isOpen; },
     select: function (id) { if (inited) select(id); },
     setTab: function (t) { if (inited) setTab(t); },

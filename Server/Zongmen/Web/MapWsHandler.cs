@@ -170,9 +170,14 @@ public static class MapWsHandler
                - 被剔除的位记入 DeniedMask 回显, 且只针对本次真正请求的位
                  (避免「仅 rev 未变」被误报为 denied)。 */
             uint reqMask = req.Mask == 0 ? (uint)TileMask.All : req.Mask & (uint)TileMask.All;
-            /* 实体层 = 需要登录才放行的图层。人物分布 (People) 与聚落/景点/灵脉同口径:
-               它由聚落人口派生, 属「世界实体信息」而非公开地貌。 */
-            const uint entityMask = (uint)(TileMask.Settle | TileMask.Poi | TileMask.Comm | TileMask.People);
+            /* 实体层 = 需要登录才放行的图层: 聚落 / 景点 / 道路。
+               ⚠ 审查 D26: 原来把 People 也算进实体层, 而 HTTP `/api/people`、`/api/characters`
+                 提供的是**同一份**人物数据且完全无鉴权 —— 绕过 WS 只需一次 HTTP 请求,
+                 所以那层「保护」是假象, 两套口径反而更容易误判「谁该被挡」。
+                 现在口径统一为**公开**: WS 不再单独剔 People。
+                 真要保护人物数据, 必须同时给 HTTP 端点加 token (demo 的「任意非空账号」不算鉴权),
+                 只收紧一侧没有意义。 */
+            const uint entityMask = (uint)(TileMask.Settle | TileMask.Poi | TileMask.Comm);
             uint allowedMask = session.Authed ? reqMask : reqMask & ~entityMask;
 
             /* C6: 块构建是「全同步」管线 (V8 门闩 + A* + gzip), 直接内联 await 会占着

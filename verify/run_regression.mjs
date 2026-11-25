@@ -171,6 +171,23 @@ const JOBS = [
   ['check_preview_settle_road.mjs', [], 'off'],
   ['check_preview_terrain.mjs', [], 'off'],
   ['check_edge_falloff.mjs', [], 'off'],
+  /* ── 2026-11-25 代码审查第二批 (P2 C1~C20 / P3 D1~D29) 的四道静态守卫, 全离线 ──
+     · check_js_exports  = **铁律守卫**: 三张 Invoke switch ↔ 全部 `.Call("...")` 调用点
+       双向闭合。正向抓 C11 那类「JS 出口早就有、case 一直缺 ⇒ 运行期 500、编译期不报」;
+       反向抓「新加 JS 出口忘接 case」与「case 拼错/JS 改名」。注释先剥再扫 (反假红)。
+       ⚠ 允许漏接的只有两类: OnVmReady/RoadVersion 晚绑定 (自动扣出) + INTERNAL 白名单
+       (纯计算辅助, 加一条要回来登记; 白名单过期也红)。
+     · check_chargen     = 弟子招募生成器数值/边界 (灵根合计与每系 ≥20 两档口径、
+       天赋平方偏斜、特质全正面、百分比÷4、usedNames 不得原地写、池量随人口…);
+     · check_crew_model  = 小队纯逻辑 (队 id 去重收敛、未知 jobId 清成待派活、
+       负面特质保底 -1、probe 必须校验 squads/curSquad…);
+     · check_crew_bridge = 契约桥 (bag.capacity 唯一真源、溢出进 overflow、缺 vit 补满、
+       itemRef 重复引用、事件流只发事件不发整份契约)。
+     ⚠ DOM 那一层不在这里: 走 verify/_crew_harness.html?test=1 (167 条)。 */
+  ['check_js_exports.mjs', [], 'off'],
+  ['check_chargen.mjs', [], 'off'],
+  ['check_crew_model.mjs', [], 'off'],
+  ['check_crew_bridge.mjs', [], 'off'],
   ['sync_preview_inline.mjs', ['--check'], 'off'],
   ['w3_bfs_road.mjs', W3_MS ? [String(W3_MS)] : [], 'off', '墙钟 ⑦ 慢机红 ⇒ 降级 warn'],
   ['w5_sprite_range.mjs', [], 'off'],

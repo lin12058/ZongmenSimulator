@@ -67,7 +67,7 @@
   var TRAIT_PAIRS = [
     { pair: 'diligence', pos: { n: '勤勉', v: '劳作效率 +9%', bonus: 2 }, neg: { n: '懒散', v: '劳作效率 -8%' } },
     { pair: 'grit',      pos: { n: '坚毅', v: '受伤恢复 +13%，气血上限 +10', bonus: 3 }, neg: { n: '怯懦',  v: '受伤恢复 -10%' } },
-    { pair: 'insight',   pos: { n: '慧根', v: '修炼速度 +4%', bonus: 4 }, neg: { n: '愚钝',  v: '修炼速度 -6%' } },
+    { pair: 'insight',   pos: { n: '慧根', v: '修炼速度 +6%', bonus: 4 }, neg: { n: '愚钝',  v: '修炼速度 -6%' } },
     { pair: 'social',    pos: { n: '亲和', v: '同门心境 +8', bonus: 3 },   neg: { n: '孤僻',  v: '同门心境 -8' } },
     { pair: 'nocturne',  pos: { n: '夜行', v: '夜间效率 +5%', bonus: 2 }, neg: { n: '嗜睡',  v: '夜间效率 -6%' } },
     { pair: 'temper',    pos: { n: '沉静', v: '突破成功率 +3%', bonus: 4 }, neg: { n: '急躁', v: '突破成功率 -3%' } },
@@ -95,6 +95,15 @@
     { k: 'daoheart',  n: '道心通明', tier: 'epic', bonus: 9, v: '突破成功率 +5%，心境不堕' },
     { k: 'daobody',   n: '天生道体', tier: 'epic', bonus: 10, v: '修炼速度 +10%，聚气 +3%' }
   ];
+
+  /* 特质里「游戏里还没有对应系统」的那几条 —— 文案承诺了数值, 但没有任何派生量吃它。
+     面板按这张表加「未开放」灰标, 玩家才不会以为数值该变 (审查 C10)。
+     ⚠ 接新系统时同时删掉这里的键, 否则界面会一直标未开放。 */
+  var PENDING_TRAITS = {
+    '辟谷': '食量', '夜行': '昼夜', '巧手': '炼器成器', '专注': '工序判定',
+    '沉静': '突破判定', '道心通明': '突破判定', '过目不忘': '参悟',
+    '天生灵眸': '神识范围', '福缘深厚': '奇遇'
+  };
 
   /* 旧 11 对里正面那半的稀有度 (与 chargen.js 对齐; 没列的一律 common) */
   var POS_TIER = { '慧根': 'uncommon', '亲和': 'uncommon', '沉静': 'uncommon' };
@@ -408,6 +417,9 @@
     /* 正面特质: 只加不减；百分比一律「原值 ÷4」，且小数点后不足 1 点的按 1 点算
        （否则 2~5% 落在 12 点防御上会被 Math.round 抹成 0，等于没生效） */
     var bump = function (v, pct) { return v + Math.max(1, Math.round(v * pct)); };
+    /* ⚠ 负面用对称的 dip (审查 D15): 原来 Math.round(v*0.96) 在 atk<=12 时差 0 点,
+       等于「畏战 -4%」不生效, 而正面有保底 —— 不对称 */
+    var dip = function (v, pct) { return Math.max(0, v - Math.max(1, Math.round(v * pct))); };
     if (hasTrait(pawn, '血旺')) a.hp = bump(a.hp, 0.04);
     if (hasTrait(pawn, '坚毅')) a.hp += 10;
     if (hasTrait(pawn, '胆识')) a.atk = bump(a.atk, 0.03);
@@ -415,10 +427,13 @@
     if (hasTrait(pawn, '力大无穷')) a.atk = bump(a.atk, 0.05);
     if (hasTrait(pawn, '铜皮铁骨')) a.def = bump(a.def, 0.05);
     if (hasTrait(pawn, '耳目清明')) { a.hit += 8; a.dodge = bump(a.dodge, 0.02); }
+    /* 聚气 (灵力上限): 审查 C10 —— 这两条原来只有文案 */
+    if (hasTrait(pawn, '五行亲和')) a.mp = bump(a.mp, 0.04);
+    if (hasTrait(pawn, '天生道体')) a.mp = bump(a.mp, 0.03);
     /* 旧档兼容: 已不再生成负面, 但老存档里可能还留着 */
-    if (hasTrait(pawn, '亏血')) a.hp = Math.round(a.hp * 0.96);
-    if (hasTrait(pawn, '畏战')) a.atk = Math.round(a.atk * 0.96);
-    if (hasTrait(pawn, '怯懦')) a.hp -= 2;
+    if (hasTrait(pawn, '亏血')) a.hp = dip(a.hp, 0.04);
+    if (hasTrait(pawn, '畏战')) a.atk = dip(a.atk, 0.04);
+    if (hasTrait(pawn, '怯懦')) a.hp = Math.max(0, a.hp - 2);
     return a;
   }
 
@@ -479,14 +494,34 @@
     for (var i = 0; i < arr.length; i++) w += weightOf(arr[i]);
     return Math.round(w * 10) / 10;
   }
-  /* 负重上限: 甲+兵常态 40~60 ⇒ 底数给 55, 再按体天赋加 (体修扛得更多) */
-  function loadMax(pawn) { return 55 + Math.round(sumDao(pawn, 'body') * 0.9); }
+  /* 负重上限: 甲+兵常态 40~60 ⇒ 底数给 55, 再按体天赋加 (体修扛得更多)
+     ⚠ 「力大无穷 负重 +5%」原来在 loadMax 里没有任何分支 (审查 C10): 文案承诺了, 数值不动 */
+  function loadMax(pawn) {
+    var v = 55 + Math.round(sumDao(pawn, 'body') * 0.9);
+    if (hasTrait(pawn, '力大无穷')) v = Math.round(v * 1.05);
+    return v;
+  }
   function overload(pawn) { return weightOf(pawn) > loadMax(pawn); }
 
   /* 修为: 上限由天赋总量推, 进度演示给一个固定比例 (同一 seed 稳定) */
   function expOf(pawn) {
     var max = 600 + Math.round(talentTotal(pawn) * 6);
     return { v: pawn.exp, max: max, pct: Math.round(pawn.exp / max * 100) };
+  }
+  /* 修炼速度倍率 (慧根 +6% / 天生道体 +10%): step 涨修为时乘上。
+     ⚠ 审查 C10: 这两条原来只有文案, 修为涨速与常人一样 */
+  function expRateOf(pawn) {
+    var r = 1;
+    if (hasTrait(pawn, '慧根')) r *= 1.06;
+    if (hasTrait(pawn, '天生道体')) r *= 1.10;
+    return r;
+  }
+  /* 心境下限 (心如止水 +15): 低于此值不再往下跌 */
+  function moodFloor(pawn) { return hasTrait(pawn, '心如止水') ? 35 : 20; }
+  function pawnById(state, id) {
+    var ps = (state && state.pawns) || [];
+    for (var i = 0; i < ps.length; i++) if (ps[i].id === id) return ps[i];
+    return null;
   }
 
   /* ============================================================
@@ -596,7 +631,7 @@
       pawns.push(p);
     }
     return { pawns: pawns, jobs: JOBS.slice(), stash: genStash(rng), tickAt: 0,
-             squads: splitSquads(pawns, teams) };
+             squads: splitSquads(pawns, teams), curSquad: 'sq1' };
   }
 
   /* ============================================================
@@ -649,12 +684,16 @@
       }
       out.push({ id: id, name: squadName(src.name), members: ids });
     }
-    /* 队 id 去重 (存档被手改会撞) */
+    /* 队 id 去重 (存档被手改会撞)
+       ⚠ 审查 C2: 原循环体每次赋**同一个**值, 一旦该值已被前面的队占用就永不退出
+         (例 ['sq1_3','sq1','sq1'] 的 i=2) ⇒ normalizeSquads 每次渲染都调 ⇒ 整个面板假死。
+         现在后缀单调递增, 必然收敛。 */
     var seenId = {};
     for (i = 0; i < out.length; i++) {
-      var base = out[i].id;
-      while (seenId[out[i].id]) out[i].id = base + '_' + (i + 1);
-      seenId[out[i].id] = 1;
+      var base = out[i].id, id2 = base, n = i + 1;
+      while (seenId[id2]) { n++; id2 = base + '_' + n; }
+      out[i].id = id2;
+      seenId[id2] = 1;
     }
     /* 没归队的弟子 (新招的人 / 存档漏了) 落到第一队末尾, 不能凭空消失 */
     for (i = 0; i < pawns.length; i++) {
@@ -673,13 +712,16 @@
     return null;
   }
 
-  /* 按 members 顺序取出该队的真实弟子对象 */
+  /* 按 members 顺序取出该队的真实弟子对象
+     ⚠ 审查 D14: 找不到队时不许回落第一队/全员 —— 「空队渲染空列表」是约定,
+       回落会让玩家以为「这队全员都在」(面板上两队一模一样)。id 缺省才取 curSquad。 */
   function squadPawns(state, id) {
     if (!state) return [];
     var map = {}, out = [], i;
-    for (i = 0; i < state.pawns.length; i++) map[state.pawns[i].id] = state.pawns[i];
-    var sq = squadById(state, id) || (state.squads && state.squads[0]);
-    if (!sq) return state.pawns.slice();
+    for (i = 0; i < (state.pawns || []).length; i++) map[state.pawns[i].id] = state.pawns[i];
+    var want = id == null ? state.curSquad : id;
+    var sq = want == null ? null : squadById(state, want);
+    if (!sq) return [];
     for (i = 0; i < sq.members.length; i++) if (map[sq.members[i]]) out.push(map[sq.members[i]]);
     return out;
   }
@@ -773,6 +815,13 @@
   function unequip(pawn, stash, slot) {
     var it = pawn.gear[slot];
     if (!it) return { ok: false, why: '空槽' };
+    /* ⚠ 法宝队列恒 1~4 件 (CFG.TALISMAN_MIN=1, probe:946 与契约同口径):
+       卸掉最后一件会让 queue 归 0 ⇒ 内部进入非法态, dump 出去的 queue:[] 服务端按契约判坏。
+       这里选择「拒绝」而不是「放宽到 0」—— 放宽要同时改 probe / 契约 / chargen 的 checkCandidate,
+       而「本命法宝不能空手」在玩法上也是对的。*/
+    if (slot === 'talisman' && pawn.queue.length <= CFG.TALISMAN_MIN) {
+      return { ok: false, why: '至少留一件法宝（本命不能空手）' };
+    }
     var idx = firstEmpty(stash);
     if (idx < 0) return { ok: false, why: '背包已满' };
     stash[idx] = it;
@@ -849,10 +898,20 @@
     if (hasTrait(pawn, '懒散')) r *= 0.92;
     return r;
   }
-  function pickJob(pawn) {
+  /* ⚠ 工种表以 state.jobs 为准 (审查 D16): 内置 JOBS 只是 demo 默认值。
+     服务端换表后, 面板显示 A 而派活按 B, 未知 jobId 直接 continue ⇒ 该弟子永不推进。 */
+  function jobsOf(state) {
+    return (state && Array.isArray(state.jobs) && state.jobs.length) ? state.jobs : JOBS;
+  }
+  function jobIn(list, id) {
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  function pickJob(pawn, jobs) {
+    var list = jobs || JOBS;
     var best = null, bestP = 99, bestT = -1;
-    for (var i = 0; i < JOBS.length; i++) {
-      var jb = JOBS[i], p = priorityOf(pawn, jb.id);
+    for (var i = 0; i < list.length; i++) {
+      var jb = list[i], p = priorityOf(pawn, jb.id);
       if (!p) continue;
       var t = (pawn.talents.v[jb.dao] || [0]).reduce(function (a, b) { return a + b; }, 0);
       if (p < bestP || (p === bestP && t > bestT)) { best = jb; bestP = p; bestT = t; }
@@ -861,19 +920,26 @@
   }
   function step(state, dtMs) {
     var changed = false;
+    var jobs = jobsOf(state);
     for (var i = 0; i < state.pawns.length; i++) {
       var p = state.pawns[i];
-      if (!p.job) {
-        var jb = pickJob(p);
-        if (!jb) { p.job = { jobId: null, task: '无事可做', progress: 0, done: 0 }; changed = true; continue; }
+      /* 「没派过活」和「待派活 (jobId=null)」都回到重新挑活这条路 ——
+         ⚠ 审查 D16: 原来只判 !p.job, 于是未知工种被清成 jobId:null 之后永远挂着不推进 */
+      if (!p.job || !p.job.jobId) {
+        var jb = pickJob(p, jobs);
+        if (!jb) {
+          if (!p.job) { p.job = { jobId: null, task: '无事可做', progress: 0, done: 0 }; changed = true; }
+          continue;
+        }
         var names = TASK_NAMES[jb.id] || [jb.n];
         p.job = { jobId: jb.id, task: names[i % names.length], progress: 0, done: 0 };
         changed = true;
         continue;
       }
       if (!p.job.jobId) continue;
-      var job = JOB_INDEX[p.job.jobId];
-      if (!job) continue;
+      var job = jobIn(jobs, p.job.jobId);
+      /* 未知工种 (服务端换了表 / 老存档): 清掉重新派, 不许「静默卡死不推进」 */
+      if (!job) { p.job = { jobId: null, task: '待派活', progress: 0, done: 0 }; changed = true; continue; }
       p.job.progress += (dtMs / 240) * rateOf(p, job);
       if (p.job.progress >= 100) {
         p.job.done = (p.job.done || 0) + 1;
@@ -882,7 +948,8 @@
         p.job.task = names2[(p.job.done + i) % names2.length];
         /* 干成一件事给修为 (演示: 小步涨, 让修为条也动) */
         var em = 600 + Math.round(talentTotal(p) * 6);
-        p.exp = Math.min(em, p.exp + 10 + rint(Math.random, 0, 14));
+        /* 修炼速度: 慧根/天生道体在这里真生效 (审查 C10) */
+        p.exp = Math.min(em, p.exp + Math.round((10 + rint(Math.random, 0, 14)) * expRateOf(p)));
         changed = true;
       }
     }
@@ -891,7 +958,7 @@
       state.tickAt = 0;
       for (var k = 0; k < state.pawns.length; k++) {
         var q = state.pawns[k];
-        q.mood = Math.max(20, Math.min(100, q.mood + (Math.random() < 0.5 ? -1 : 1)));
+        q.mood = Math.max(moodFloor(q), Math.min(100, q.mood + (Math.random() < 0.5 ? -1 : 1)));
         /* 气血/灵力: 在役者耗、空闲者回; 偶发「交手」掉一截 —— 条必须是活的,
            否则玩家看不出「百分比」的意义 (用户: 战斗有变化)。 */
         var vv = vitalOf(q), maxHp = vv.maxHp, maxMp = vv.maxMp;
@@ -899,13 +966,33 @@
         if (Math.random() < 0.18) {                       // 遭遇战
           q.vit.hp = Math.max(1, q.vit.hp - rint(Math.random, Math.round(maxHp * 0.12), Math.round(maxHp * 0.26)));
           q.vit.mp = Math.max(0, q.vit.mp - rint(Math.random, 2, 9));
-          q.mood = Math.max(20, q.mood - rint(Math.random, 1, 4));
+          q.mood = Math.max(moodFloor(q), q.mood - rint(Math.random, 1, 4));
         } else if (busy) {                                // 劳作消耗
           q.vit.hp = Math.max(Math.round(maxHp * 0.2), q.vit.hp - rint(Math.random, 1, 4));
           q.vit.mp = Math.max(0, q.vit.mp - rint(Math.random, 1, 3));
         } else {                                          // 静养回复
-          q.vit.hp = Math.min(maxHp, q.vit.hp + rint(Math.random, 2, 6));
+          /* 妙手回春 疗伤 +8% (审查 C10: 原来只在文案里) */
+          var healMul = hasTrait(q, '妙手回春') ? 1.08 : 1;
+          q.vit.hp = Math.min(maxHp, q.vit.hp + Math.round(rint(Math.random, 2, 6) * healMul));
           q.vit.mp = Math.min(maxMp, q.vit.mp + rint(Math.random, 3, 8));
+        }
+      }
+      /* 同门心境 (亲和 +8 / 天生魅体 +12): 队里有一个这样的人, 同队其他人每轮心境 +
+         这条原来只有文案 (审查 C10); 缺 squads 的历史 state 直接跳过 */
+      if (Array.isArray(state.squads)) {
+        for (var si = 0; si < state.squads.length; si++) {
+          var mem = state.squads[si].members || [], aura = 0, mi, pm;
+          for (mi = 0; mi < mem.length; mi++) {
+            pm = pawnById(state, mem[mi]);
+            if (!pm) continue;
+            if (hasTrait(pm, '天生魅体')) aura = Math.max(aura, 2);
+            else if (hasTrait(pm, '亲和')) aura = Math.max(aura, 1);
+          }
+          if (!aura) continue;
+          for (mi = 0; mi < mem.length; mi++) {
+            pm = pawnById(state, mem[mi]);
+            if (pm) pm.mood = Math.min(100, pm.mood + aura);
+          }
         }
       }
       changed = true;
@@ -924,7 +1011,9 @@
   function probe(state) {
     var bad = [];
     var seenItem = {};
-    if (state.stash.length !== CFG.STASH_COLS * CFG.STASH_ROWS) bad.push('全局背包格数 ' + state.stash.length);
+    /* ⚠ 格数以契约的 bag.capacity 为准 (审查 C15), 不再硬断言 6x8=48:
+       否则 capacity=54 的存档一装进来就整份判坏 */
+    if (!(state.stash.length >= 1)) bad.push('全局背包格数 ' + state.stash.length);
     for (var s0 = 0; s0 < state.stash.length; s0++) {
       var si0 = state.stash[s0];
       if (!si0) continue;
@@ -961,9 +1050,13 @@
       if (!(v0.hp >= 0 && v0.hp <= v0.maxHp)) bad.push(p.name + ': 气血越界 ' + v0.hp + '/' + v0.maxHp);
       if (!(v0.mp >= 0 && v0.mp <= v0.maxMp)) bad.push(p.name + ': 灵力越界 ' + v0.mp + '/' + v0.maxMp);
     }
-    /* 多小队: 队名 ≤4 字 / 队 id 唯一 / 每人只在一队 / 没有孤儿 id */
+    /* 多小队: 队名 ≤4 字 / 队 id 唯一 / 每人只在一队 / 没有孤儿 id
+       ⚠ 审查 D13: 原来「没有 squads 就整段跳过」⇒ assign 为空也算 ok:true,
+         hydrate 产出的 state 恰好没有 squads, 多队断言全部假绿。现在缺结构本身就是违规。 */
     var assign = [];
-    if (Array.isArray(state.squads)) {
+    if (!Array.isArray(state.squads) || !state.squads.length) {
+      bad.push('state.squads 缺失或为空 (多小队结构未建立)');
+    } else {
       var sqSeen = {}, sqMembers = {};
       for (var q = 0; q < state.squads.length; q++) {
         var qs = state.squads[q];
@@ -981,6 +1074,10 @@
       }
       for (var qp = 0; qp < state.pawns.length; qp++) {
         if (!sqMembers[state.pawns[qp].id]) bad.push('弟子 ' + state.pawns[qp].name + ' 未归任何小队');
+      }
+      /* 当前队必须真实存在 (否则队伍页的「当前」高亮无处落) */
+      if (!state.squads.some(function (s2) { return s2.id === state.curSquad; })) {
+        bad.push('curSquad 不存在: ' + state.curSquad);
       }
     }
     return { pawns: state.pawns.length, jobs: state.jobs.length, stash: state.stash.length,
@@ -1006,6 +1103,8 @@
     slotOf: slotOf, equip: equip, unequip: unequip, compareGear: compareGear, useItem: useItem,
     priorityOf: priorityOf, cyclePriority: cyclePriority, jobById: jobById,
     talentTotal: talentTotal, rootSum: rootSum, rateOf: rateOf,
+    expRateOf: expRateOf, moodFloor: moodFloor, pawnById: pawnById, jobsOf: jobsOf,
+    PENDING_TRAITS: PENDING_TRAITS,
     step: step, probe: probe, makeItem: makeItem
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -77,9 +77,11 @@
 .crew-mask {
   position: fixed; inset: 0; z-index: 57;
   background: rgba(30,24,15,0.30);
-  opacity: 0; pointer-events: none; transition: opacity 0.2s;
+  /* ⚠ 审查 D23: 只用 opacity:0 时元素仍在 Tab 序列与无障碍树里 ⇒ 键盘能 tab 进一个看不见的面板 */
+  opacity: 0; pointer-events: none; visibility: hidden;
+  transition: opacity 0.2s, visibility 0s 0.2s;
 }
-.crew-mask.on { opacity: 1; pointer-events: auto; }
+.crew-mask.on { opacity: 1; pointer-events: auto; visibility: visible; transition: opacity 0.2s, visibility 0s; }
 
 /* ---- 面板外壳 ---- */
 .crew-panel {
@@ -91,10 +93,11 @@
   box-shadow: -6px 4px 22px rgba(74,55,28,0.22);
   top: 78px; right: 16px; bottom: 16px; width: 404px;
   transform: translateX(calc(100% + 24px));
-  opacity: 0; pointer-events: none;
-  transition: transform 0.24s cubic-bezier(0.22,0.7,0.2,1), opacity 0.2s;
+  opacity: 0; pointer-events: none; visibility: hidden;
+  transition: transform 0.24s cubic-bezier(0.22,0.7,0.2,1), opacity 0.2s, visibility 0s 0.24s;
 }
-.crew-panel.open { transform: none; opacity: 1; pointer-events: auto; }
+.crew-panel.open { transform: none; opacity: 1; pointer-events: auto; visibility: visible;
+  transition: transform 0.24s cubic-bezier(0.22,0.7,0.2,1), opacity 0.2s, visibility 0s; }
 .crew-panel::after {
   content: ''; position: absolute; inset: 4px; pointer-events: none;
   border: 1px solid rgba(120,98,66,0.26);
@@ -165,7 +168,9 @@
 }
 .sq-hd {
   display: flex; align-items: center; gap: 7px;
-  padding: 6px 8px; cursor: grab; user-select: none;
+  /* ⚠ 审查 C5: 只有 user-select:none 时, 触摸手势仍由浏览器当 pan 处理, 手指一动就 pointercancel。
+     touch-action:none 把这块区域的指针事件交给我们 (preventDefault 管不了已交给浏览器的 pan) */
+  padding: 6px 8px; cursor: grab; user-select: none; touch-action: none;
   border-bottom: 1px solid rgba(150,128,96,0.22);
   background: linear-gradient(180deg, rgba(255,253,246,0.85), rgba(246,239,224,0.6));
   border-radius: 2px 2px 0 0;
@@ -199,8 +204,10 @@
   border: none; border-radius: 50%; background: transparent;
 }
 .sq-sec .sq-x:hover { color: #fff; background: var(--seal, #a63a2c); }
-/* 二次确认态: 「×」变成「确认」(短时), 宽度自适应 */
+/* 二次确认态: 「×」变成「确认」(短时), 宽度自适应。
+   ⚠ order:-1 把它甩到队头**最左**: 双击的第二下落在原位置 ⇒ 打不中, 二次确认才真成立 (审查 C3) */
 .sq-sec .sq-x.ask {
+  order: -1;
   width: auto; min-width: 16px; padding: 0 4px;
   font-size: 10px; letter-spacing: 0; line-height: 14px;
   color: #fff; background: var(--seal, #a63a2c); border-radius: 2px;
@@ -246,6 +253,7 @@ body.crew-sorting, body.crew-sorting * { cursor: grabbing; user-select: none; -w
   background: linear-gradient(180deg, rgba(255,253,246,0.86), rgba(240,232,213,0.66));
   transition: border-color 0.15s, background 0.15s;
   user-select: none; -webkit-user-select: none;
+  touch-action: none;                       /* 审查 C5: 不设就拖不动, 手指一动就被浏览器当滚屏 */
   -webkit-tap-highlight-color: transparent;
 }
 .rp-row:focus { outline: none; }
@@ -485,6 +493,13 @@ body.crew-sorting, body.crew-sorting * { cursor: grabbing; user-select: none; -w
 
 /* 底蕴 */
 .ess { margin-top: 4px; }
+/* 特质「系统未开放」标记 (审查 C10): 淡、小、不抢戏, 但必须看得见 */
+.tr-pend {
+  display: inline-block; margin-left: 6px; padding: 0 4px;
+  font-style: normal; font-size: 9.5px; letter-spacing: 0.5px;
+  color: rgba(120,98,66,0.85); border: 1px solid rgba(150,128,96,0.45);
+  border-radius: 2px; background: rgba(240,232,213,0.55);
+}
 .ess-h {
   display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
   margin: 9px 0 4px; font-size: 11.5px; letter-spacing: 3px; color: var(--ink, #2e2a24);
@@ -650,7 +665,8 @@ body.crew-sorting, body.crew-sorting * { cursor: grabbing; user-select: none; -w
  * ============================================================ */
 .cw-hint { font-size: 11px; letter-spacing: 1px; color: var(--ink-faint, rgba(58,48,38,0.44)); margin-bottom: 6px; line-height: 1.7; }
 .cw-hint b { font-weight: 400; color: var(--ink-soft, rgba(58,48,38,0.75)); }
-.cw-scroll { overflow-x: auto; overflow-y: hidden; touch-action: pan-x; padding-bottom: 3px; }
+.cw-scroll { overflow-x: auto; overflow-y: auto; touch-action: auto; padding-bottom: 3px; }
+/* ⚠ 审查 C5: 原来是 touch-action: pan-x ⇒ 任务矩阵区域在手机上无法纵向滚动 */
 .cw-matrix { display: grid; gap: 2px; min-width: 348px; }
 .cw-mh {
   font-size: 11px; text-align: center; padding: 3px 0 4px;

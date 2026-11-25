@@ -65,6 +65,14 @@ public sealed class WorldModule : JsvmModule
         "domainCheckJson" => (string)root.domainCheckJson(args[0], args[1], args[2]),
         "expandCheckJson" => (string)root.expandCheckJson(args[0], args[1], args[2], args[3], args[4]),
         "_countVeins" => (string)root._countVeins(),
+        /* ---- 放置/道路的只读口径 (审查 C11) ----
+           ⚠ 这三个出口在 mapgen-server.js 里早就定义了, case 却一直缺 ⇒ 任何人
+             Call("domainRadius"/"archetypeOf"/"bumpRoadVer") 都是**运行时** 500 (编译期不报)。
+             这正是「每个 JS 出口都要在对应 Invoke switch 加 case」那条铁律的潜伏缺口。
+             静态守卫: verify/check_js_exports.mjs (出口键集 ⊆ case 集)。 */
+        "domainRadius" => Convert.ToInt32(root.domainRadius(args[0], args[1])).ToString(),
+        "archetypeOf" => (string)root.archetypeOf(args[0], args[1]),
+        "bumpRoadVer" => Convert.ToInt32(root.bumpRoadVer()).ToString(),
         /* ---- 城市迭代的**渲染侧**出口 (留在世界层, 理由见文件头) ----
            ⚠ 它们定义在 city-evo.js (导出在 global.CityEvo), 不在 MapGenServer 上。 */
         "citySettlementsJson" => (string)script.CityEvo.settlementsJson(args[0], args[1]),

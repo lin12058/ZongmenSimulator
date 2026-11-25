@@ -203,9 +203,12 @@ public sealed class SqliteVirtualContext : VirtualContext
     public override void Dispose()
     {
         if (_disposed) return;
+        /* ⚠ 审查 C13: 原来先置 _disposed 再 Flush, 而 Flush 首行就是 `if (_disposed) return;`
+           ⇒ 那句 Flush 是**死代码**, 积压写全靠 MapWorldService.Dispose 手动兜。
+           任何直接 `using` 本类的路径都会丢最后一批写。现在先 flush 再标记关闭。 */
+        try { Flush(); } catch { /* 落库尽力而为 */ }
         _disposed = true;
         _cts.Cancel();
-        try { Flush(); } catch { /* 落库尽力而为 */ }
         try { _writer.Wait(2000); } catch { /* 忽略 */ }
         _cts.Dispose();
     }

@@ -3,8 +3,9 @@
  * ------------------------------------------------------------
  * 方案: docs/游戏设计/角色生成器-实施方案.md
  * 口径: 角色系统设定表.md + 六道属性体系.md + 用户 2026-11-25 四条定案
- *   1. 灵根 五项合计恒 100, 每系 >= 20, 系数量 1/2/3/4/5 = 1%/2.5%/20%/30%/46.5%
- *   2. 天赋 90~180 **均匀**, 单道 <= 60, 每道 6 项单项 <= 60
+ *   1. 灵根 每系只有 0 / 20 两档, 合计 = 20 x 系数量 (20/40/60/80/100);
+ *      纯度 = 本系 / 合计; 系数量 1/2/3/4/5 = 1%/2.5%/20%/30%/46.5%
+ *   2. 天赋 90~180 **平方偏斜** (90 + 90*rng^2, 均值 120, 150+ 约 18%), 单道 <= 60, 每道 6 项单项 <= 60
  *   3. 只生成凡人: 炼气期 1~3 层 (境界不由天赋推)
  *   4. 神通 0 已学 (cap 3, 靠功法书 + 闭关时间)
  *   5. 装备只发起步件 (灵力驱动规则待做)
@@ -30,7 +31,8 @@
 (function (global) {
   'use strict';
 
-  var VERSION = 1;
+  /* ⚠ 改语义就 +1: 灵根含义(0/20 二值)/特质表/天赋分布三处已变更 ⇒ v:1 与新数据必须可区分 (审查 D3) */
+  var VERSION = 2;
 
   /* ============================================================
    * 常量 —— 判据直接读这里, UI 不许再抄一份
@@ -62,7 +64,8 @@
 
     /* 特质 —— 只发正面, 负面一律不出 (玩家体验优先)
        抽取走「量化加成 → 权重 → 累计和轮盘」: 权重 = TRAIT_W_BASE / bonus^TRAIT_W_EXP
-       bonus 1→100, 4→3.1, 7→0.76, 10→0.316  ⇒ 天生道体比辟谷难出 316 倍 */
+       bonus 2→17.7, 4→3.1, 7→0.76, 10→0.316; 再乘档位系数 ⇒
+       辟谷(common 17.7) : 天生道体(epic 0.095) = 186 : 1 (审查 D8: 旧注释 316 倍是错的) */
     TRAIT_MIN: 1,
     TRAIT_MAX: 3,
     TRAIT_W_BASE: 100,
@@ -127,7 +130,7 @@
     { k: 'senses',    n: '耳目清明', tier: 'uncommon', bonus: 3,  v: '命中 +8，闪避 +2%' },
     { k: 'herb',      n: '妙手回春', tier: 'uncommon', bonus: 3,  v: '疗伤效果 +8%' },
     { k: 'calm',      n: '心如止水', tier: 'uncommon', bonus: 3,  v: '心境下限 +15，遇挫不馁' },
-    { k: 'insight',   n: '慧根',     tier: 'uncommon', bonus: 4,  v: '修炼速度 +4%' },
+    { k: 'insight',   n: '慧根',     tier: 'uncommon', bonus: 4,  v: '修炼速度 +6%' },
     { k: 'temper',    n: '沉静',     tier: 'uncommon', bonus: 4,  v: '突破成功率 +3%' },
     { k: 'memory',    n: '过目不忘', tier: 'uncommon', bonus: 4,  v: '参悟功法速度 +10%' },
     { k: 'ironbone',  n: '铜皮铁骨', tier: 'uncommon', bonus: 4,  v: '防御 +5%' },
@@ -152,7 +155,8 @@
     return m;
   })();
   /* 抽取权重: 加成越强越低, 档位再乘系数
-     bonus=2 → 17.7, 4 → 3.1, 7 → 0.76, 10 → 0.316; epic 再 ×0.3 */
+     bonus=2 → 17.7, 4 → 3.1, 7 → 0.76, 10 → 0.316; epic 再 x0.3
+     ⇒ 真实比值 17.7 : (0.316*0.3) = 186 : 1 (不是 316) */
   function traitWeight(t) {
     return CFG.TRAIT_W_BASE / Math.pow(t.bonus, CFG.TRAIT_W_EXP) * (CFG.TRAIT_TIER_MULT[t.tier] || 1);
   }
@@ -222,12 +226,15 @@
   }
 
   /* ---------- 小工具 ---------- */
-  function rint(rng, lo, hi) { return lo + Math.floor(rng() * (hi - lo + 1)); }
-  function pick(rng, arr) { return arr[Math.floor(rng() * arr.length)]; }
+  /* ⚠ 内部 mulberry32 恒 <1, 但本文件把 mulberry32/rng 一起导出 ⇒ 外部注入的 rng 返回 1 时
+     rint 会越到 hi+1、pick 会取到 arr[length] (undefined), 一路炸到 traits/ties (审查 D4) */
+  function rint(rng, lo, hi) { return Math.min(hi, Math.max(lo, lo + Math.floor(rng() * (hi - lo + 1)))); }
+  function pick(rng, arr) { return arr[Math.min(arr.length - 1, Math.max(0, Math.floor(rng() * arr.length)))]; }
   function clamp(x, lo, hi) { return Math.min(hi, Math.max(lo, x)); }
+  /* ⚠ j 必须夹在 [0,i]: 外部 rng 返回 1 时 Math.floor(rng()*(i+1))===i+1 ⇒ 换进 undefined (审查 D4) */
   function shuffle(rng, arr) {
     var a = arr.slice();
-    for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(rng() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; }
+    for (var i = a.length - 1; i > 0; i--) { var j = Math.min(i, Math.floor(rng() * (i + 1))); var t = a[i]; a[i] = a[j]; a[j] = t; }
     return a;
   }
   function sumArr(a) { var s = 0, i; for (i = 0; i < a.length; i++) s += a[i]; return s; }
@@ -252,8 +259,8 @@
   /* ============================================================
    * 灵根
    * ------------------------------------------------------------
-   * k 由分布抽; k 个系先各 20, 余数按「主系 3 : 其余 1」切;
-   * main = 值最大的下标 (并列随机)。
+   * k 由分布抽; 被选中的 k 个系各 20, 未选中为 0 —— **不切余数** (旧算法的 22/25/28 已删);
+   * main = 值最大的下标 (指定灵脉五行时该系优先, 否则全 20 并列随机)。
    * ============================================================ */
   function genRoot(rng, opts) {
     opts = opts || {};
@@ -281,8 +288,12 @@
       if (v[i] > mainVal) { mainVal = v[i]; ties = [i]; }
       else if (v[i] === mainVal) ties.push(i);
     }
-    /* 全 20 并列 ⇒ 随机取一个当主系 (旧代码默认 0, 会让所有人的主灵根都像"金") */
-    var main = ties.length > 1 ? ties[Math.floor(rng() * ties.length)] : ties[0];
+    /* 主系: 指定了本地灵脉五行 ⇒ 该系就是主系 («主系优先»);
+       否则全 20 并列时随机取一个 (旧代码默认 0, 会让所有人的主灵根都像「金」)
+       ⚠ 审查 D6: 原实现让 elem 混在 ties 里均匀随机, 实测只有 1/k ≈ 25.7% 命中 */
+    var main;
+    if (elem != null) main = elem;
+    else main = ties.length > 1 ? ties[Math.min(ties.length - 1, Math.floor(rng() * ties.length))] : ties[0];
 
     return {
       order: ELEMENTS.map(function (e) { return e.k; }),
@@ -360,7 +371,7 @@
   function genTraits(rng) {
     var want = rint(rng, CFG.TRAIT_MIN, CFG.TRAIT_MAX);
     var pool = TRAITS.slice(), out = [], high = 0, budget = CFG.TRAIT_BONUS_CAP;
-    var j, t, x, wsum, cands, pick;
+    var j, t, x, wsum, cands, chosen;   /* ⚠ 别叫 pick: 会遮蔽模块级 pick(rng, arr) (审查 D10) */
 
     while (out.length < want) {
       cands = [];
@@ -375,16 +386,16 @@
       if (!cands.length || wsum <= 0) break;
 
       x = rng() * wsum;
-      pick = cands[cands.length - 1];        /* 浮点兜底, 最后一格必中 */
+      chosen = cands[cands.length - 1];      /* 浮点兜底, 最后一格必中 */
       for (j = 0; j < cands.length; j++) {
         x -= traitWeight(cands[j]);
-        if (x <= 0) { pick = cands[j]; break; }
+        if (x <= 0) { chosen = cands[j]; break; }
       }
 
-      out.push({ n: pick.n, v: pick.v, tier: pick.tier, bonus: pick.bonus });
-      budget -= pick.bonus;
-      if (pick.tier === 'rare' || pick.tier === 'epic') high++;
-      pool.splice(pool.indexOf(pick), 1);
+      out.push({ n: chosen.n, v: chosen.v, tier: chosen.tier, bonus: chosen.bonus });
+      budget -= chosen.bonus;
+      if (chosen.tier === 'rare' || chosen.tier === 'epic') high++;
+      pool.splice(pool.indexOf(chosen), 1);
     }
     return out;
   }
@@ -404,10 +415,13 @@
     var items = [], gear = {}, i;
     function mk(slot, def) { var it = makeItem(def, idBase + '-' + slot); items.push(it); gear[slot] = it; return it; }
     var w = mk('weapon', STARTER.weapon);
+    /* ⚠ 以前只声明 STARTER.offhand 不产出 ⇒ equip.offhand 恒 null, 而 STARTER 是导出对象,
+       UI 遍历时会多画一个永远空的副手槽 (审查 D7) */
+    var o = mk('offhand', STARTER.offhand);
     mk('body', STARTER.body);
     mk('head', STARTER.head);
     var t = mk('talisman', STARTER.talisman);
-    var equip = { weapon: w.id, offhand: null, body: gear.body.id, head: gear.head.id, talisman: t.id };
+    var equip = { weapon: w.id, offhand: o.id, body: gear.body.id, head: gear.head.id, talisman: t.id };
     return { gear: gear, equip: equip, queue: [t.id], queueFrom: '本命一件', items: items };
   }
   function emptyKit() {
@@ -455,7 +469,9 @@
         if (BACKGROUNDS[bi].k === opts.background || BACKGROUNDS[bi].n === opts.background) { bg = BACKGROUNDS[bi]; break; }
       }
     }
-    if (!bg) bg = pickBackground(rng);
+    /* ⚠ 出生地走**独立** rng: 与主随机流分开 ⇒ 传 / 不传 opts.background 不会平移后面的
+       灵根 / 天赋 / 姓名 (审查 D11: 原来差一次 rng 消耗, 只改出生地就换掉整个人) */
+    if (!bg) bg = pickBackground(mulberry32(seed ^ 0x85ebca6b));
 
     var root = genRoot(rng, { element: opts.element });
     var tal = genTalents(rng, bg.bias);
@@ -528,24 +544,34 @@
    * opts = { worldSeed, settle:{id,type,pop,element,q,r}, round, size?, usedNames? }
    * 同 (worldSeed, settleId, round) ⇒ 池子稳定; slot 即下标, 招走的人占位不重排。
    * ============================================================ */
+  /* ⚠ 池子的「散列键」与「返回的 seedKey」必须是同一份: 原来两处各写一遍默认值填充,
+     改默认值就会让返回的键与实际散列的键不一致 (审查 D12) */
+  function poolKeyParts(opts, st) {
+    return [opts.worldSeed == null ? 'w0' : opts.worldSeed,
+            st.id == null ? 's0' : st.id,
+            opts.round == null ? 0 : opts.round, 'pool'];
+  }
+
   function genPool(opts) {
     opts = opts || {};
     var st = opts.settle || {};
     var type = st.type || 'village';
     var range = CFG.POOL[type] || CFG.POOL.village;
-    var poolRng = mulberry32(seedOf([opts.worldSeed == null ? 'w0' : opts.worldSeed,
-                                     st.id == null ? 's0' : st.id,
-                                     opts.round == null ? 0 : opts.round, 'pool']));
+    var poolRng = mulberry32(seedOf(poolKeyParts(opts, st)));
 
     var size = opts.size != null ? Math.round(opts.size) : rint(poolRng, range[0], range[1]);
-    if (st.pop) size = Math.min(size, Math.max(1, Math.round(st.pop / 50)));
+    /* ⚠ pop 只做**放大**参考 (文档: «pop 可再放大»): 原来只用 Math.min, pop=200 的仙城
+       会被压到 4 人 (村落量级), 直接跌破类型的区间下限 (审查 C9) */
+    if (st.pop) size = Math.max(size, Math.min(CFG.POOL_MAX, Math.max(1, Math.round(st.pop / 50))));
     size = clamp(size, 0, CFG.POOL_MAX);
 
     /* 一村多同姓: 70% 整池共用一个姓, 否则每人五五开 */
     var villageSurname = pick(poolRng, SURNAMES);
     var shareSurname = poolRng() < 0.7;
 
-    var used = opts.usedNames || {};
+    /* ⚠ 浅拷贝: 原地写调用方的 usedNames ⇒ 同参数调第二次时每格都撞名、重试到 guard 上限,
+       整池换人 (方案档 §十二.4 «同参数两次结果相同» 会 FAIL) —— 审查 C8 */
+    var used = Object.assign({}, opts.usedNames || {});
     var out = [], i, guard;
     for (i = 0; i < size; i++) {
       var surname = (shareSurname || poolRng() < 0.5) ? villageSurname : null;
@@ -570,9 +596,7 @@
     }
     return {
       v: VERSION,
-      seedKey: [opts.worldSeed == null ? 'w0' : opts.worldSeed,
-                st.id == null ? 's0' : st.id,
-                opts.round == null ? 0 : opts.round, 'pool'].join('|'),
+      seedKey: poolKeyParts(opts, st).join('|'),
       settle: { id: st.id == null ? null : st.id, type: type,
                 pop: st.pop == null ? null : st.pop, element: st.element == null ? null : st.element },
       candidates: out
@@ -596,6 +620,9 @@
       }
     }
     if (nz < 1 || nz > 5) bad.push(p.name + ': 灵根系数量 ' + nz);
+    /* ⚠ 这两行以前只算不判 (minNz 写而不读, 审查 D9): 非零项必须 >= ROOT_MIN_PER,
+       否则「每系 >= 20」的口径没有任何判据守 */
+    if (nz > 0 && minNz < CFG.ROOT_MIN_PER) bad.push(p.name + ': 灵根非零项最小 ' + minNz + ' < ' + CFG.ROOT_MIN_PER);
     if (rs !== nz * CFG.ROOT_STEP) bad.push(p.name + ': 灵根合计 ' + rs + '，应为 ' + (nz * CFG.ROOT_STEP));
     if (c.meta.rootCount !== nz) bad.push(p.name + ': meta.rootCount 与实际不符');
     if (p.root.v[p.root.main] !== Math.max.apply(null, p.root.v)) bad.push(p.name + ': main 不是最大系');
@@ -648,7 +675,12 @@
       if (!it) { bad.push(p.name + ': 槽位引用了不存在的物品 ' + slots[i]); continue; }
       if (it.kind !== slots[i]) bad.push(p.name + ': 槽位错配 ' + slots[i] + '<-' + it.kind);
     }
-    if (p.queue.length < CFG.TALISMAN_MIN || p.queue.length > CFG.TALISMAN_MAX) bad.push(p.name + ': 法宝队列 ' + p.queue.length);
+    /* ⚠ gear:false 是官方支持用例 (queue=[] / equip 全 null) ⇒ 下限只在「有法宝槽」时校验;
+       原实现把它判成错误, 于是 selfTest 的边界用例恰好绕开了 checkCandidate (审查 D5) */
+    if (p.queue.length > CFG.TALISMAN_MAX) bad.push(p.name + ': 法宝队列 ' + p.queue.length);
+    if (p.equip.talisman && p.queue.length < CFG.TALISMAN_MIN) {
+      bad.push(p.name + ': 有法宝槽但队列 ' + p.queue.length + ' (< ' + CFG.TALISMAN_MIN + ')');
+    }
     for (i = 0; i < p.queue.length; i++) {
       if (!byId[p.queue[i]]) bad.push(p.name + ': 队列引用了不存在的物品');
     }

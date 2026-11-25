@@ -221,7 +221,9 @@ public static class WsFrame
        与 Login/Tile 同例: **请求与响应共用同一个类型号** (方向由上下文区分)。
        PlaceCheck  = 悬停即问 (高频, 只读, 不落库)
        PlaceCommit = 确认落子 (低频, 写: 落库 + 重算道路 + 版本号前进)
-       ⚠ 7 号 (CityQuery) 是 P2「城市迭代」的预留位, 本轮**不实现** —— 别占。 */
+       ⚠ 审查 D25: 这里原本写着「7 号 (CityQuery) 是预留位, 别占」, 而下一段就把 7 号给了时钟
+         ⇒ 后续照注释加 CityQuery 会与时钟帧**撞号**。城市迭代已走 HTTP/派生层, 不需要新帧;
+         真要加, 从 **8** 起。 */
     public const byte PlaceCheck = 5;
     public const byte PlaceCommit = 6;
 
