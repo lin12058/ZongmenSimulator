@@ -226,6 +226,12 @@ public sealed class CrewStore : IDisposable
             /* --- jobs: 整表替换 --- */
             if (patch["jobs"] is JsonArray jobs) root["jobs"] = jobs.DeepClone();
 
+            /* --- squads / curSquad: 整表替换 ---
+               ⚠ 队序与队内站位都是**数组顺序**, 逐元素合并没有意义 (拖动只是换位置);
+                 增删队也是整份换。所以这里不做 MergeInto, 直接替换。 */
+            if (patch["squads"] is JsonArray sgs) root["squads"] = sgs.DeepClone();
+            if (patch["curSquad"] is JsonNode csq) root["curSquad"] = csq.DeepClone();
+
             var next = root.Deserialize<CrewContract>(CrewJson.Options);
             if (next == null) { error = "合并结果无法解析"; return null; }
             return Save(next, id);

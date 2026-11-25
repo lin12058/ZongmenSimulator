@@ -32,8 +32,29 @@ public sealed class CrewContract
     public long UpdatedAt { get; set; }
 
     public SquadDto Squad { get; set; } = new();
+
+    /// <summary>多小队分组 (2026-11-25 §12 升级 · 修 S5)。
+    /// ⚠ 与 <see cref="Squad"/>.Members 的分工: 后者是**全员平面名单** (前端 hydrate 据此建人,
+    ///   少一个就少一个弟子), 本字段只回答「谁在哪队 / 队内第几位 / 队叫什么 / 队序」。
+    ///   成员归属的唯一真源是 `Members` 的**数组顺序**, 不另存 position 字段。
+    ///   缺失或为空 ⇒ 前端退化为「一队装全员」(与 normalizeSquads 的补队口径一致)。</summary>
+    public List<SquadGroupDto> Squads { get; set; } = new();
+
+    /// <summary>当前队 id。属前端本地偏好, 存下来只为「dump→hydrate 一次往返不丢」。</summary>
+    public string CurSquad { get; set; } = "";
+
     public BagDto Bag { get; set; } = new();
     public List<JobDto> Jobs { get; set; } = new();
+}
+
+/// <summary>一支小队的**分组信息** (不含成员详情 —— 那些在 <see cref="SquadDto.Members"/> 里)。</summary>
+public sealed class SquadGroupDto
+{
+    public string Id { get; set; } = "";
+    /// <summary>队名 (≤4 字, 由前端清洗; 服务端只存不校验)。</summary>
+    public string Name { get; set; } = "";
+    /// <summary>成员 id, **顺序即站位** (0 = 队首)。</summary>
+    public List<string> Members { get; set; } = new();
 }
 
 /// <summary>小队: 编制 + 成员。没换人的情况下, 只有 Members 里的内容会变。</summary>
