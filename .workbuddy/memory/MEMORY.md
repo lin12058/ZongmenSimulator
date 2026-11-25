@@ -49,7 +49,7 @@
 - 验收 `_crew_harness.html?test=1`（148 条）+ `_crew_static.mjs 8199`。
 
 ## ⚠ 构建 / 验证 / 本机坑（细则 → DETAILS + skill）
-- 三红线：① 清文件一律 Node `fs.unlinkSync` 绝对路径+basename/数量断言，先过 `git ls-files`，**禁 shell 通配与 `git rm`**（已 3 次误删，`verify/_*` 删后不可恢复）② `git push` 必加 `-c http.proxy= -c https.proxy=` ③ 后台实例活不过一个回合 ⇒ 起实例+跑实机判据**同回合**，别 kill 用户 8140。
+- 三红线：① 清文件一律 Node `fs.unlinkSync` 绝对路径+basename/数量断言，先过 `git ls-files`，**禁 shell 通配与 `git rm`**（已 3 次误删，`verify/_*` 删后不可恢复）② `git push` 的代理要现场探：**2026-11-26 起直连 GitHub 不通**（`Recv failure: Connection was reset`），须走 `-c http.proxy=http://127.0.0.1:7897`（v2rayN，实测 200）；旧口径「必加 `-c http.proxy=` 绕代理」已失效。推前先 `curl -x http://127.0.0.1:<port> -m 6 https://github.com` 探 7897/12618 哪个通，别硬套 ③ 后台实例活不过一个回合 ⇒ 起实例+跑实机判据**同回合**，别 kill 用户 8140。
 - 判据四防：绝对值阈值必假红（改 A/B 归因）／参照系不能是被测规则自己的目标函数／复算同容差语义／源码守卫判整个函数体且先剥注释。诊断走 Node（PS 输出被吞、Bash shim 缺 ls/cd/dirname、`/tmp→D:\tmp`、`>log` 吞输出）；临时脚本写 `Temp/`；基线离线 30+在线 6；rc=2=跳过。
 - ⚠ 合并两线：题名牌可删、**本宗面板不可删**；对撞文件 `git checkout --theirs` 取远端再打补丁。
 
