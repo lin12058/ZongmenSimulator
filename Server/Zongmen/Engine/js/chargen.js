@@ -36,10 +36,13 @@
    * 常量 —— 判据直接读这里, UI 不许再抄一份
    * ============================================================ */
   var CFG = {
-    /* 灵根 */
-    ROOT_TOTAL: 100,          // 五项合计恒 100
-    ROOT_MIN_PER: 20,         // 有灵根的系, 最低 20
-    ROOT_MAIN_WEIGHT: 3,      // 主系权重 (其余各 1)
+    /* 灵根 —— ⚠ 初始只有两档: 0(这系不通) 或 20(通了), 没有中间值。
+       合计 = 20 × 系数量 (20/40/60/80/100), 不再强行凑 100。
+       纯度 (面板/占比) = 本系 / 合计, 单系即 100%, 五系各 20%。 */
+    ROOT_STEP: 20,            // 初始每系唯一取值
+    ROOT_TOTAL: 100,          // 五系全通时的合计 (纯度换算的分母上限, 不是硬校验)
+    ROOT_MIN_PER: 20,         // 与非零项同值, 保留供旧断言读
+    ROOT_MAIN_WEIGHT: 3,      // (预留: 后续强化加点时主系权重)
     /* 系数量分布 (1/2/3/4/5) —— 累计阈值 */
     ROOT_K_CUT: [0.010, 0.035, 0.235, 0.535],   // <0.010→1系, <0.035→2系, <0.235→3系, <0.535→4系, 其余→5系
     ROOT_K_PCT: ['1%', '2.5%', '20%', '30%', '46.5%'],
@@ -47,15 +50,28 @@
     /* 天赋 */
     TALENT_MIN: 90,
     TALENT_MAX: 180,
+    /* 总量偏斜: total = MIN + (MAX-MIN) * rng^SKEW
+       SKEW=1 均匀 (旧) ⇒ 均值 135, 150+ 占 33%, 满街双道 60 的苗子
+       SKEW=2 ⇒ 均值 120, 150+ 约 18%, 大多数人挤在 90~120
+       SKEW=3 ⇒ 均值 112.5, 150+ 约 12.6%  (想更苦就往上调) */
+    TALENT_SKEW: 2,
     DAO_CAP: 60,              // 单道上限
     TALENT_CAP: 60,           // 单项上限
     DAO_BASE_MIN: 2,          // 每道底 (避免一排 0)
     DAO_BASE_MAX: 6,
 
-    /* 特质 */
+    /* 特质 —— 只发正面, 负面一律不出 (玩家体验优先)
+       抽取走「量化加成 → 权重 → 累计和轮盘」: 权重 = TRAIT_W_BASE / bonus^TRAIT_W_EXP
+       bonus 1→100, 4→3.1, 7→0.76, 10→0.316  ⇒ 天生道体比辟谷难出 316 倍 */
     TRAIT_MIN: 1,
     TRAIT_MAX: 3,
-    TRAIT_POS_RATE: 0.55,
+    TRAIT_W_BASE: 100,
+    TRAIT_W_EXP: 2.5,
+    /* 档位再乘一道系数 —— 让"高档很稀"和"bonus 是游戏内强度"两件事解耦,
+       不用为了压概率去扭曲 bonus 语义 */
+    TRAIT_TIER_MULT: { common: 1, uncommon: 0.85, rare: 0.6, epic: 0.3 },
+    TRAIT_HIGH_CAP: 1,        // 每人 rare+epic 合计最多几条 (防"三条神体")
+    TRAIT_BONUS_CAP: 10,      // 单人加成合计上限 (3 条都偏高就够不着 18+)
 
     /* 境界 / 修为 */
     REALM_FIXED: '炼气',       // 只出凡人
@@ -91,30 +107,55 @@
     { k: 'array', n: '阵', talents: ['布阵', '阵眼', '连纹', '速设', '掩息', '破阵'] }
   ];
 
-  /* 特质 11 对 (正反互斥; 效果由属性层实现, 本文件只发数据) */
-  var TRAIT_PAIRS = [
-    { pair: 'diligence', pos: { n: '勤勉', v: '劳作效率 +35%' }, neg: { n: '懒散', v: '劳作效率 -30%' } },
-    { pair: 'grit',      pos: { n: '坚毅', v: '受伤恢复 +50%' }, neg: { n: '怯懦', v: '受伤恢复 -40%' } },
-    { pair: 'insight',   pos: { n: '慧根', v: '修炼速度 +25%' }, neg: { n: '愚钝', v: '修炼速度 -25%' } },
-    { pair: 'social',    pos: { n: '亲和', v: '同门心境 +8' },   neg: { n: '孤僻', v: '同门心境 -8' } },
-    { pair: 'nocturne',  pos: { n: '夜行', v: '夜间效率 +20%' }, neg: { n: '嗜睡', v: '夜间效率 -25%' } },
-    { pair: 'temper',    pos: { n: '沉静', v: '突破成功率 +10%' }, neg: { n: '急躁', v: '突破成功率 -10%' } },
-    { pair: 'appetite',  pos: { n: '辟谷', v: '食量 -50%' },     neg: { n: '大胃', v: '食量 +50%' } },
-    { pair: 'hands',     pos: { n: '巧手', v: '炼器成器 +20%' }, neg: { n: '笨拙', v: '炼器成器 -20%' } },
-    { pair: 'nerve',     pos: { n: '胆识', v: '近战伤害 +10%' }, neg: { n: '畏战', v: '近战伤害 -15%' } },
-    { pair: 'focus',     pos: { n: '专注', v: '工序失误 -30%' }, neg: { n: '走神', v: '工序失误 +30%' } },
-    { pair: 'blood',     pos: { n: '血旺', v: '气血上限 +15%' }, neg: { n: '亏血', v: '气血上限 -15%' } }
+  /* 特质 —— 24 条, **全正面**, 同一 k 互斥 (不出重复)
+     tier: common 寻常 / uncommon 良 / rare 异禀 / epic 天命 (展示与后期限定用, 不再直接决定概率)
+     bonus: 加成强度量化 (1~10), **抽取权重 = BASE / bonus^EXP** —— 越强越难出
+     抽法: 把候选按权重累加成一条数轴, rng() 落点决定抽到谁 (权重轮盘)
+     ⚠ 百分比一律按「原值 ÷4」定档 (2026-11-25 定案): 别写 +20%, 写 +5%;
+       点数值 (气血 +10 / 心境 +8 / 神识 +1 格) 不缩, 它们本来就是绝对量。 */
+  var TRAITS = [
+    { k: 'quiet',     n: '辟谷',     tier: 'common',   bonus: 2,  v: '食量 -13%' },
+    { k: 'diligence', n: '勤勉',     tier: 'common',   bonus: 2,  v: '劳作效率 +9%' },
+    { k: 'night',     n: '夜行',     tier: 'common',   bonus: 2,  v: '夜间效率 +5%' },
+    { k: 'hands',     n: '巧手',     tier: 'common',   bonus: 2,  v: '炼器成器 +5%' },
+    { k: 'focus',     n: '专注',     tier: 'common',   bonus: 2,  v: '工序失误 -8%' },
+    { k: 'nerve',     n: '胆识',     tier: 'common',   bonus: 2,  v: '近战伤害 +3%' },
+    { k: 'grit',      n: '坚毅',     tier: 'common',   bonus: 3,  v: '受伤恢复 +13%，气血上限 +10' },
+    { k: 'blood',     n: '血旺',     tier: 'common',   bonus: 3,  v: '气血上限 +4%' },
+
+    { k: 'social',    n: '亲和',     tier: 'uncommon', bonus: 3,  v: '同门心境 +8' },
+    { k: 'senses',    n: '耳目清明', tier: 'uncommon', bonus: 3,  v: '命中 +8，闪避 +2%' },
+    { k: 'herb',      n: '妙手回春', tier: 'uncommon', bonus: 3,  v: '疗伤效果 +8%' },
+    { k: 'calm',      n: '心如止水', tier: 'uncommon', bonus: 3,  v: '心境下限 +15，遇挫不馁' },
+    { k: 'insight',   n: '慧根',     tier: 'uncommon', bonus: 4,  v: '修炼速度 +4%' },
+    { k: 'temper',    n: '沉静',     tier: 'uncommon', bonus: 4,  v: '突破成功率 +3%' },
+    { k: 'memory',    n: '过目不忘', tier: 'uncommon', bonus: 4,  v: '参悟功法速度 +10%' },
+    { k: 'ironbone',  n: '铜皮铁骨', tier: 'uncommon', bonus: 4,  v: '防御 +5%' },
+
+    { k: 'spiriteye', n: '天生灵眸', tier: 'rare',     bonus: 5,  v: '神识范围 +1 格，可窥禁制' },
+    { k: 'lucky',     n: '福缘深厚', tier: 'rare',     bonus: 5,  v: '奇遇与拾遗概率 +8%' },
+    { k: 'fivemix',   n: '五行亲和', tier: 'rare',     bonus: 5,  v: '聚气速度 +4%' },
+    { k: 'charm',     n: '天生魅体', tier: 'rare',     bonus: 6,  v: '容仪摄人：同门心境 +12，招揽与议价极易见效' },
+    { k: 'mighty',    n: '力大无穷', tier: 'rare',     bonus: 6,  v: '近战伤害 +5%，负重 +5%' },
+    { k: 'dragon',    n: '龙象之力', tier: 'rare',     bonus: 7,  v: '气血上限 +6%，近战伤害 +4%' },
+
+    { k: 'daoheart',  n: '道心通明', tier: 'epic',     bonus: 9,  v: '突破成功率 +5%，心境不堕' },
+    { k: 'daobody',   n: '天生道体', tier: 'epic',     bonus: 10, v: '修炼速度 +10%，聚气 +3%' }
   ];
-  /* 名字 → pair/正负 (自检与去重要用) */
+  /* 名字 → {n,v,k,tier,bonus,kind,pair}: 纯正面, pair 用 k 自身 (同 key 互斥) */
   var TRAIT_INDEX = (function () {
-    var m = {}, i, p;
-    for (i = 0; i < TRAIT_PAIRS.length; i++) {
-      p = TRAIT_PAIRS[i];
-      m[p.pos.n] = { pair: p.pair, kind: 'pos', v: p.pos.v };
-      m[p.neg.n] = { pair: p.pair, kind: 'neg', v: p.neg.v };
+    var m = {}, i, t;
+    for (i = 0; i < TRAITS.length; i++) {
+      t = TRAITS[i];
+      m[t.n] = { n: t.n, v: t.v, k: t.k, tier: t.tier, bonus: t.bonus, kind: 'pos', pair: 'solo-' + t.k };
     }
     return m;
   })();
+  /* 抽取权重: 加成越强越低, 档位再乘系数
+     bonus=2 → 17.7, 4 → 3.1, 7 → 0.76, 10 → 0.316; epic 再 ×0.3 */
+  function traitWeight(t) {
+    return CFG.TRAIT_W_BASE / Math.pow(t.bonus, CFG.TRAIT_W_EXP) * (CFG.TRAIT_TIER_MULT[t.tier] || 1);
+  }
 
   /* 出身 (凡人没有职司; 入宗后再转) —— bias = 六道主/次 */
   var BACKGROUNDS = [
@@ -197,26 +238,8 @@
     for (i = 0; i < weights.length; i++) { acc += weights[i]; if (x <= acc) return i; }
     return weights.length - 1;
   }
-  /** 把 total 按 weights 拆成整数, 每份 >= 0, 和恒 = total */
-  function splitWeighted(rng, total, weights) {
-    var i, raw = [], s = 0;
-    for (i = 0; i < weights.length; i++) { var r = rng() * weights[i]; raw.push(r); s += r; }
-    var out = [], used = 0;
-    for (i = 0; i < weights.length; i++) {
-      var v = s > 0 ? Math.floor(total * raw[i] / s) : 0;
-      out.push(v); used += v;
-    }
-    var left = total - used;
-    /* 余数按小数部分从大到小补 (确定性; 并列按索引) */
-    var order = [], frac = [];
-    for (i = 0; i < weights.length; i++) {
-      frac.push(s > 0 ? (total * raw[i] / s) - Math.floor(total * raw[i] / s) : 0);
-      order.push(i);
-    }
-    order.sort(function (a, b) { return (frac[b] - frac[a]) || (a - b); });
-    for (i = 0; left > 0; i++) { out[order[i % order.length]]++; left--; }
-    return out;
-  }
+  /* ⚠ 旧的 splitWeighted(按权重切余数) 已删: 灵根改成 0/20 二值后不再需要,
+     留着只会被人再拿去切出 22/25/28 这种中间值。 */
   function pickBackground(rng) {
     var x = rng() * BG_TOTAL, acc = 0;
     for (var i = 0; i < BACKGROUNDS.length; i++) {
@@ -251,25 +274,22 @@
     rest = shuffle(rng, rest);
     while (present.length < k) present.push(rest.pop());
 
-    var weights = [];
-    for (i = 0; i < present.length; i++) weights.push(i === 0 ? CFG.ROOT_MAIN_WEIGHT : 1);
-
-    var surplus = CFG.ROOT_TOTAL - CFG.ROOT_MIN_PER * k;
-    var share = (surplus > 0 && present.length) ? splitWeighted(rng, surplus, weights) : null;
-
     var v = [0, 0, 0, 0, 0], mainVal = -1, ties = [];
-    for (i = 0; i < present.length; i++) v[present[i]] = CFG.ROOT_MIN_PER + (share ? share[i] : 0);
+    /* 通了就是 20, 没通就是 0 —— 不切余数 (旧算法会切出 22/25/28 这种中间值) */
+    for (i = 0; i < present.length; i++) v[present[i]] = CFG.ROOT_STEP;
     for (i = 0; i < 5; i++) {
       if (v[i] > mainVal) { mainVal = v[i]; ties = [i]; }
       else if (v[i] === mainVal) ties.push(i);
     }
+    /* 全 20 并列 ⇒ 随机取一个当主系 (旧代码默认 0, 会让所有人的主灵根都像"金") */
     var main = ties.length > 1 ? ties[Math.floor(rng() * ties.length)] : ties[0];
 
     return {
       order: ELEMENTS.map(function (e) { return e.k; }),
       v: v,
       main: main,
-      count: present.length
+      count: present.length,
+      sum: present.length * CFG.ROOT_STEP
     };
   }
 
@@ -277,7 +297,9 @@
    * 天赋 (90~180 均匀, 单道 <=60, 每道 6 项 <=60)
    * ============================================================ */
   function genTalents(rng, bias) {
-    var total = rint(rng, CFG.TALENT_MIN, CFG.TALENT_MAX);
+    /* 平方偏斜: 低天赋是常态, 180 是万里挑一 (见 CFG.TALENT_SKEW) */
+    var total = Math.round(CFG.TALENT_MIN +
+      (CFG.TALENT_MAX - CFG.TALENT_MIN) * Math.pow(rng(), CFG.TALENT_SKEW));
     var d, sums = [], weights = [], sumAll = 0;
 
     for (d = 0; d < DAO.length; d++) {
@@ -326,31 +348,45 @@
   }
 
   /* ============================================================
-   * 特质 (1~3 条, 正反互斥, >=2 条时强制一正一负)
+   * 特质 1~3 条, 全正面, 不重复
+   * ------------------------------------------------------------
+   * 不再「先掷档再抽条目」—— 那样档位概率是常数, 三档叠加很容易出双神体。
+   * 现在:
+   *   1) 每条候选按 w = TRAIT_W_BASE / bonus^TRAIT_W_EXP 给权重 (越强越短)
+   *   2) 把候选权重累加成一条数轴, x = rng()*总权重 落点决定抽谁 (权重轮盘)
+   *   3) 抽走即从池子里删 (不重复); rare+epic 全局最多 TRAIT_HIGH_CAP 条
+   *   4) 单人 bonus 合计不超过 TRAIT_BONUS_CAP (三条都高档也堆不起来)
    * ============================================================ */
   function genTraits(rng) {
-    var n = rint(rng, CFG.TRAIT_MIN, CFG.TRAIT_MAX);
-    var pairs = shuffle(rng, TRAIT_PAIRS).slice(0, n);
-    var out = [], i;
-    for (i = 0; i < pairs.length; i++) {
-      out.push(rng() < CFG.TRAIT_POS_RATE ? { p: pairs[i], t: pairs[i].pos }
-                                          : { p: pairs[i], t: pairs[i].neg });
-    }
-    if (out.length >= 2) {
-      var hasPos = false, hasNeg = false;
-      /* ⚠ 不能读 out[i].t.kind: TRAIT_PAIRS 的 pos/neg 只有 {n,v}, kind 在 TRAIT_INDEX 里。
-         读错 ⇒ hasPos 恒 false ⇒ 第一条特质恒被翻成负面 (55% 正率被打穿) */
-      for (i = 0; i < out.length; i++) {
-        if (TRAIT_INDEX[out[i].t.n].kind === 'pos') hasPos = true; else hasNeg = true;
+    var want = rint(rng, CFG.TRAIT_MIN, CFG.TRAIT_MAX);
+    var pool = TRAITS.slice(), out = [], high = 0, budget = CFG.TRAIT_BONUS_CAP;
+    var j, t, x, wsum, cands, pick;
+
+    while (out.length < want) {
+      cands = [];
+      wsum = 0;
+      for (j = 0; j < pool.length; j++) {
+        t = pool[j];
+        if (t.bonus > budget) continue;                                        /* 预算不够 */
+        if ((t.tier === 'rare' || t.tier === 'epic') && high >= CFG.TRAIT_HIGH_CAP) continue;
+        cands.push(t);
+        wsum += traitWeight(t);
       }
-      if (!hasPos || !hasNeg) {
-        var first = out[0];
-        out[0] = { p: first.p, t: (first.t === first.p.pos) ? first.p.neg : first.p.pos };
+      if (!cands.length || wsum <= 0) break;
+
+      x = rng() * wsum;
+      pick = cands[cands.length - 1];        /* 浮点兜底, 最后一格必中 */
+      for (j = 0; j < cands.length; j++) {
+        x -= traitWeight(cands[j]);
+        if (x <= 0) { pick = cands[j]; break; }
       }
+
+      out.push({ n: pick.n, v: pick.v, tier: pick.tier, bonus: pick.bonus });
+      budget -= pick.bonus;
+      if (pick.tier === 'rare' || pick.tier === 'epic') high++;
+      pool.splice(pool.indexOf(pick), 1);
     }
-    var res = [];
-    for (i = 0; i < out.length; i++) res.push({ n: out[i].t.n });
-    return res;
+    return out;
   }
 
   /* ============================================================
@@ -475,6 +511,8 @@
         backgroundKey: bg.k,
         rootCount: root.count,
         rootMain: ELEMENTS[root.main].n,
+        rootSum: root.sum,                                                    // 20 × 系数量
+        rootPct: root.v.map(function (x) { return Math.round(x / root.sum * 1000) / 10; }),   // 纯度
         talentTotal: tal.total,
         layer: layer,
         expMax: expMax,
@@ -547,15 +585,18 @@
   function checkCandidate(c) {
     var bad = [], p = c.pawn, i, d, k;
     var rs = sumArr(p.root.v);
-    if (rs !== CFG.ROOT_TOTAL) bad.push(p.name + ': 灵根合计 ' + rs);
     if (p.root.v.length !== 5) bad.push(p.name + ': 灵根不是 5 项');
     var nz = 0, minNz = 999;
     for (i = 0; i < 5; i++) {
       if (p.root.v[i] < 0) bad.push(p.name + ': 灵根负值');
       if (p.root.v[i] > 0) { nz++; if (p.root.v[i] < minNz) minNz = p.root.v[i]; }
+      /* ⚠ 初始只有两档: 0 或 ROOT_STEP(20), 22/25/28 这种中间值一律非法 */
+      if (p.root.v[i] !== 0 && p.root.v[i] !== CFG.ROOT_STEP) {
+        bad.push(p.name + ': 灵根取值不是 0/' + CFG.ROOT_STEP + ' → ' + p.root.v[i]);
+      }
     }
     if (nz < 1 || nz > 5) bad.push(p.name + ': 灵根系数量 ' + nz);
-    if (nz && minNz < CFG.ROOT_MIN_PER) bad.push(p.name + ': 有灵根的系低于 20');
+    if (rs !== nz * CFG.ROOT_STEP) bad.push(p.name + ': 灵根合计 ' + rs + '，应为 ' + (nz * CFG.ROOT_STEP));
     if (c.meta.rootCount !== nz) bad.push(p.name + ': meta.rootCount 与实际不符');
     if (p.root.v[p.root.main] !== Math.max.apply(null, p.root.v)) bad.push(p.name + ': main 不是最大系');
 
@@ -575,13 +616,19 @@
     if (tt < CFG.TALENT_MIN || tt > CFG.TALENT_MAX) bad.push(p.name + ': 天赋总量 ' + tt);
 
     if (p.traits.length < CFG.TRAIT_MIN || p.traits.length > CFG.TRAIT_MAX) bad.push(p.name + ': 特质条数');
-    var seen = {};
+    var seen = {}, highN = 0, bonusSum = 0;
     for (i = 0; i < p.traits.length; i++) {
       var def = TRAIT_INDEX[p.traits[i].n];
       if (!def) { bad.push(p.name + ': 特质不在表内 ' + p.traits[i].n); continue; }
-      if (seen[def.pair]) bad.push(p.name + ': 特质正反同现');
-      seen[def.pair] = 1;
+      if (def.kind !== 'pos') bad.push(p.name + ': 发出了负面特质 ' + p.traits[i].n);
+      if (seen[def.k]) bad.push(p.name + ': 特质重复 ' + p.traits[i].n);
+      seen[def.k] = 1;
+      if (!(def.bonus >= 1 && def.bonus <= 10)) bad.push(p.name + ': 特质加成分越界 ' + p.traits[i].n);
+      if (def.tier === 'rare' || def.tier === 'epic') highN++;
+      bonusSum += def.bonus;
     }
+    if (highN > CFG.TRAIT_HIGH_CAP) bad.push(p.name + ': 异禀以上 ' + highN + ' 条 (上限 ' + CFG.TRAIT_HIGH_CAP + ')');
+    if (bonusSum > CFG.TRAIT_BONUS_CAP) bad.push(p.name + ': 特质加成合计 ' + bonusSum + ' (上限 ' + CFG.TRAIT_BONUS_CAP + ')');
 
     if (!/^炼气期 · [1-3] 层$/.test(p.realm)) bad.push(p.name + ': 境界 ' + p.realm);
     if (!(p.exp > 0 && p.exp <= c.meta.expMax)) bad.push(p.name + ': 修为 ' + p.exp);
@@ -645,7 +692,8 @@
 
   function stats(n) {
     n = n || 20000;
-    var kc = [0, 0, 0, 0, 0, 0], tsum = 0, tmin = 999, tmax = 0, bad = 0, i;
+    var kc = [0, 0, 0, 0, 0, 0], tb = [0, 0, 0, 0, 0, 0], tsum = 0, tmin = 999, tmax = 0, bad = 0, i;
+    var highP = 0, epicP = 0, bonusSum = 0;
     for (i = 0; i < n; i++) {
       var c;
       try { c = genCandidate({ worldSeed: 'stats', settleId: 's' + (i % 31), round: i % 7, slot: i }); }
@@ -654,10 +702,28 @@
       kc[k] = (kc[k] || 0) + 1;
       var t = c.pawn.talents.total;
       tsum += t; if (t < tmin) tmin = t; if (t > tmax) tmax = t;
+      tb[t < 105 ? 0 : t < 120 ? 1 : t < 135 ? 2 : t < 150 ? 3 : t < 165 ? 4 : 5]++;
+      /* 高档占比: 看"人均神体"有没有压住 */
+      var ts2 = c.pawn.traits, hasH = false, hasE = false, q2, tf;
+      for (q2 = 0; q2 < ts2.length; q2++) {
+        tf = TRAIT_INDEX[ts2[q2].n];
+        if (!tf) continue;
+        if (tf.tier === 'rare' || tf.tier === 'epic') hasH = true;
+        if (tf.tier === 'epic') hasE = true;
+        bonusSum += tf.bonus;
+      }
+      if (hasH) highP++;
+      if (hasE) epicP++;
       if (checkCandidate(c).length) bad++;
     }
-    var out = { n: n, bad: bad, talentAvg: Math.round(tsum / Math.max(1, n - bad)), talentMin: tmin, talentMax: tmax, rootK: {} };
+    var out = { n: n, bad: bad, talentAvg: Math.round(tsum / Math.max(1, n - bad)), talentMin: tmin, talentMax: tmax,
+                rootK: {}, talentBands: [],
+                highPct: Math.round(highP / Math.max(1, n) * 10000) / 100,
+                epicPct: Math.round(epicP / Math.max(1, n) * 10000) / 100,
+                traitBonusAvg: Math.round(bonusSum / Math.max(1, n) * 100) / 100 };
     for (i = 1; i <= 5; i++) out.rootK[i] = { n: kc[i], pct: Math.round(kc[i] / Math.max(1, n) * 10000) / 100 };
+    /* 天赋分档 (看偏斜用): 90-104 / 105-119 / 120-134 / 135-149 / 150-164 / 165-180 */
+    for (i = 0; i < 6; i++) out.talentBands.push(Math.round(tb[i] / Math.max(1, n) * 1000) / 10);
     return out;
   }
 
@@ -669,7 +735,7 @@
     CFG: CFG,
     ELEMENTS: ELEMENTS,
     DAO: DAO,
-    TRAIT_PAIRS: TRAIT_PAIRS,
+    TRAITS: TRAITS,
     TRAIT_INDEX: TRAIT_INDEX,
     BACKGROUNDS: BACKGROUNDS,
     STARTER: STARTER,
@@ -679,6 +745,7 @@
     genRoot: genRoot,
     genTalents: genTalents,
     genTraits: genTraits,
+    traitWeight: traitWeight,
     genCandidate: genCandidate,
     genPool: genPool,
     checkCandidate: checkCandidate,

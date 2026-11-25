@@ -29,7 +29,12 @@
   var CFG = {
     ROOT_SUM: 100,
     TALENT_MIN: 90, TALENT_MAX: 180, TALENT_CAP: 60, DAO_CAP: 60,
+    TALENT_SKEW: 2,           /* total = MIN + (MAX-MIN) * rng^SKEW; 1=均匀(旧), 2=平方偏斜 */
     TRAIT_MIN: 1, TRAIT_MAX: 3,
+    /* 特质抽取权重: 真源在 Engine/js/chargen.js, 这里必须同值 (改一边必改另一边) */
+    TRAIT_W_BASE: 100, TRAIT_W_EXP: 2.5,
+    TRAIT_TIER_MULT: { common: 1, uncommon: 0.85, rare: 0.6, epic: 0.3 },
+    TRAIT_HIGH_CAP: 1, TRAIT_BONUS_CAP: 10,
     WEAR_SLOTS: 5,
     TALISMAN_MIN: 1, TALISMAN_MAX: 4,
     ART_MIN: 3, ART_MAX: 4, ART_MAX_RANK: 7, ART_MAX_COST: 6,
@@ -57,25 +62,55 @@
     { k: 'array', n: '阵', d: '阵法', talents: ['布阵', '阵眼', '连纹', '速设', '掩息', '破阵'] }
   ];
 
+  /* 旧 11 对: 只有 pos 一侧会被生成 (负面已停发), bonus 与 Engine/js/chargen.js 同名同值
+     ⚠ 百分比一律「原值 ÷4」(2026-11-25 定案); 点数值 (+8 心境 / +10 气血) 不缩 */
   var TRAIT_PAIRS = [
-    { pair: 'diligence', pos: { n: '勤勉', v: '劳作效率 +35%' }, neg: { n: '懒散', v: '劳作效率 -30%' } },
-    { pair: 'grit',      pos: { n: '坚毅', v: '受伤恢复 +50%' }, neg: { n: '怯懦',  v: '受伤恢复 -40%' } },
-    { pair: 'insight',   pos: { n: '慧根', v: '修炼速度 +25%' }, neg: { n: '愚钝',  v: '修炼速度 -25%' } },
-    { pair: 'social',    pos: { n: '亲和', v: '同门心境 +8' },   neg: { n: '孤僻',  v: '同门心境 -8' } },
-    { pair: 'nocturne',  pos: { n: '夜行', v: '夜间效率 +20%' }, neg: { n: '嗜睡',  v: '夜间效率 -25%' } },
-    { pair: 'temper',    pos: { n: '沉静', v: '突破成功率 +10%' }, neg: { n: '急躁', v: '突破成功率 -10%' } },
-    { pair: 'appetite',  pos: { n: '辟谷', v: '食量 -50%' },     neg: { n: '大胃',  v: '食量 +50%' } },
-    { pair: 'hands',     pos: { n: '巧手', v: '炼器成器 +20%' }, neg: { n: '笨拙',  v: '炼器成器 -20%' } },
-    { pair: 'nerve',     pos: { n: '胆识', v: '近战伤害 +10%' }, neg: { n: '畏战',  v: '近战伤害 -15%' } },
-    { pair: 'focus',     pos: { n: '专注', v: '工序失误 -30%' }, neg: { n: '走神',  v: '工序失误 +30%' } },
-    { pair: 'blood',     pos: { n: '血旺', v: '气血上限 +15%' }, neg: { n: '亏血',  v: '气血上限 -15%' } }
+    { pair: 'diligence', pos: { n: '勤勉', v: '劳作效率 +9%', bonus: 2 }, neg: { n: '懒散', v: '劳作效率 -8%' } },
+    { pair: 'grit',      pos: { n: '坚毅', v: '受伤恢复 +13%，气血上限 +10', bonus: 3 }, neg: { n: '怯懦',  v: '受伤恢复 -10%' } },
+    { pair: 'insight',   pos: { n: '慧根', v: '修炼速度 +4%', bonus: 4 }, neg: { n: '愚钝',  v: '修炼速度 -6%' } },
+    { pair: 'social',    pos: { n: '亲和', v: '同门心境 +8', bonus: 3 },   neg: { n: '孤僻',  v: '同门心境 -8' } },
+    { pair: 'nocturne',  pos: { n: '夜行', v: '夜间效率 +5%', bonus: 2 }, neg: { n: '嗜睡',  v: '夜间效率 -6%' } },
+    { pair: 'temper',    pos: { n: '沉静', v: '突破成功率 +3%', bonus: 4 }, neg: { n: '急躁', v: '突破成功率 -3%' } },
+    { pair: 'appetite',  pos: { n: '辟谷', v: '食量 -13%', bonus: 2 },     neg: { n: '大胃',  v: '食量 +13%' } },
+    { pair: 'hands',     pos: { n: '巧手', v: '炼器成器 +5%', bonus: 2 }, neg: { n: '笨拙',  v: '炼器成器 -5%' } },
+    { pair: 'nerve',     pos: { n: '胆识', v: '近战伤害 +3%', bonus: 2 }, neg: { n: '畏战',  v: '近战伤害 -4%' } },
+    { pair: 'focus',     pos: { n: '专注', v: '工序失误 -8%', bonus: 2 }, neg: { n: '走神',  v: '工序失误 +8%' } },
+    { pair: 'blood',     pos: { n: '血旺', v: '气血上限 +4%', bonus: 3 }, neg: { n: '亏血',  v: '气血上限 -4%' } }
   ];
+  /* 招募生成器 (Engine/js/chargen.js) 发的正面特质 —— 单条、无对照反义。
+     与 TRAIT_PAIRS 里的 pos 同名的不重复登记。不登记的话过桥会落 custom 分支:
+     不报错, 但文案只能靠载荷自带, 面板查不到定义。 */
+  var TRAITS_SOLO = [
+    { k: 'memory',    n: '过目不忘', tier: 'uncommon', bonus: 4, v: '参悟功法速度 +10%' },
+    { k: 'senses',    n: '耳目清明', tier: 'uncommon', bonus: 3, v: '命中 +8，闪避 +2%' },
+    { k: 'ironbone',  n: '铜皮铁骨', tier: 'uncommon', bonus: 4, v: '防御 +5%' },
+    { k: 'herb',      n: '妙手回春', tier: 'uncommon', bonus: 3, v: '疗伤效果 +8%' },
+    { k: 'calm',      n: '心如止水', tier: 'uncommon', bonus: 3, v: '心境下限 +15，遇挫不馁' },
+    { k: 'charm',     n: '天生魅体', tier: 'rare', bonus: 6, v: '容仪摄人：同门心境 +12，招揽与议价极易见效' },
+    { k: 'mighty',    n: '力大无穷', tier: 'rare', bonus: 6, v: '近战伤害 +5%，负重 +5%' },
+    { k: 'dragon',    n: '龙象之力', tier: 'rare', bonus: 7, v: '气血上限 +6%，近战伤害 +4%' },
+    { k: 'fivemix',   n: '五行亲和', tier: 'rare', bonus: 5, v: '聚气速度 +4%' },
+    { k: 'spiriteye', n: '天生灵眸', tier: 'rare', bonus: 5, v: '神识范围 +1 格，可窥禁制' },
+    { k: 'lucky',     n: '福缘深厚', tier: 'rare', bonus: 5, v: '奇遇与拾遗概率 +8%' },
+    { k: 'daoheart',  n: '道心通明', tier: 'epic', bonus: 9, v: '突破成功率 +5%，心境不堕' },
+    { k: 'daobody',   n: '天生道体', tier: 'epic', bonus: 10, v: '修炼速度 +10%，聚气 +3%' }
+  ];
+
+  /* 旧 11 对里正面那半的稀有度 (与 chargen.js 对齐; 没列的一律 common) */
+  var POS_TIER = { '慧根': 'uncommon', '亲和': 'uncommon', '沉静': 'uncommon' };
+
   var TRAITS = (function () {
-    var out = {};
-    for (var i = 0; i < TRAIT_PAIRS.length; i++) {
+    var out = {}, i;
+    for (i = 0; i < TRAIT_PAIRS.length; i++) {
       var p = TRAIT_PAIRS[i];
-      out[p.pos.n] = { n: p.pos.n, v: p.pos.v, kind: 'pos', pair: p.pair };
-      out[p.neg.n] = { n: p.neg.n, v: p.neg.v, kind: 'neg', pair: p.pair };
+      out[p.pos.n] = { n: p.pos.n, v: p.pos.v, kind: 'pos', pair: p.pair,
+                       tier: POS_TIER[p.pos.n] || 'common', bonus: p.pos.bonus || 2 };
+      out[p.neg.n] = { n: p.neg.n, v: p.neg.v, kind: 'neg', pair: p.pair, tier: 'neg', bonus: 0 };
+    }
+    for (i = 0; i < TRAITS_SOLO.length; i++) {
+      var s = TRAITS_SOLO[i];
+      out[s.n] = { n: s.n, v: s.v, kind: 'pos', pair: 'solo-' + s.k,
+                   tier: s.tier || 'common', bonus: s.bonus || 2 };
     }
     return out;
   })();
@@ -255,7 +290,9 @@
   /* 天赋: 总量 90~180 落到六道, **每道 ≤ 60** (设定表「单个上限最大为 60」按单道读, 180 恰好 3×60)。
      权重 主 3 / 次 1.8 / 其余 0.5, 且每道先给 2~6 点底 —— 六道都是有效数字, 不会一半是 0。 */
   function genTalents(rng, role) {
-    var total = rint(rng, CFG.TALENT_MIN, CFG.TALENT_MAX);
+    /* 平方偏斜: 低天赋是常态, 180 是万里挑一 (与 Engine/js/chargen.js 同口径) */
+    var total = Math.round(CFG.TALENT_MIN +
+      (CFG.TALENT_MAX - CFG.TALENT_MIN) * Math.pow(rng(), CFG.TALENT_SKEW));
     var bias = ROLE_DAO[role] || ['body', 'qi'];
     var d, sums = [], weights = [], sumAll = 0, wsum = 0;
     for (d = 0; d < DAO.length; d++) {
@@ -293,21 +330,38 @@
     return { v: byDao, total: total };
   }
 
+  /* 只出正面 —— 负面特质不再发放 (玩家体验优先); 同一条不重复; 按稀有度权重抽 */
+  /* 权重 = BASE / bonus^EXP * 档位系数 —— 加成越高越难出 (与 chargen.js 同一套) */
+  function traitWeight(t) {
+    return CFG.TRAIT_W_BASE / Math.pow(t.bonus || 2, CFG.TRAIT_W_EXP) *
+           (CFG.TRAIT_TIER_MULT[t.tier] || 1);
+  }
+  /* 只出正面; 权重轮盘 + 每人高档上限 + 加成预算 */
   function genTraits(rng) {
-    var n = rint(rng, CFG.TRAIT_MIN, CFG.TRAIT_MAX);
-    var pairs = shuffle(rng, TRAIT_PAIRS).slice(0, n);
-    var out = [];
-    for (var i = 0; i < pairs.length; i++) {
-      var p = pairs[i];
-      out.push(TRAITS[(rng() < 0.55 ? p.pos : p.neg).n]);
-    }
-    if (out.length >= 2) {
-      var hasPos = out.some(function (x) { return x.kind === 'pos'; });
-      var hasNeg = out.some(function (x) { return x.kind === 'neg'; });
-      if (!hasPos || !hasNeg) {
-        var p2 = shuffle(rng, TRAIT_PAIRS)[0];
-        if (!out.some(function (x) { return x.pair === p2.pair; })) out[0] = hasPos ? p2.neg : p2.pos;
+    var want = rint(rng, CFG.TRAIT_MIN, CFG.TRAIT_MAX);
+    var pool = [], name;
+    for (name in TRAITS) if (TRAITS[name].kind === 'pos') pool.push(TRAITS[name]);
+    var out = [], high = 0, budget = CFG.TRAIT_BONUS_CAP, j, t, x, wsum, cands, pick;
+
+    while (out.length < want && pool.length) {
+      cands = []; wsum = 0;
+      for (j = 0; j < pool.length; j++) {
+        t = pool[j];
+        if (t.bonus > budget) continue;
+        if ((t.tier === 'rare' || t.tier === 'epic') && high >= CFG.TRAIT_HIGH_CAP) continue;
+        cands.push(t); wsum += traitWeight(t);
       }
+      if (!cands.length || wsum <= 0) break;
+      x = rng() * wsum;
+      pick = cands[cands.length - 1];
+      for (j = 0; j < cands.length; j++) {
+        x -= traitWeight(cands[j]);
+        if (x <= 0) { pick = cands[j]; break; }
+      }
+      out.push(pick);
+      budget -= pick.bonus;
+      if (pick.tier === 'rare' || pick.tier === 'epic') high++;
+      pool.splice(pool.indexOf(pick), 1);
     }
     return out;
   }
@@ -351,12 +405,20 @@
       a.hp += gs[i].hp; a.mp += gs[i].mp;
       a.atk += gs[i].atk; a.def += gs[i].def; a.hit += gs[i].acc;
     }
-    if (hasTrait(pawn, '血旺')) a.hp = Math.round(a.hp * 1.15);
-    if (hasTrait(pawn, '亏血')) a.hp = Math.round(a.hp * 0.85);
-    if (hasTrait(pawn, '胆识')) a.atk = Math.round(a.atk * 1.10);
-    if (hasTrait(pawn, '畏战')) a.atk = Math.round(a.atk * 0.85);
+    /* 正面特质: 只加不减；百分比一律「原值 ÷4」，且小数点后不足 1 点的按 1 点算
+       （否则 2~5% 落在 12 点防御上会被 Math.round 抹成 0，等于没生效） */
+    var bump = function (v, pct) { return v + Math.max(1, Math.round(v * pct)); };
+    if (hasTrait(pawn, '血旺')) a.hp = bump(a.hp, 0.04);
     if (hasTrait(pawn, '坚毅')) a.hp += 10;
-    if (hasTrait(pawn, '怯懦')) a.hp -= 8;
+    if (hasTrait(pawn, '胆识')) a.atk = bump(a.atk, 0.03);
+    if (hasTrait(pawn, '龙象之力')) { a.hp = bump(a.hp, 0.06); a.atk = bump(a.atk, 0.04); }
+    if (hasTrait(pawn, '力大无穷')) a.atk = bump(a.atk, 0.05);
+    if (hasTrait(pawn, '铜皮铁骨')) a.def = bump(a.def, 0.05);
+    if (hasTrait(pawn, '耳目清明')) { a.hit += 8; a.dodge = bump(a.dodge, 0.02); }
+    /* 旧档兼容: 已不再生成负面, 但老存档里可能还留着 */
+    if (hasTrait(pawn, '亏血')) a.hp = Math.round(a.hp * 0.96);
+    if (hasTrait(pawn, '畏战')) a.atk = Math.round(a.atk * 0.96);
+    if (hasTrait(pawn, '怯懦')) a.hp -= 2;
     return a;
   }
 
@@ -783,8 +845,8 @@
     for (var i = 0; i < t.length; i++) avg += t[i];
     avg = avg / 6;
     var r = 0.55 + avg / 45;
-    if (hasTrait(pawn, '勤勉')) r *= 1.35;
-    if (hasTrait(pawn, '懒散')) r *= 0.70;
+    if (hasTrait(pawn, '勤勉')) r *= 1.09;
+    if (hasTrait(pawn, '懒散')) r *= 0.92;
     return r;
   }
   function pickJob(pawn) {
