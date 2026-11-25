@@ -154,7 +154,8 @@
 
   function gateHTML(gate) {
     if (!gate || gate.allowed) return '';
-    var names = (gate.squads || []).filter(function (s) { return s.settle; })
+    /* 只列**有队员**的队的驻地: 空队本来就能迁, 列进来只会让提示里的地名多出一堆噪音 */
+    var names = (gate.squads || []).filter(function (s) { return s.members > 0 && s.settle; })
       .map(function (s) { return s.settleName || s.settle; });
     var where = names.length ? '「' + names.join('」「') + '」' : '别处';
     return '队伍驻地在' + esc(where) + '，需回到驻地才能招募（刷新不受限制）';
@@ -165,20 +166,36 @@
     if (!d || st.pickSlot < 0) return '';
     var gate = d.hireGate || { squads: [] };
     var squads = gate.squads || [];
-    var html = '';
+    /* 编制上限 / 队数上限一律读服务端下发的 squadCap / maxSquads (老响应才退回 9 / 6)。
+       前端写死会和服务端漂: 之前这里写 9、服务端从契约里读到 8 ⇒ 界面显示 8/9 却报满员。 */
+    var cap = gate.squadCap || 9;
+    var maxSquads = gate.maxSquads || 6;
+    var html = '', anyOn = false;
     for (var i = 0; i < squads.length; i++) {
       var s = squads[i];
-      var full = s.members >= 9;
-      /* here=false ⇒ 该队不在本镇, 人进不去 (服务端也会拒) ⇒ 置灰并标驻地 */
-      var off = !s.here || full;
-      var note = full ? '满员' : (s.here ? '' : '驻地：' + (s.settleName || s.settle || '未知'));
+      var full = s.full != null ? !!s.full : s.members >= cap;
+      /* 能不能进这支队由服务端的 canEnter 说了算:
+         空队 (可改绑驻地) / 驻地为空 (老存档, 可补绑) / 驻地就是本镇 ⇒ 可进。
+         ⚠ 别用 `!s.here` 自己判 —— 那会把「空队」和「驻地为空」两类合法目标全置灰。 */
+      var canEnter = s.canEnter != null ? !!s.canEnter
+        : (s.members === 0 || s.here || !s.settle);
+      var off = !canEnter || full;
+      if (!off) anyOn = true;
+      var note;
+      if (full) note = '满员';
+      else if (s.members === 0) note = s.here ? '空队' : '空队 · 迁到本聚落';
+      else if (s.here || !s.settle) note = '';
+      else note = '驻地：' + (s.settleName || s.settle || '未知');
       html += '<button type="button" class="rc-btn rc-pick-item' + (off ? ' off' : '') + '"' +
         ' data-rc-squad="' + esc(s.id) + '"' + (off ? ' disabled' : '') + '>' +
-        esc(s.name) + '<i>' + s.members + '/9' + (note ? ' · ' + esc(note) : '') + '</i></button>';
+        esc(s.name) + '<i>' + s.members + '/' + cap + (note ? ' · ' + esc(note) : '') + '</i></button>';
     }
-    if (squads.length < 6) {
+    if (squads.length < maxSquads) {
       html += '<button type="button" class="rc-btn rc-pick-item" data-rc-squad="__new">新建小队<i>驻地＝本聚落</i></button>';
+      anyOn = true;
     }
+    /* 一支都进不去又没得新建 ⇒ 说清原因, 否则玩家看到一屏灰按钮不知道该怎么办 */
+    if (!anyOn) html += '<div class="rc-pick-tip">没有能进的队（满员或驻地不在本镇）</div>';
     return html;
   }
 
@@ -226,10 +243,14 @@
   function load(keepMsg) {
     var B = bridge();
     if (!B) { st.msg = '招募网络层未加载 (recruit-bridge.js)'; st.msgKind = 'err'; render(); return; }
+    var sid = st.settle;                    // 这次请求是针对哪个聚落的
     st.busy = true;
     if (!keepMsg) st.msg = '';
     render();
-    B.pool(st.settle).then(function (res) {
+    B.pool(sid).then(function (res) {
+      /* ⚠ 关掉面板又点了另一个镇: 旧响应可能比新的先回来, 不判就会把 A 镇的人
+         画到 B 镇的标题下 (面板数据与聚落错位)。聚落变了直接丢弃, busy 交给新请求清。 */
+      if (sid !== st.settle) return;
       st.busy = false;
       if (!res || res.ok === false) {
         st.msg = (res && res.error) || '打探失败';
@@ -257,7 +278,9 @@
     st.msg = '换批中…';
     st.msgKind = '';
     render();
-    B.roll(st.settle).then(function (res) {
+    var sid = st.settle;
+    B.roll(sid).then(function (res) {
+      if (sid !== st.settle) return;          // 换镇了 ⇒ 旧响应作废 (同上)
       st.busy = false;
       if (!res || res.ok === false) {
         st.msg = (res && res.error) || '刷新失败';
@@ -305,7 +328,9 @@
     st.pickSlot = -1;
     render();
 
-    B.hire(st.settle, slot, sid, forceNew ? { newSquad: true } : null).then(function (res) {
+    var at = st.settle;
+    B.hire(at, slot, sid, forceNew ? { newSquad: true } : null).then(function (res) {
+      if (at !== st.settle) return;          // 换镇了 ⇒ 旧响应作废 (同上)
       st.busy = false;
       if (!res || res.ok === false) {
         st.msg = (res && res.error) || '招募失败';

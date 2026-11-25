@@ -138,8 +138,12 @@ public sealed class RecruitStore : IDisposable
         var key = PKey(account, round);
         if (!_points.TryGetValue(key, out var row))
         {
-            /* 首次建档: 起始点从**现在**算, 不追补世界已过去的年份 (新账号不白拿历史产量) */
+            /* 首次建档: 起始点从**现在**算, 不追补世界已过去的年份 (新账号不白拿历史产量)
+               ⚠ nowTick<=0 = 世界/时钟都还没起来 (State 端点不要求世界存在)。
+                 这种时候**绝不能落库**: 一旦把 LastTick 存成 0, 等世界跑起来
+                 delta 就是几万 tick ⇒ 首次结算直接补到上限 (白送 300 点, 且无日志)。 */
             row = new RecruitPointRow(account, round, InitialPoints, nowTick, 1);
+            if (nowTick <= 0) return row;         // 只读预览, 不建档
             _points[key] = row;
             SavePoint(row);
             return row;
@@ -153,10 +157,13 @@ public sealed class RecruitStore : IDisposable
 
         if (years <= 0)
         {
-            /* 不足 1 年也要处理「影响力下调导致 points > cap」: 夹断, 不补不退 */
+            /* 不足 1 年也要处理「影响力下调导致 points > cap」: 夹断, 不补不退
+               ⚠ 夹断后必须回写 _points: 不然内存缓存一直是超上限的旧值, 之后每次调用
+                 都再夹一次 + 再写一次库 (返回正确、但白写库), 且任何读缓存的路径都会看到旧值。 */
             if (row.Points > cap)
             {
                 row = row with { Points = cap };
+                _points[key] = row;
                 SavePoint(row);
             }
             return row;
@@ -269,14 +276,17 @@ public sealed class RecruitStore : IDisposable
         }
     }
 
-    /// <summary>标记某格已被招走 (幂等: 已记过就原样返回)。</summary>
-    public RecruitPoolRow? MarkTaken(string account, int round, string settleId, int slot)
+    /// <summary>标记某格已被招走 (幂等: 已记过就原样返回)。
+    /// ⚠ rollNo ≥ 0 时校验池子批次: 招人的这几百毫秒里如果换了批 (另一个标签页点了刷新),
+    ///   slot 指向的已经是**另一个人**, 标下去会白瞎一个候选 ⇒ 批次不符就不标。</summary>
+    public RecruitPoolRow? MarkTaken(string account, int round, string settleId, int slot, int rollNo = -1)
     {
         lock (_gate)
         {
             EnsureLoaded();
             var key = QKey(account, round, settleId);
             if (!_pools.TryGetValue(key, out var row)) return null;
+            if (rollNo >= 0 && row.RollNo != rollNo) return row;
             var taken = ParseTaken(row.TakenJson);
             if (!taken.Contains(slot)) taken.Add(slot);
             taken.Sort();
@@ -343,32 +353,37 @@ public sealed class RecruitStore : IDisposable
     private void EnsureLoaded()
     {
         if (_loaded) return;
+        if (_cs == null) { _loaded = true; return; }
+        /* ⚠ _loaded 只能在**读成功之后**置位。先置后读的话, 一次锁表 / IO 异常就会把
+           "已加载" 钉死成空缓存 ⇒ 该账号下一次 Settle 被当成新档发 50 点, 并**覆盖**
+           库里的真实余额 (静默扣掉玩家攒的招募值)。异常向上抛 (500) 比静默重置安全。 */
+        using (var c = Open())
+        {
+            using (var cmd = c.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Account, Round, Points, LastTick, Ver FROM RecruitPoint;";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var row = new RecruitPointRow(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetInt64(3), r.GetInt32(4));
+                    _points[PKey(row.Account, row.Round)] = row;
+                }
+            }
+            using (var cmd = c.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Account, Round, SettleId, RollNo, Taken, SettleJson, PoolJson, Ver FROM RecruitPool;";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var row = new RecruitPoolRow(r.GetString(0), r.GetInt32(1), r.GetString(2), r.GetInt32(3),
+                        r.GetString(4), r.GetString(5), r.GetString(6), r.GetInt32(7));
+                    /* 坏行 (PoolJson 空) 不载入 ⇒ 下次打探自然重生成, 不必人工修库 */
+                    if (string.IsNullOrEmpty(row.PoolJson)) continue;
+                    _pools[QKey(row.Account, row.Round, row.SettleId)] = row;
+                }
+            }
+        }
         _loaded = true;
-        if (_cs == null) return;
-        using var c = Open();
-        using (var cmd = c.CreateCommand())
-        {
-            cmd.CommandText = "SELECT Account, Round, Points, LastTick, Ver FROM RecruitPoint;";
-            using var r = cmd.ExecuteReader();
-            while (r.Read())
-            {
-                var row = new RecruitPointRow(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetInt64(3), r.GetInt32(4));
-                _points[PKey(row.Account, row.Round)] = row;
-            }
-        }
-        using (var cmd = c.CreateCommand())
-        {
-            cmd.CommandText = "SELECT Account, Round, SettleId, RollNo, Taken, SettleJson, PoolJson, Ver FROM RecruitPool;";
-            using var r = cmd.ExecuteReader();
-            while (r.Read())
-            {
-                var row = new RecruitPoolRow(r.GetString(0), r.GetInt32(1), r.GetString(2), r.GetInt32(3),
-                    r.GetString(4), r.GetString(5), r.GetString(6), r.GetInt32(7));
-                /* 坏行 (PoolJson 空) 不载入 ⇒ 下次打探自然重生成, 不必人工修库 */
-                if (string.IsNullOrEmpty(row.PoolJson)) continue;
-                _pools[QKey(row.Account, row.Round, row.SettleId)] = row;
-            }
-        }
     }
 
     public void Dispose()

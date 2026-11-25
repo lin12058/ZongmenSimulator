@@ -100,6 +100,14 @@ public static class RecruitEndpoints
         private sealed record SettleCtx(
             string Id, string Type, int Q, int R, int Pop, string Name, int? Element, string Json);
 
+        /// <summary>空串 / 坏 JSON ⇒ null (调用方按业务错误处理)。</summary>
+        private static JsonDocument? ParseOrNull(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            try { return JsonDocument.Parse(json!); }
+            catch { return null; }
+        }
+
         /// <summary>
         /// settleId (`i_j_k`) → 服务端自己查回的聚落身份。
         /// ⚠ 客户端只能给 id; type/pop/element 一律从引擎查 (否则改 pop 就能骗池量)。
@@ -117,7 +125,10 @@ public static class RecruitEndpoints
             try { raw = lease.Vm.Call("citySettlementsJson", i, j); }
             catch { return null; }
 
-            using var doc = JsonDocument.Parse(raw);
+            /* ⚠ 解析失败要归成 bad-settle (null), 不能让它冒成 500:
+               换世途中 / VM 刚重建时 citySettlementsJson 可能吐空串或半截 JSON。 */
+            using var doc = ParseOrNull(raw);
+            if (doc == null) return null;
             if (!doc.RootElement.TryGetProperty("settlements", out var arr)) return null;
             foreach (var s in arr.EnumerateArray())
             {
@@ -296,6 +307,23 @@ public static class RecruitEndpoints
         }
 
         /// <summary>
+        /// 「此刻在这个聚落能不能招」—— 与 <see cref="Gate"/> 的 allowed **同一口径**。
+        /// 没队员 ⇒ 哪都能招; 有队员 ⇒ 至少有一支队驻在本地, 或有队驻地为空 (老存档, 可补绑)。
+        /// ⚠ 两处各写一份判据就必然漂: Gate 说 allowed、Decide 说 wrong-settle 的按钮是死的。
+        /// </summary>
+        private static bool AllowedHere(IReadOnlyList<SquadGroupDto> squads, string settleId)
+        {
+            var hasMembers = false;
+            foreach (var s in squads)
+            {
+                if (s.Members.Count == 0) continue;
+                hasMembers = true;
+                if (string.IsNullOrEmpty(s.Settle) || s.Settle == settleId) return true;
+            }
+            return !hasMembers;
+        }
+
+        /// <summary>
         /// 定目标队 + 驻地闸 + 容量闸。⚠ 顺序: 驻地不等 **先于** 队满判断 ——
         /// 否则「满队」会盖住「不在本镇」这个真实原因, 玩家照着提示回驻地也没用。
         /// </summary>
@@ -305,9 +333,11 @@ public static class RecruitEndpoints
             var d = new Decision();
 
             /* 「新建小队」是玩家的显式选择 (面板入队浮层那一项): 不复用空队, 直接新建。
+               ⚠ 仍要过驻地闸 —— 否则主力队在别镇时「新建一支」就等于绕开「回驻地才能招」。
                仍然受 6 支上限约束。 */
             if (forceNew)
             {
+                if (!AllowedHere(squads, settleId)) { d.Code = "wrong-settle"; return d; }
                 if (squads.Count >= MaxSquads) { d.Code = "squad-limit"; return d; }
                 d.NeedNew = true;
                 d.SquadId = NextSquadId(squads);
@@ -322,11 +352,18 @@ public static class RecruitEndpoints
             }
             else
             {
-                /* 没指定: 优先「本镇且有队员」→ 再退「第一支有队员」→ 再退「第一支空队」
+                /* 没指定: 「本镇且有队员」→「驻地为空且有队员 (可补绑)」→ 全是空队时随便挑一支。
+                   ⚠ 与 Gate.allowed 同口径: Gate 把「驻地为空」算作可招, 这里必须也能选中它,
+                     否则就是「按钮亮着、点下去 wrong-settle」的死角。
+                   ⚠ 有队员的队**全在别镇**时不许退到空队 —— 那等于绕开驻地闸。
                    ⚠ 不写成 `if (squads.Count == 0)`: 前端可能留着空队对象, 那样判会误拒 */
                 t = squads.FirstOrDefault(s => s.Members.Count > 0 && s.Settle == settleId)
-                 ?? squads.FirstOrDefault(s => s.Members.Count > 0)
-                 ?? squads.FirstOrDefault();
+                 ?? squads.FirstOrDefault(s => s.Members.Count > 0 && string.IsNullOrEmpty(s.Settle));
+                if (t == null)
+                {
+                    if (squads.Any(s => s.Members.Count > 0)) { d.Code = "wrong-settle"; return d; }
+                    t = squads.FirstOrDefault();      // 全是空队 ⇒ 挑第一支, 下面会补绑驻地
+                }
             }
 
             if (t == null)
@@ -393,6 +430,9 @@ public static class RecruitEndpoints
             {
                 allowed,
                 reason = allowed ? null : "wrong-settle",
+                /* 常量一起下发 ⇒ 前端不必自己写死 9/6 (写死就会和服务端漂) */
+                squadCap = SquadCap,
+                maxSquads = MaxSquads,
                 squads = squads.Select(s => new
                 {
                     id = s.Id,
@@ -400,13 +440,23 @@ public static class RecruitEndpoints
                     settle = s.Settle,
                     settleName = NameOf(s.Settle ?? ""),
                     here = !string.IsNullOrEmpty(s.Settle) && s.Settle == settleId,
-                    members = s.Members.Count
+                    members = s.Members.Count,
+                    /* 新人能不能塞进这支队 —— 由服务端说了算:
+                       空队 (可改绑驻地) / 驻地为空 (老存档, 可补绑) / 驻地就是本镇, 三者可进。
+                       ⚠ 前端曾用 `!here` 判, 把「空队」和「驻地为空」这两类合法目标全置灰了。 */
+                    canEnter = s.Members.Count == 0 || string.IsNullOrEmpty(s.Settle) || s.Settle == settleId,
+                    full = s.Members.Count >= SquadCap
                 }).ToList()
             };
         }
 
-        private static int SquadsCap(CrewContract? c)
-            => c?.Squad?.Capacity is > 0 and <= 32 ? c.Squad.Capacity : SquadCap;
+        /// <summary>
+        /// 单队编制上限 (= <see cref="SquadCap"/>, 9)。
+        /// ⚠ **不读** `contract.squad.capacity`: 那个字段被前端 dump 写成了**背包行数**
+        ///   (crew-bridge 的 STASH_ROWS = 8), 照它判会在第 8 个人就回「目标小队已满」,
+        ///   而界面按 9 显示 ⇒ 玩家永远招不进第 9 个, 且提示与人数自相矛盾。
+        /// </summary>
+        private static int SquadsCap(CrewContract? c) => SquadCap;
 
         /* ---------------- 端点 ---------------- */
 
@@ -587,9 +637,21 @@ public static class RecruitEndpoints
             /* ⑨ 写 Crew (锁内原子: 加成员 + 入队 + 并入物品) */
             string? code = null;
             var newSquadId = "";
+            var dupHired = false;
             var res = _crew.Mutate(c =>
             {
                 MaterializeSquads(c);
+
+                /* ⚠ 并发防重 (同一 slot 双击 / 两个标签页): 两边的 taken 检查都在对方 MarkTaken
+                   之前跑过 ⇒ 扣点被 TrySpend 串行了, 但**人会被写两份** (成员 id 重复 + 装备
+                   同 id 重复, 面板上出现两个同名弟子)。命中就当幂等成功, 由下面退点。 */
+                if (c.Squad.Members.Any(m => m.Id == member.Id) ||
+                    c.Squads.Any(s => s.Members.Contains(member.Id)))
+                {
+                    dupHired = true;
+                    return false;
+                }
+
                 var d = Decide(c.Squads, ctx.Id, Str(body, "squadId"), SquadsCap(c), forceNew);
                 if (d.Code != null) { code = d.Code; return false; }
 
@@ -619,6 +681,25 @@ public static class RecruitEndpoints
                 return true;
             }, createIfMissing: true);
 
+            /* 并发双击的第二份: 人已经在队里 ⇒ 退掉刚扣的 50, 按幂等成功回 (不报错、不重复加人) */
+            if (dupHired)
+            {
+                var back = _store.AddPoints(account, round, now, RecruitStore.HireCost);
+                try { _store.MarkTaken(account, round, ctx.Id, slot, pool.RollNo); }
+                catch (Exception ex) { Console.Error.WriteLine($"[recruit] MarkTaken 失败 settle={ctx.Id} slot={slot}: {ex.Message}"); }
+                var cc = _crew.Get();
+                return Ok(new
+                {
+                    ok = true,
+                    duplicated = true,
+                    member,
+                    squadId = SquadOf(cc, member.Id),
+                    rev = _crew.Revision(),
+                    points = PointsDto(account, round, back),
+                    hireGate = Gate(cc, ctx.Id, seed, ctx.Name)
+                });
+            }
+
             if (res.Error != null || !res.Committed || code != null)
             {
                 /* 写失败 ⇒ **退点** (否则玩家白扣 50 还啥也没拿到) */
@@ -628,7 +709,7 @@ public static class RecruitEndpoints
             }
 
             /* ⑩ 标记 taken (幂等; 失败不影响本次结果 —— 重试时同一 slot 会走幂等分支) */
-            try { _store.MarkTaken(account, round, ctx.Id, slot); }
+            try { _store.MarkTaken(account, round, ctx.Id, slot, pool.RollNo); }
             catch (Exception ex) { Console.Error.WriteLine($"[recruit] MarkTaken 失败 settle={ctx.Id} slot={slot}: {ex.Message}"); }
 
             return Ok(new

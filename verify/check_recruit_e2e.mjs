@@ -13,6 +13,12 @@
  *
  * 用法: node verify/check_recruit_e2e.mjs <base> <hire|roll>
  *       (默认 http://127.0.0.1:8141 hire)
+ *
+ * ⚠ 环境要求 (否则自动 SKIP, rc=2):
+ *   ① base 不能是 8140 (脚本会 DELETE /api/crew, 那是玩家自己的队伍)
+ *   ② guest 账号必须首日 = 50 点 ⇒ 测试库副本要先清空 RecruitPoint / RecruitPool
+ *      (主库被玩家玩过就带着余额, 直接拷会一进来就 SKIP)
+ *   ③ 两个 phase 各自需要一份干净副本: hire 会花光 50, roll 会花 30
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,12 +35,32 @@ function ok(name, cond, info) {
   else { fail++; console.log('FAIL ' + name + (info ? ' · ' + info : '')); }
 }
 
+/* ⚠⚠ 本脚本会 DELETE /api/crew (crew 契约是**全局单份**) —— 绝不能指向生产端口 8140,
+   那会抹掉玩家自己的队伍。只能在「测试库副本 + 8141 以上端口」的实例上跑。 */
+const PORT = (() => { try { return new URL(BASE).port; } catch { return ''; } })();
+if (PORT === '8140') {
+  console.log('SKIP 拒绝在生产端口 8140 上跑 (本脚本会清空 /api/crew)');
+  process.exit(2);
+}
+
 /* ---------------- 0. 服务端必须先活着 ---------------- */
 let cur;
 try { cur = await (await fetch(BASE + '/api/world/current')).json(); }
 catch (e) { console.log('SKIP 服务端没起: ' + BASE); process.exit(2); }
 if (!cur || !cur.seed) { console.log('SKIP 无当前世'); process.exit(2); }
 const SEED = cur.seed;
+
+/* guest 必须是「首日」: 50 点、没打探过。库副本里带旧账 (点数/池子) ⇒ 后面每条断言都错位,
+   与其给一串看不懂的 FAIL, 不如在这里说清怎么修。 */
+let st0 = null;
+try {
+  st0 = await (await fetch(BASE + '/api/recruit/state', { headers: { 'X-Account': 'guest' } })).json();
+} catch { }
+if (!st0 || !st0.points || st0.points.value !== 50) {
+  console.log('SKIP guest 不是首日 (points=' + (st0 && st0.points && st0.points.value) +
+    '); 测试库副本请先清空 RecruitPoint / RecruitPool 再起实例');
+  process.exit(2);
+}
 
 /* ⚠ 归零起点: crew 契约全局单份, 库里可能已有玩家队伍 (驻地别处 ⇒ 一进来就红条)。
    探针只跑测试库副本, 先清空 = 新玩家首日。 */

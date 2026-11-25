@@ -101,7 +101,15 @@ ok('E1 浮层有「新建小队」项且用哨兵值 __new', /data-rc-squad="__n
 ok('E2 哨兵被识别成 newSquad:true', /'__new'/.test(panel) && /newSquad:\s*true/.test(panel));
 ok('E3 跳过哨兵后再传给 bridge', /forceNew \? '' :/.test(panel));
 ok('E4 传空 id 时不带 squadId (服务端自选)', /if \(squadId\) body\.squadId/.test(bridge));
-ok('E5 已有队时置灰「不在本镇/满员」的队', /!s\.here \|\| full/.test(panel));
+ok('E5 置灰判据 = 服务端 canEnter + full (不自己拿 !here 判)',
+  /!canEnter \|\| full/.test(panel) && /s\.canEnter != null/.test(panel));
+/* 编制 9 / 队数 6 由服务端 hireGate.squadCap / maxSquads 下发; 前端写死会与服务端漂 */
+ok('E6 编制/队数上限读服务端 (squadCap / maxSquads)',
+  /gate\.squadCap/.test(panel) && /gate\.maxSquads/.test(panel) &&
+  !/members\s*>=\s*9/.test(panel) && !/squads\.length\s*<\s*6/.test(panel));
+ok('E7 三个请求都有聚落代次守卫 (旧响应不会画到新镇名下)',
+  (panel.match(/!== st\.settle\)\s*return;/g) || []).length >= 3,
+  'n=' + (panel.match(/!== st\.settle\)\s*return;/g) || []).length);
 
 /* ---------------- F. 招完人不擦提示 ---------------- */
 ok('F1 load(keepMsg) 支持保留提示', /function load\(keepMsg\)/.test(panel) &&

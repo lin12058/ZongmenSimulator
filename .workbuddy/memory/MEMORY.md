@@ -53,8 +53,12 @@
 - ⚠★ 池子内容与账号无关（种子只吃 worldSeed/settle/rollNo）⇒ 越权只能靠账号，别指望"不同人看到不同人"；`taken` 也是每人一份（个人进度，不是公共池）。
 - 生成器出口只开**一个**：`mapgen-server.js` → `chargenPoolJson(optsJson)` → `Chargen.genPoolJson`，C# 只加 `"chargenPool"` 一条 case。把 `global.Chargen` 13 个函数直接暴露 = `check_js_exports.mjs` 一片红。
 - 写 Crew 一律 `CrewStore.Mutate`（锁内深拷贝→改→`Save`，失败退点）；`Patch` 里 `squads` 整表替换必须「旧 `settle` 非空则保留」。
-- 判据四条（都 `check_` 前缀、已入库）：`check_recruit_pool.mjs`(22, 纯 JS) / `check_recruit_api.mjs`(49, 需起服务) / `check_recruit_e2e.mjs <base> hire|roll`(17×2, headless) / `check_recruit_ui.mjs`(34, 源码守卫)。⚠ 正式脚本别用 `_` 前缀，会被 `.gitignore` 的 `verify/_*.mjs` 吞掉。
-- ⚠ 重置测试库要连 `-wal`/`-shm` 一起删（只 `cp` 主库 ⇒ 旧 WAL 被重放，看着新库其实带旧招募行）；起临时实例用 `Zongmen__Port` / `Zongmen__DbPath` 环境变量覆盖，别改 appsettings.json。
+- ⚠★ **编制上限恒 = 9（`SquadCap`），不许读 `contract.squad.capacity`**：该字段被 `crew-bridge` 的旧默认值写成背包行数 8 ⇒ 第 8 人就报「队满」而界面显示 8/9。前端同值在 `crew-model.CFG.SQUAD_CAP`；`hireGate` 下发 `squadCap`/`maxSquads`/每队 `canEnter`+`full`，前端只读不推。
+- ⚠★ **驻地闸只有一份判据 `AllowedHere()`**（Gate.allowed 与 Decide 共用）：没队员哪都能招；有队员 ⇒ 至少一队驻地在本地或驻地为空。两处各写一份必然漂成「按钮亮着点下去 wrong-settle」。空队/驻地为空的队都能进（会补绑当前聚落）。
+- ⚠ 并发抢同一 slot（池子内容与账号无关，多标签/多账号会撞）：`Mutate` 里先查成员 id 已存在 ⇒ `dupHired`（退点 + `duplicated:true`），否则同 id 弟子和装备写 N 份；`MarkTaken(..., rollNo)` 批次不符不标（否则换批后白瞎一个候选）。
+- `SettleLocked`：首次建档 `nowTick<=0` **只回临时行不落库**（否则 LastTick=0，世界起来一次性补满上限）；夹断 cap 后必须回写 `_points`；`EnsureLoaded` 的 `_loaded` 只能在读成功后置位。
+- 判据五条（都 `check_` 前缀、已入库）：`check_recruit_pool.mjs`(22, 纯 JS) / `check_recruit_api.mjs`(57, 需起服务) / `check_recruit_race.mjs`(9, 5 账号并发抢同一 slot) / `check_recruit_e2e.mjs <base> hire|roll`(18+17, headless) / `check_recruit_ui.mjs`(36, 源码守卫)。⚠ 正式脚本别用 `_` 前缀，会被 `.gitignore` 的 `verify/_*.mjs` 吞掉。
+- ⚠★ 三个在线判据都会 `DELETE /api/crew`（全局单份）⇒ 端口 8140 **硬 SKIP**（那是玩家存档）；e2e 还要求 guest 首日 50 点 ⇒ 库副本先 `delete from RecruitPoint/RecruitPool`，否则 10/300 之类的错位 FAIL。重置测试库要连 `-wal`/`-shm` 一起删；起临时实例用 `Zongmen__Port` / `Zongmen__DbPath` 覆盖，别改 appsettings.json。
 
 ## ⚠ 构建 / 验证 / 本机坑（细则 → DETAILS + skill）
 - 三红线：① 清文件一律 Node `fs.unlinkSync` 绝对路径+basename/数量断言，先过 `git ls-files`，**禁 shell 通配与 `git rm`**（已 3 次误删，`verify/_*` 删后不可恢复）② `git push` 的代理要现场探：**2026-11-26 起直连 GitHub 不通**（`Recv failure: Connection was reset`），须走 `-c http.proxy=http://127.0.0.1:7897`（v2rayN，实测 200）；旧口径「必加 `-c http.proxy=` 绕代理」已失效。推前先 `curl -x http://127.0.0.1:<port> -m 6 https://github.com` 探 7897/12618 哪个通，别硬套 ③ 后台实例活不过一个回合 ⇒ 起实例+跑实机判据**同回合**，别 kill 用户 8140。

@@ -221,6 +221,12 @@
   color: var(--ink-faint, rgba(58,48,38,.44));
 }
 #recruitWrap .rc-pick-cancel { margin-top: 8px; }
+#recruitWrap .rc-pick-tip {
+  padding: 6px 2px 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--seal, #a63a2c);
+}
 
 @media (max-width: 520px) {
   #recruitWrap .rc-box { max-height: 84vh; padding: 8px 11px 11px; }

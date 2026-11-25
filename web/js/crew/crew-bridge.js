@@ -474,7 +474,7 @@
       })(),
       squads: sqOut,
       curSquad: curSq,
-      capacity: Math.round(num(c.squad.capacity, M.CFG.STASH_ROWS)),
+      capacity: Math.round(num(c.squad.capacity, M.CFG.SQUAD_CAP || 9)),
       pawns: pawns,
       jobs: (Array.isArray(c.jobs) && c.jobs.length) ? c.jobs : M.JOBS.slice(),
       stash: stash,
@@ -634,7 +634,7 @@
           for (var q1 = 0; q1 < squadsOut.length; q1++) if (squadsOut[q1].id === curSqOut) return squadsOut[q1].name;
           return state.squadName || '小队';
         })(),
-        capacity: state.capacity || (M ? M.CFG.STASH_ROWS : 8),
+        capacity: state.capacity || (M ? (M.CFG.SQUAD_CAP || 9) : 9),
         members: members
       },
       bag: {

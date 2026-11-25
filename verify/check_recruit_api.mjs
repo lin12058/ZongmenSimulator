@@ -8,12 +8,14 @@
  *   4. hire : 扣 50 / 建队且驻地绑定本聚落 / 入 Crew / 幂等(同 slot 不重复扣)
  *   5. 判定顺序: bad-settle → no-pool → bad-slot → 幂等 → 不足 → wrong-settle
  *   6. 驻地不被整表替换洗掉 (POST /api/crew/patch 不带 settle ⇒ 保留)
+ *   7. 驻地闸与 Decide **同口径**: 有队员但驻地为空 ⇒ 别镇也能招 (不会"按钮亮着却拒")
  *
  * ⚠ 账号分工 (每个账号只够一次 hire: 初始 50 = 一次招募):
  *   A = 刷新/换批线 (50 → 20, 之后不足)
  *   C = 招募线 (50 → 0)
  *   B = 驻地闸线 (保持 50, 用来验 wrong-settle)
  *   D = 从未打探 ⇒ 验 no-pool
+ *   E = 「驻地为空的老队」线 (50 → 0)
  *   crew 契约是**全局单份**(不按账号), 所以 C 建的队对 B 也可见 —— 正好验驻地闸。
  *
  * 用法: node verify/check_recruit_api.mjs [base]     (默认 http://127.0.0.1:8141)
@@ -24,6 +26,14 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE = (process.argv[2] || 'http://127.0.0.1:8141').replace(/\/+$/, '');
+
+/* ⚠⚠ 本脚本会 DELETE /api/crew (crew 契约是**全局单份**) —— 绝不能指向生产端口 8140,
+   那会抹掉玩家自己的队伍。只能在「测试库副本 + 8141 以上端口」的实例上跑。 */
+const PORT = (() => { try { return new URL(BASE).port; } catch { return ''; } })();
+if (PORT === '8140') {
+  console.log('SKIP 拒绝在生产端口 8140 上跑 (本脚本会清空 /api/crew)');
+  process.exit(2);
+}
 
 let pass = 0, fail = 0;
 function ok(name, cond, info) {
@@ -243,6 +253,49 @@ const sq2 = (crew2.json.squads || []).find(s => s.id === hi.json.squadId);
 ok('6.2 ⚠ settle 被兜底保留 (整表替换不洗驻地)', !!(sq2 && sq2.settle === A),
   sq2 && JSON.stringify(sq2.settle));
 ok('6.3 patch 的改名生效 (name=一队)', !!(sq2 && sq2.name === '一队'), sq2 && sq2.name);
+
+/* ---------------- 7. 驻地闸与 Decide 同口径 (驻地为空的队员队) ---------------- */
+/* 场景: 一队驻在 A 且有队员, 另一队**有队员但驻地为空** (老存档形态)。人在 B 镇。
+   正确口径 = Gate.allowed 为真, 且真的能招进那支"驻地为空"的队 (并补绑到 B)。
+   ⚠ 旧实现 Gate 说 allowed、Decide 却挑中"第一支有队员的队"(A 那支) ⇒ 按钮亮着、
+     点下去 wrong-settle —— 这条判据就是守这个死角的。
+   PUT 是整份替换 (不做 settle 兜底保留), 所以能造出空驻地的老契约。 */
+const ACCT_E = 'probeE-' + T;
+const put = await api('PUT', '/api/crew', {
+  version: 1,
+  squads: [
+    { id: 'sq1', name: '小队', members: ['m-a'], settle: A },
+    { id: 'sq2', name: '二队', members: ['m-b'], settle: '' },
+  ],
+  curSquad: 'sq1',
+  squad: {
+    id: 'sq1', name: '小队', capacity: 8,       // ⚠ 故意写 8 (旧前端 dump 的污染值): 编制上限必须仍是 9
+    members: [{ id: 'm-a', name: '旧甲' }, { id: 'm-b', name: '旧乙' }],
+  },
+  bag: { capacity: 48, cols: 6, rows: 8, items: [] },
+});
+ok('7.0 PUT 一份「一队在 A + 一队驻地为空」的老契约', put.status === 200, 'status=' + put.status);
+
+const gateE = await api('GET', '/api/recruit/pool?settle=' + encodeURIComponent(B), undefined, ACCT_E);
+const gE = (gateE.json && gateE.json.hireGate) || {};
+ok('7.1 有队员但驻地为空 ⇒ 别镇也 allowed=true', gE.allowed === true, JSON.stringify(gE.reason));
+const sqE2 = (gE.squads || []).find(s => s.id === 'sq2');
+ok('7.2 该队 canEnter=true (不能因为 here=false 就置灰)',
+  !!(sqE2 && sqE2.canEnter === true), JSON.stringify(sqE2));
+ok('7.3 hireGate 下发编制/队数上限 (9/6), 不采用契约里被污染的 capacity=8',
+  gE.squadCap === 9 && gE.maxSquads === 6, gE.squadCap + '/' + gE.maxSquads);
+
+const hiE = await api('POST', '/api/recruit/hire', { settle: B, slot: 0 }, ACCT_E);
+ok('7.4 ⚠ Gate/Decide 同口径: 招进「驻地为空」那支队 (不是 wrong-settle)',
+  !!(hiE.json && hiE.json.ok === true && hiE.json.squadId === 'sq2'),
+  JSON.stringify(hiE.json && (hiE.json.code || hiE.json.error)));
+const crewE = await api('GET', '/api/crew');
+const sqE3 = ((crewE.json && crewE.json.squads) || []).find(s => s.id === 'sq2');
+ok('7.5 招完把该队驻地补绑到本次聚落', !!(sqE3 && sqE3.settle === B), sqE3 && sqE3.settle);
+ok('7.6 队里 2 人 (旧 1 + 新 1), 另一队不受影响',
+  !!(sqE3 && sqE3.members.length === 2), sqE3 && sqE3.members.join(','));
+const sqE1 = ((crewE.json && crewE.json.squads) || []).find(s => s.id === 'sq1');
+ok('7.7 在 A 的那支队驻地没被改', !!(sqE1 && sqE1.settle === A), sqE1 && sqE1.settle);
 
 console.log('\n== ' + pass + ' PASS / ' + fail + ' FAIL ==');
 process.exit(fail ? 1 : 0);
