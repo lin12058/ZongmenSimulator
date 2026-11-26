@@ -95,9 +95,9 @@ try {
   sql(`import sqlite3
 c=sqlite3.connect(r"${db}")
 c.execute("""INSERT OR REPLACE INTO TickJob
-  (Seed,Round,EntityId,Kind,Layer,Resource,NextTick,PeriodTicks,Phase,LastRunTick,FailCount,Enabled,Payload)
-  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
-  (${JSON.stringify(String(seed))}, ${round}, ${JSON.stringify(town.id)}, 'townEvolve', 1, 1, 0, 90, 0, 0, 0, 1))
+  (Round,EntityId,KindCode,Layer,Resource,NextTick,PeriodTicks,Phase,LastRunTick,FailCount,Enabled)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+  (${round}, ${JSON.stringify(town.id)}, 4, 1, 1, 0, 90, 0, 0, 0, 1))
 c.commit();print('seeded')`);
 
   B = start(LOG_B); await waitReady('B');

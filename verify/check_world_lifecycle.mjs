@@ -97,11 +97,14 @@ try {
   const stA = await http('/api/map/stats');
   ok('A: /stats 正常', stA.status === 200 && stA.json && stA.json.tick >= 0, 'tick=' + (stA.json && stA.json.tick));
 
-  /* 塞一条「本世」的城市台账行 —— 旧代码在下次启动时会把这一行删掉 */
+  /* 塞一条「本世」的城市台账行 —— 旧代码在下次启动时会把这一行删掉
+     ⚠ 2026-11-26 起 `Type` 列已换成 `TypeCode`（字典表 CityDict），字符串不再入库。 */
   sql(`import sqlite3
 c=sqlite3.connect(r"${dbSqlite}")
-c.execute("INSERT OR REPLACE INTO CityState(Round,Id,Pop,PopF,Tier,State,Type,Q,R) VALUES(?,?,?,?,?,?,?,?,?)",
-          (${roundA}, '0_0_u1', 321, 321.0, 2, 1, 'town', 0, 0))
+c.execute("INSERT OR IGNORE INTO CityDict(Dom,Name) VALUES('type','town')")
+tc=c.execute("SELECT Code FROM CityDict WHERE Dom='type' AND Name='town'").fetchone()[0]
+c.execute("INSERT OR REPLACE INTO CityState(Round,Id,Pop,PopF,Tier,State,TypeCode,Q,R) VALUES(?,?,?,?,?,?,?,?,?)",
+          (${roundA}, '0_0_u1', 321, 321.0, 2, 1, tc, 0, 0))
 c.commit(); print(c.execute("SELECT COUNT(*) FROM CityState WHERE Round=?", (${roundA},)).fetchone()[0])`);
   const before = sql(`import sqlite3
 c=sqlite3.connect(r"${dbSqlite}")

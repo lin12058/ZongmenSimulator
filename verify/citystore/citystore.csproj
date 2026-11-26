@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       判据宿主 (CityState 落库编码专用)。
+       ⚠ 与 idprobe 同一原则: 不引用整个 Zongmen.csproj (8140 在跑时 bin 被锁),
+         但**绝不复制源码** —— 用 <Compile Include> 链接生产文件本身。
+       ============================================================ -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>citystore</AssemblyName>
+    <RootNamespace>Zongmen.Verify</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Server\Zongmen\Storage\BlobCodec.cs" Link="BlobCodec.cs" />
+    <Compile Include="..\..\Server\Zongmen\Subsystems\City\CityStateStore.cs" Link="CityStateStore.cs" />
+  </ItemGroup>
+
+</Project>
