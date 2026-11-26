@@ -76,7 +76,10 @@ builder.Services.AddSingleton(new ConcurrentTickQueue());      // ★ 线程安�
 builder.Services.AddSingleton<TickScheduler>();
 builder.Services.AddSingleton<TickPartitioner>();
 builder.Services.AddSingleton(sp => new TickMetrics(
-    tickOptions, sp.GetRequiredService<TickPerfStore>()));
+    tickOptions, sp.GetRequiredService<TickPerfStore>(),
+    /* 类别名刻意短 ("tick" 而不是 Zongmen.Time.TickMetrics) —— 每 tick 一行,
+       前缀越短越不占地方。 */
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger("tick")));
 /* ★ 城市演化台账由 CitySubsystem 持有 (第三条独立表) —— 换世清空 / 渲染叠加都在它那里,
    Core 不再认识这个类型。⚠ 必须是**同一实例**: 建两个连接池会各行其是 (已由
    `AddSingleton(city.Store)` 保证)。 */
@@ -115,6 +118,11 @@ builder.Services.AddSingleton(sp => new RecruitStore(
     sp.GetRequiredService<IInfluence>()));
 
 var app = builder.Build();
+
+/* ★ JS 出口埋点的日志出口 (Engine/JsCallStats)。
+   慢调用与异常的日志按 fn 各限流 30s 一条 —— 异常可以每秒几百次, 不限流会淹没 tick 日志。
+   统计本身不受限流影响, 全量看 /api/clock/stats 的 js 字段。 */
+Zongmen.Engine.JsCallStats.Attach(app.Logger);
 
 /* 前端代理在前, /api/* 与 /ws/* 自动放行给端点 */
 app.UseMiddleware<StaticWebMiddleware>(webDir);

@@ -42,9 +42,9 @@ public sealed class TickScheduler
     /// 新增 job 并入队。⚠ 会自动落库由调用方负责（store 在 pump 侧统一 flush）。
     /// </summary>
     public TickJob Enqueue(string seed, int round, string entityId, TickJobKind kind,
-                           long fromTick, byte[]? payload = null, bool immediate = false)
+                           long fromTick, bool immediate = false)
     {
-        var job = _registry.NewJob(seed, round, entityId, kind, fromTick, payload, immediate);
+        var job = _registry.NewJob(seed, round, entityId, kind, fromTick, immediate);
         _queue.Push(job);
         return job;
     }
@@ -79,7 +79,7 @@ public sealed class TickScheduler
         return due;
     }
 
-    /// <summary>`(Layer, EntityId, Kind)` 全序 —— 与 <see cref="TickJob.SortKey"/> 同口径。</summary>
+    /// <summary>`(Layer, EntityId, Kind)` 全序 —— 合流的 apply 顺序必须与到达顺序无关。</summary>
     public static int CompareByCanonicalOrder(TickJob a, TickJob b)
     {
         var c = ((int)a.Layer).CompareTo((int)b.Layer);

@@ -162,9 +162,18 @@ public sealed class CityTickExecutor : ITickExecutor
            ⚠ 落库用一次事务（PutRange），不是逐行 Put。
            ⚠ 脏块通知用 **job 的 seed**（而非 `_world.CurrentSeed()`）—— 换世竞态下后者已是
              新世，会拿它给新世某块打上「内容并未变化」的脏 rev；seed 为空时直接跳过。 */
-        if (pendingRows.Count > 0) _store.PutRange(pendingRows);
-        if (!string.IsNullOrEmpty(seed))
+        if (pendingRows.Count > 0)
+        {
+            var tPut = Stopwatch.GetTimestamp();
+            _store.PutRange(pendingRows);
+            TickTrace.Hit("put", TickTrace.Us(Stopwatch.GetTimestamp() - tPut));
+        }
+        if (!string.IsNullOrEmpty(seed) && dirtyRegions.Count > 0)
+        {
+            var tDirty = Stopwatch.GetTimestamp();
             foreach (var (i, j) in dirtyRegions) _world.MarkSettleDirty(seed, i, j);
+            TickTrace.Hit("dirty", TickTrace.Us(Stopwatch.GetTimestamp() - tDirty));
+        }
 
         /* ③ 贸易 (批级): 本批若有 TradeEdge, 就用**当前全部城市**重算一次价格层并结算搬运。
            ⚠ 为什么批级而不是 per-job: 贸易是城际双边动作, 边集合本身是全局的
@@ -199,6 +208,16 @@ public sealed class CityTickExecutor : ITickExecutor
            ⚠ 不做无限世界全量演化 —— 那是 O(∞) 且绝大多数城永远不会被看到)。 */
         var span = Math.Max(1, _opt.EvolveSpanRegions);
         var pending = new List<(string Id, string Type, int Q, int R, int Pop, int Tier)>();
+
+        /* ★ 49 格扫描的 **C# 净开销** (JsonDocument.Parse + _store.Get + 循环)。
+           里面还调了 citySettlementsJson 和等门闩, 那两段已经单独记账 ⇒ 这里必须减掉,
+           否则同一段时间被记两次, tick 行的 other 会被压成负数。 */
+        var tScan = Stopwatch.GetTimestamp();
+        var js0 = TickTrace.Get("citySettlementsJson");
+        var wait0 = TickTrace.Get("wait");
+        /* ⚠ core VM 的懒建 (vmBuild) 也发生在这段区间里 —— 不减去就是双重记账,
+           会把 tick 行的 other 压成 0, 等于把超支藏起来 (实测过)。 */
+        var vm0 = TickTrace.Get("vmBuild");
 
         using (var lease = _world.LeaseScope(WorldModule.WorldScope, seed))
         {
@@ -237,6 +256,12 @@ public sealed class CityTickExecutor : ITickExecutor
                 }
             }
         }
+        var scanTotal = TickTrace.Us(Stopwatch.GetTimestamp() - tScan);
+        var scanJs = TickTrace.Get("citySettlementsJson") - js0;
+        var scanWait = TickTrace.Get("wait") - wait0;
+        var scanVm = TickTrace.Get("vmBuild") - vm0;
+        TickTrace.Hit("init", scanTotal - scanJs - scanWait - scanVm);
+
         if (pending.Count == 0) return;
 
         using (var lease = _world.LeaseScope(CityModule.CityScope, seed))
@@ -250,7 +275,12 @@ public sealed class CityTickExecutor : ITickExecutor
                 rows.Add(CityStateStore.FromEngineJson(round, stJson));
                 Interlocked.Increment(ref _initialized);
             }
-            if (rows.Count > 0) _store.PutRange(rows);
+            if (rows.Count > 0)
+            {
+                var tPut = Stopwatch.GetTimestamp();
+                _store.PutRange(rows);
+                TickTrace.Hit("put", TickTrace.Us(Stopwatch.GetTimestamp() - tPut));
+            }
         }
     }
 
@@ -280,7 +310,7 @@ public sealed class CityTickExecutor : ITickExecutor
         }
     }
 
-    /// <summary>K 基期策略 (与 city-evo.js 的 E.K_POLICY 同值; 逐城可被 JobSpec.Payload 覆盖, P2 暂用全局)。</summary>
+    /// <summary>K 基期策略 (与 city-evo.js 的 E.K_POLICY 同值; 逐城策略 P2 暂用全局)。</summary>
     private const string KPolicyArg = "freeze";
 
     /* ============================================================
@@ -343,7 +373,12 @@ public sealed class CityTickExecutor : ITickExecutor
                 touched[m.From] = f;
                 touched[m.To] = t;
             }
-            if (touched.Count > 0) _store.PutRange(touched.Values);
+            if (touched.Count > 0)
+            {
+                var tPut = Stopwatch.GetTimestamp();
+                _store.PutRange(touched.Values);
+                TickTrace.Hit("put", TickTrace.Us(Stopwatch.GetTimestamp() - tPut));
+            }
             Interlocked.Add(ref _tradesSettled, moved.Count);
         }
     }

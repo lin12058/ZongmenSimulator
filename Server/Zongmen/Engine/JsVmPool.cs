@@ -53,6 +53,10 @@ public sealed class JsVm : IDisposable
     {
         _module = module;
         Seed = seed;
+        /* ★ 冷启动耗时 (整包重编译 + 首次 JIT) 必须单独量出来:
+           实测单次 400ms+ 全在 `Evaluate(bundle)` 里, 而它在 Call 之外 ⇒
+           不埋点就只能算进 tick 的 other, 看起来像「演化莫名变慢」。 */
+        var tBuild = System.Diagnostics.Stopwatch.GetTimestamp();
         _engine = new V8ScriptEngine();
         _engine.Evaluate(bundle);
         dynamic s = _engine.Script;
@@ -66,6 +70,10 @@ public sealed class JsVm : IDisposable
         _root = root;
         module.OnVmReady(_script, seed);
         Touch();
+
+        /* 只在 tick 触发懒建时有桶; HTTP 请求触发的建 VM 记不上 (正确 —— 那是请求的账)。 */
+        TickTrace.Hit("vmBuild",
+            TickTrace.Us(System.Diagnostics.Stopwatch.GetTimestamp() - tBuild));
     }
 
     public void Touch() => LastUsed = DateTime.UtcNow.Ticks;
@@ -76,11 +84,22 @@ public sealed class JsVm : IDisposable
     {
         ThrowIfDisposed();
         Touch();
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         _gate.Wait();
+        var t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             ThrowIfDisposed();      // C1: 排队期间可能已被淘汰
-            return _module.RoadVersion(_script);
+            var v = _module.RoadVersion(_script);
+            JsCallStats.Hit(_module.Scope, "roadVersion", t1 - t0,
+                            System.Diagnostics.Stopwatch.GetTimestamp() - t1, null);
+            return v;
+        }
+        catch (Exception ex)
+        {
+            JsCallStats.Hit(_module.Scope, "roadVersion", t1 - t0,
+                            System.Diagnostics.Stopwatch.GetTimestamp() - t1, ex);
+            throw;
         }
         finally
         {
@@ -93,11 +112,26 @@ public sealed class JsVm : IDisposable
     {
         ThrowIfDisposed();
         Touch();
+        /* ★ 埋点 (JsCallStats): t0→t1 = 等门闩, t1→t2 = 真算。
+           两者必须分开 —— 否则「排队等别的请求」会被误当成「JS 算得慢」,
+           而那部分时间一分计算量都没有 (实测抓到过 95ms 纯排队)。 */
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         _gate.Wait();
+        var t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             ThrowIfDisposed();      // C1: 排队期间可能已被淘汰
-            return _module.Invoke(_script, _root, fn, args);
+            var r = _module.Invoke(_script, _root, fn, args);
+            JsCallStats.Hit(_module.Scope, fn, t1 - t0,
+                            System.Diagnostics.Stopwatch.GetTimestamp() - t1, null);
+            return r;
+        }
+        catch (Exception ex)
+        {
+            /* 抛了也要落统计 (err 计数 + 限流日志), 然后原样上抛 —— 不改任何行为。 */
+            JsCallStats.Hit(_module.Scope, fn, t1 - t0,
+                            System.Diagnostics.Stopwatch.GetTimestamp() - t1, ex);
+            throw;
         }
         finally
         {

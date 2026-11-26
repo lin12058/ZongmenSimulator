@@ -148,7 +148,7 @@ public sealed class TickPump : BackgroundService
             var dropped = loaded.Count - jobs.Count;
             try
             {
-                var removed = _jobStore.DeleteKindRows(seed, round, KindNames.Of(TickJobKind.DemoHeartbeat));
+                var removed = _jobStore.DeleteKindRows(round, TickJobKind.DemoHeartbeat);
                 if (dropped > 0 || removed > 0)
                     _log.LogInformation("[tick] 清理演示心跳残留：内存丢弃 {Dropped} 条 / 库中删除 {Removed} 条"
                                       + " (seed={Seed} round={Round})", dropped, removed, seed, round);
@@ -556,6 +556,9 @@ public sealed class TickPump : BackgroundService
         skippedRows = _jobStore.SkippedRows,
         dirtyRows = _jobStore.DirtyCount,
         perfRows = _perfStore.WrittenRows,
+        /* ★ 每个 JS 出口一行的调用统计 (n/err/slow/avg/max/门闩等待)。
+           与 tick 分段互补: metrics 说「这个 tick 花在哪段」, js 说「哪个出口慢」。 */
+        js = Engine.JsCallStats.Snapshot(),
     };
 }
 
