@@ -61,7 +61,7 @@
 - ⚠★ 三个在线判据都会 `DELETE /api/crew`（全局单份）⇒ 端口 8140 **硬 SKIP**（玩家存档）；e2e 还要求 guest 首日 50 点 ⇒ 库副本先 `delete from RecruitPoint/RecruitPool`。重置测试库要连 `-wal`/`-shm` 一起删；起临时实例用 `Zongmen__Port`/`Zongmen__DbPath` 覆盖，别改 appsettings.json。
 
 ## ⚠ 构建 / 验证 / 本机坑（细则 → DETAILS + skill）
-- 三红线：① 清文件一律 Node `fs.unlinkSync` 绝对路径+basename/数量断言，先过 `git ls-files`，**禁 shell 通配与 `git rm`**（已 3 次误删，`verify/_*` 删后不可恢复）② `git push` 代理要现场探：2026-11-26 起直连 GitHub 不通，须 `-c http.proxy=http://127.0.0.1:7897`（v2rayN）；推前先 `curl -x http://127.0.0.1:<port> -m 6 https://github.com` 探 7897/12618 哪个通 ③ 后台实例活不过一个回合 ⇒ 起实例+跑实机判据**同回合**，别 kill 用户 8140。
+- 三红线：① 清文件一律 Node `fs.unlinkSync` 绝对路径+basename/数量断言，先过 `git ls-files`，**禁 shell 通配与 `git rm`**（已 3 次误删，`verify/_*` 删后不可恢复）② `git push` 代理要现场探：直连 GitHub 一直不通（`schannel: failed to receive handshake`）；2026-11-27 实测 7897 已死，改用环境变量 `HTTPS_PROXY` 指向的 8965 或 12618，形式 `git -c http.proxy=http://127.0.0.1:<port> push origin main`。⚠ 判据只认 `git ls-remote`（curl 走自己的 TLS 栈会误报 000/200）；git 全局已写 `http.proxy=7897` 属过期配置，显式 `-c` 覆盖即可 ③ 后台实例活不过一个回合 ⇒ 起实例+跑实机判据**同回合**，别 kill 用户 8140。
 - 判据四防：绝对值阈值必假红／参照系不能是被测规则自己的目标函数／复算同容差语义／源码守卫判整个函数体且先剥注释。诊断走 Node（PS 输出被吞、Bash shim 缺 ls/cd/dirname、`/tmp→D:\tmp`、`>log` 吞输出）；临时脚本写 `Temp/`；rc=2=跳过。
 - ⚠ 合并两线：题名牌可删、**本宗面板不可删**；对撞文件 `git checkout --theirs` 取远端再打补丁。
 
