@@ -55,6 +55,9 @@ const JS_FILES = [
   path.join(E, 'mapgen.js'),
   path.join(E, 'mapgen-server.js'),
   path.join(CITYJS, 'city-evo.js'),
+  /* 跨 tick 事件脚本（挂在 global.CityEvo 上，必须在 city-evo.js 之后求值）。
+     ⚠ 不加载它 ⇒ `CityEvo.eventScriptJson` 是 undefined ⇒ 本节会假红。 */
+  path.join(CITYJS, 'city-events.js'),
   path.join(CHARJS, 'chargen-core.js'),
 ];
 for (const f of JS_FILES) {
@@ -70,8 +73,12 @@ const ENTITIES = {
 const ENTITY_SRC = {
   MapGenServer: fs.existsSync(path.join(E, 'mapgen-server.js'))
     ? fs.readFileSync(path.join(E, 'mapgen-server.js'), 'utf8') : '',
-  CityEvo: fs.existsSync(path.join(CITYJS, 'city-evo.js'))
-    ? fs.readFileSync(path.join(CITYJS, 'city-evo.js'), 'utf8') : '',
+  CityEvo: (fs.existsSync(path.join(CITYJS, 'city-evo.js'))
+    ? fs.readFileSync(path.join(CITYJS, 'city-evo.js'), 'utf8') : '')
+    /* 事件脚本也挂在 CityEvo 上 ⇒ 它们同样是「本模块的公开出口」，必须一起纳入出口集，
+       否则守卫 C 看不见 `eventScriptJson`（漏检方向是静默的，比假红更糟）。 */
+    + (fs.existsSync(path.join(CITYJS, 'city-events.js'))
+      ? fs.readFileSync(path.join(CITYJS, 'city-events.js'), 'utf8') : ''),
   CultivatorGen: fs.existsSync(path.join(CHARJS, 'chargen-core.js'))
     ? fs.readFileSync(path.join(CHARJS, 'chargen-core.js'), 'utf8') : '',
 };

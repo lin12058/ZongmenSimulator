@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       判据宿主（跨 tick 事件系统专用）。
+       ⚠ 不引用 Zongmen.csproj：8140 在跑时 bin\Zongmen.exe 被锁 ⇒ MSB3027；
+         而且这里只测纯逻辑层（PbWire / CityDiff / EventHeap / EntityRegistry / EventStore），
+         不需要 V8、不需要 Web。
+       ⚠ **绝不复制源码**：全部用 <Compile Include> 链接生产文件本体。
+         EventRunner.cs 刻意不链接 —— 它依赖 MapWorldServiceAccessor 与 JsVm，
+         那部分走实机验证（起服务 + 真实城），不在这里造假。
+       ============================================================ -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>eventprobe</AssemblyName>
+    <RootNamespace>Zongmen.Verify</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Server\Zongmen\Storage\EntityIdAllocator.cs" Link="EntityIdAllocator.cs" />
+    <Compile Include="..\..\Server\Zongmen\Events\PbWire.cs" Link="PbWire.cs" />
+    <Compile Include="..\..\Server\Zongmen\Events\EventTypes.cs" Link="EventTypes.cs" />
+    <Compile Include="..\..\Server\Zongmen\Events\CityDiff.cs" Link="CityDiff.cs" />
+    <Compile Include="..\..\Server\Zongmen\Events\EntityRegistry.cs" Link="EntityRegistry.cs" />
+    <Compile Include="..\..\Server\Zongmen\Events\EventStore.cs" Link="EventStore.cs" />
+    <Compile Include="..\..\Server\Zongmen\Subsystems\City\CityStateStore.cs" Link="CityStateStore.cs" />
+  </ItemGroup>
+
+</Project>
