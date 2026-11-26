@@ -106,6 +106,22 @@ public sealed class CityStateStore : IDisposable
     /// </summary>
     private static readonly string[] ResOrder = { "粮", "木", "矿", "渔", "炭", "灵", "丹", "器" };
 
+    /// <summary>资源数。⚠ 事件 diff 的 protobuf field 20..(20+n-1) 直接靠它算，加资源必须重排。</summary>
+    public static int ResourceCount => ResOrder.Length;
+
+    /// <summary>资源名顺序（只读）。Events 层按**位置**编解码，不存名字 —— 名字在这里是唯一真源。</summary>
+    public static IReadOnlyList<string> ResourceOrder => ResOrder;
+
+    /// <summary>资源名 → 下标；未知返回 -1。
+    /// ⚠ 与 <see cref="SplitStock"/> 的「未知键直接抛」刻意不同：那个是落库边界（丢数据），
+    ///   这个是 diff 读取（只为算出「哪个位置变了」），不该因为一行坏数据中断回放。</summary>
+    public static int ResourceIndex(string name)
+    {
+        for (var i = 0; i < ResOrder.Length; i++)
+            if (string.Equals(ResOrder[i], name, StringComparison.Ordinal)) return i;
+        return -1;
+    }
+
     /* Built 的 varint tag */
     private const byte BuiltJson = 0;   // [tag][utf8 json…]   兜底：结构不符时原样存
     private const byte BuiltBin = 1;    // [tag][count][7×varint]×

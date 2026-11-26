@@ -101,6 +101,10 @@ public static class JsvmBundles
         Path.Combine(engineJsDir, "mapgen.js"),
         Path.Combine(engineJsDir, "mapgen-server.js"),
         Path.Combine(cityJsDir, "city-evo.js"),
+        /* 事件脚本（跨 tick 事件系统）。挂在 `global.CityEvo` 上 ⇒ 必须排在 city-evo.js 之后。
+           ⚠ 不进 `ComputeEngineHash`（那个只扫 engineJsDir）⇒ 改脚本不会让世界库失效；
+             也不进 `MapWsHandler.EngineScriptOrder`（那是给浏览器按需下发引擎脚本用的）。 */
+        Path.Combine(cityJsDir, "city-events.js"),
         Path.Combine(engineJsDir, "chargen.js"),
     ];
 }

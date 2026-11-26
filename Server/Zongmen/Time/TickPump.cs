@@ -116,6 +116,27 @@ public sealed class TickPump : BackgroundService
     /// 参数 = (seed, round, job)。实现方负责幂等与线程安全。</summary>
     public Action<string, int, TickJob>? OnJobApplied { get; set; }
 
+    /// <summary>
+    /// ★ 跨 tick 事件系统的驱动挂点（由 `Program.cs` 后置挂载）。
+    /// 参数 = `(seed, round, tick)`，返回本 tick 实际执行的事件数。
+    ///
+    /// ⚠ 用**委托**而不是构造注入 `EventRunner`：`TickPump` 已有 11 个构造参数，
+    ///   再加一个就把「MapWorldService ↔ TickPump 互相需要」的 DI 环重新引进来 ——
+    ///   那类环走的是 factory lambda，**绕过容器的循环检测**，表现是静默死锁
+    ///   （进程活着、不监听端口、零日志）。
+    ///
+    /// ⚠ 调用点在 `RunOneTick` 末尾、**job 全部 apply 之后** ——
+    ///   事件必须看到本 tick 演化后的状态，否则算的是上一 tick 的人口。
+    /// ⚠ 本委托**不得抛**；抛了会被吞并留痕（与 <see cref="OnJobApplied"/> 同一纪律）。
+    /// </summary>
+    public Func<string, int, long, int>? RunEventsHook { get; set; }
+
+    /// <summary>★ 事件层随世界绑定/解绑的挂点。参数 = round（-1 = 解绑）。
+    /// ⚠ 挂在 <see cref="BindWorld"/> 里而不是让 `Program.cs` 手动调一次：
+    ///   换世、重启、`SwitchWorld` 都走 BindWorld，漏掉任一条路径的表现都是
+    ///   「EventQueue 有行、内存堆里没有」⇒ **事件永远不触发且不报错**。</summary>
+    public Func<int, int>? BindEventsHook { get; set; }
+
     // ══ 世界生命周期 ═══════════════════════════════════════════════════
 
     /// <summary>
@@ -171,6 +192,9 @@ public sealed class TickPump : BackgroundService
 
         _binding = new WorldBinding { Seed = seed, Round = round, Jobs = jobs };
 
+        /* ★ 事件层随世界一起绑定：载入 EventQueue 并回灌堆。见 BindEventsHook。 */
+        BindEvents(round);
+
         _log.LogInformation(
             "[tick] 绑定世界 seed={Seed} round={Round} tick={Tick}（{Desc}）载入 job={N} 跳过={Skipped}",
             seed, round, clock.Tick, GameClock.Describe(clock.Tick), jobs.Count, _jobStore.SkippedRows);
@@ -190,6 +214,7 @@ public sealed class TickPump : BackgroundService
 
         _binding = null;
         Volatile.Write(ref _currentTick, -1);
+        BindEvents(-1);
         _log.LogInformation("[tick] 解绑世界 seed={Seed}（已 flush）", b.Seed);
     }
 
@@ -323,6 +348,12 @@ public sealed class TickPump : BackgroundService
             DeferUnapplied(due, applied, nowTick, b);
         }
 
+        /* ★ 跨 tick 事件：同一 tick 内**先 job（演化）后事件**。
+           ⚠ job 批超预算时**跳过事件**（不是丢弃）：本次没调 `AdvanceTo` ⇒ 事件还在堆里，
+             下个 tick 自然到期。反过来「硬跑」会让原本已超支的 tick 再翻一倍。
+           ⚠ 事件自己也有一套预算闸（EventRunner 内部重新计时），这里只是不雪上加霜。 */
+        if (!budgetExceeded) RunEvents(nowTick, b);
+
         _metrics.EndTick(budgetExceeded);
         Volatile.Write(ref _currentTick, nowTick + 1);
 
@@ -348,6 +379,37 @@ public sealed class TickPump : BackgroundService
         if (deferred > 0)
             _log.LogWarning("[tick] tick={Tick} 顺延 {N} 个未执行 job（预算/异常），下个 tick 继续",
                 nowTick, deferred);
+    }
+
+    /// <summary>事件层绑定 / 解绑（见 <see cref="BindEventsHook"/>）。</summary>
+    private void BindEvents(int round)
+    {
+        var hook = BindEventsHook;
+        if (hook is null) return;
+        try { hook(round); }
+        catch (Exception ex)
+        {
+            /* 绑定失败 = 本世事件全部不会触发。必须留痕（不是静默）。 */
+            _log.LogError(ex, "[tick] 事件层绑定失败 round={Round}（已吞，本世事件不会触发）", round);
+        }
+    }
+
+    /// <summary>驱动本 tick 到期的跨 tick 事件（见 <see cref="RunEventsHook"/>）。</summary>
+    private void RunEvents(long nowTick, WorldBinding b)
+    {
+        var hook = RunEventsHook;
+        if (hook is null) return;
+        try
+        {
+            var n = hook(b.Seed, b.Round, nowTick);
+            if (n > 0) _log.LogDebug("[tick] tick={Tick} 执行事件 {N} 条", nowTick, n);
+        }
+        catch (Exception ex)
+        {
+            /* ⚠ 与 OnJobApplied 同理：事件层崩了不许拖垮时钟。
+               留痕 = 不静默（下个 tick 会重试未提交的那几条）。 */
+            _log.LogError(ex, "[tick] 事件驱动失败 @tick={Tick}（已吞，下个 tick 继续）", nowTick);
+        }
     }
 
     // ══ 合流：唯一写世界的入口 ═════════════════════════════════════════

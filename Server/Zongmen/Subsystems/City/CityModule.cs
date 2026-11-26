@@ -58,6 +58,14 @@ public sealed class CityModule : JsvmModule
         "cityMigrateEdgesJson" => (string)root.migrateEdgesJson(args[0], args[1]),
         "cityHarvestBuildJson" => (string)root.harvestAndBuildJson(args[0], args[1]),
         "cityConstantsJson" => (string)root.constantsJson(),
+
+        /* ---- ★ 跨 tick 事件系统的统一脚本出口 ----
+           `(scriptId, fnId)` 是**数据**（落库存两个字节），具体函数在 JS 侧 dispatch。
+           ⚠ 单一出口是刻意的：加一个事件不该让 C# 重编译、重部署。
+             代价 = 失去编译期检查 ⇒ `EventScriptRegistry` 必须与 `city-events.js` 的
+             HANDLERS 一一对应，由 `verify/check_event_system.mjs` 逐值比对兜住。 */
+        "eventScriptJson" => (string)root.eventScriptJson(args[0], args[1], args[2], args[3]),
+
         /* ---- ext 层 (玩家宗门) 注入 ----
            ⚠ 世界层与城市层各持一份 ext ⇒ **必须由同一个调用点同时注入**
              (MapWorldService 经 JsVmPool 的 onCreated 回调对所有 Scope 统一注入),

@@ -1,4 +1,5 @@
 using Zongmen;
+using Zongmen.Events;
 using Zongmen.Services;
 using Zongmen.Subsystems;
 using Zongmen.Subsystems.Characters;
@@ -102,6 +103,24 @@ builder.Services.AddSingleton<ITickExecutor>(sp => new TickExecutorHub(new ITick
 builder.Services.AddSingleton<TickPump>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TickPump>());
 
+/* ── ★ 跨 tick 事件系统 (docs/游戏设计/跨tick事件系统-调研.md + Server/Zongmen/Events/) ──
+   三张独立表:
+     · `Entity`     —— 全局 int32 id ↔ 引擎字符串 id 的唯一映射（事件侧只认 int）
+     · `EventQueue` —— 每个实体挂哪些事件、下次何时触发（调度真源，行数 = 未触发事件数）
+     · `History`    —— 每次脚本执行的状态差（protobuf，只写变化字段；行数随 tick 增长）
+   ⚠ 三张都必须**独立成表**: 塞 `Data(Key,Value)` 会被后台 `PruneExcept` 静默删掉 ——
+     事件全部消失、号空间断档，且不报错（与 WorldLedger / TickJob 同一个坑）。
+   ⚠ `EventRunner` 不注入 `TickPump`（用后置 hook 挂线），避免再加一个 DI 环。 */
+builder.Services.AddSingleton(new EntityRegistry(tickDbPath));
+builder.Services.AddSingleton(new EventStore(tickDbPath));
+builder.Services.AddSingleton(sp => new EventRunner(
+    new MapWorldServiceAccessor(sp.GetRequiredService<MapWorldService>()),
+    sp.GetRequiredService<CityStateStore>(),
+    sp.GetRequiredService<EntityRegistry>(),
+    sp.GetRequiredService<EventStore>(),
+    tickOptions,
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger("event")));
+
 /* 小队存档: 独立 Crew 表 (不塞 Data(Key,Value) —— 会被 PruneExcept 静默清掉,
    与 WorldLedger 同一个坑)。PersistEnabled=false 时降级为仅内存。 */
 builder.Services.AddSingleton(new CrewStore(
@@ -146,6 +165,13 @@ RecruitEndpoints.Map(
     _pump,
     app.Services.GetRequiredService<WorldClockStore>(),
     tickOptions);
+
+/* ★ 跨 tick 事件系统挂线 —— **必须在 AttachTickPump 之前**：
+   那一步会立刻 `BindWorld`，而 `BindWorld` 里会调 `BindEventsHook` 去载入 EventQueue。
+   挂晚了 = 本世事件一条都不进内存堆 ⇒ 永远不触发，且日志里什么都看不到。 */
+var _events = app.Services.GetRequiredService<EventRunner>();
+_pump.BindEventsHook = _events.BindWorld;
+_pump.RunEventsHook = (seed, round, tick) => _events.RunDue(seed, round, tick);
 
 /* ★ 时钟挂到世界服务: 挂上即绑定当前世 (seed/round 来自 WorldLedger 台账)。
    ⚠ 必须在 app.Build() 之后 —— MapWorldService 是单例, 这里就是把两半接上的那一刻。 */
