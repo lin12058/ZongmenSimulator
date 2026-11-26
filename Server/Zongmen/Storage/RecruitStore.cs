@@ -81,9 +81,9 @@ public sealed class RecruitStore : IDisposable
                 Round      INTEGER NOT NULL,
                 SettleId   TEXT    NOT NULL,
                 RollNo     INTEGER NOT NULL DEFAULT 0,
-                Taken      TEXT    NOT NULL DEFAULT '[]',
-                SettleJson TEXT    NOT NULL DEFAULT '',
-                PoolJson   TEXT    NOT NULL DEFAULT '',
+                Taken      BLOB    NOT NULL DEFAULT X'',
+                SettleJson BLOB    NOT NULL DEFAULT X'',
+                PoolJson   BLOB    NOT NULL DEFAULT X'',
                 Ver        INTEGER NOT NULL DEFAULT 1,
                 UpdatedAt  INTEGER NOT NULL,
                 PRIMARY KEY (Account, Round, SettleId)
@@ -342,9 +342,11 @@ public sealed class RecruitStore : IDisposable
         cmd.Parameters.AddWithValue("$r", r.Round);
         cmd.Parameters.AddWithValue("$s", r.SettleId);
         cmd.Parameters.AddWithValue("$n", r.RollNo);
-        cmd.Parameters.AddWithValue("$k", r.TakenJson);
-        cmd.Parameters.AddWithValue("$sj", r.SettleJson);
-        cmd.Parameters.AddWithValue("$pj", r.PoolJson);
+        /* ⚠ 三列都是 JSON / 短文本 ⇒ 落库前 gzip (短串 BlobCodec 自动退回原文)。
+           PoolJson 单个 17KB 里 49% 是键名, 压缩后约 4KB。 */
+        cmd.Parameters.AddWithValue("$k", BlobCodec.Pack(r.TakenJson));
+        cmd.Parameters.AddWithValue("$sj", BlobCodec.Pack(r.SettleJson));
+        cmd.Parameters.AddWithValue("$pj", BlobCodec.Pack(r.PoolJson));
         cmd.Parameters.AddWithValue("$v", r.Ver);
         cmd.Parameters.AddWithValue("$u", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         cmd.ExecuteNonQuery();
@@ -376,7 +378,8 @@ public sealed class RecruitStore : IDisposable
                 while (r.Read())
                 {
                     var row = new RecruitPoolRow(r.GetString(0), r.GetInt32(1), r.GetString(2), r.GetInt32(3),
-                        r.GetString(4), r.GetString(5), r.GetString(6), r.GetInt32(7));
+                        BlobCodec.FromField(r.GetValue(4)), BlobCodec.FromField(r.GetValue(5)),
+                        BlobCodec.FromField(r.GetValue(6)), r.GetInt32(7));
                     /* 坏行 (PoolJson 空) 不载入 ⇒ 下次打探自然重生成, 不必人工修库 */
                     if (string.IsNullOrEmpty(row.PoolJson)) continue;
                     _pools[QKey(row.Account, row.Round, row.SettleId)] = row;

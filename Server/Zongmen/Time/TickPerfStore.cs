@@ -2,9 +2,9 @@ using Microsoft.Data.Sqlite;
 
 namespace Zongmen.Time;
 
-/// <summary>TickPerf 的一行聚合。</summary>
+/// <summary>TickPerf 的一行聚合。⚠ `KindCode` = <see cref="KindNames.Code"/>（不是字符串，也不是枚举序）。</summary>
 public sealed record TickPerfRow(
-    string Seed, long TickFrom, long TickTo, string Kind, int N,
+    long TickFrom, long TickTo, int KindCode, int N,
     double MsGzUnwrap, double MsPbSer, double MsXferIn, double MsJs, double MsXferOut, double MsApply,
     long BytesIn, long BytesOut, int VmDrops);
 
@@ -14,6 +14,10 @@ public sealed record TickPerfRow(
 /// ⚠ 独立成表：`PruneExcept` 够不着（同 `WorldClock` / `TickJob`）。
 /// ⚠ **逐 tick 全存会写放大** ⇒ 内存环形缓冲（最近 N tick）+ 每 `PerfAggregateEveryTicks`
 ///   （默认 30）聚合**一行**落库。
+///
+/// ⚠⚠ 这是全库**唯一每 tick 持续增长**的表 ⇒ 字符串成本会被行数放大：
+///   2026-11-26 起 **删掉 `Seed` 列**（整库单世界，`World.Seed` 才是真源，原先是每行重复同一串）、
+///   **`Kind` 改 `KindCode INTEGER`**（原先进位 8~11B 枚举串）。合计 18B/行 → 1B/行。
 ///
 /// 分段字段（§8.1）—— 缺一段就不知道该往哪优化：
 ///   t_gz_unwrap 解压（来源是 DB 时） / t_pb_ser 宿主侧快照序列化
@@ -41,24 +45,23 @@ public sealed class TickPerfStore : IDisposable
         using var cmd = init.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS TickPerf (
-                Seed     TEXT    NOT NULL,
-                TickFrom INTEGER NOT NULL,
-                TickTo   INTEGER NOT NULL,
-                Kind     TEXT    NOT NULL,
-                N        INTEGER NOT NULL,
-                MsGz     REAL    NOT NULL DEFAULT 0,
-                MsSer    REAL    NOT NULL DEFAULT 0,
-                MsXferIn REAL    NOT NULL DEFAULT 0,
-                MsJs     REAL    NOT NULL DEFAULT 0,
-                MsXferOut REAL   NOT NULL DEFAULT 0,
-                MsApply  REAL    NOT NULL DEFAULT 0,
-                BytesIn  INTEGER NOT NULL DEFAULT 0,
-                BytesOut INTEGER NOT NULL DEFAULT 0,
-                VmDrops  INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (Seed, TickFrom, TickTo, Kind)
+                TickFrom  INTEGER NOT NULL,
+                TickTo    INTEGER NOT NULL,
+                KindCode  INTEGER NOT NULL,
+                N         INTEGER NOT NULL,
+                MsGz      REAL    NOT NULL DEFAULT 0,
+                MsSer     REAL    NOT NULL DEFAULT 0,
+                MsXferIn  REAL    NOT NULL DEFAULT 0,
+                MsJs      REAL    NOT NULL DEFAULT 0,
+                MsXferOut REAL    NOT NULL DEFAULT 0,
+                MsApply   REAL    NOT NULL DEFAULT 0,
+                BytesIn   INTEGER NOT NULL DEFAULT 0,
+                BytesOut  INTEGER NOT NULL DEFAULT 0,
+                VmDrops   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (TickFrom, TickTo, KindCode)
             );
-            CREATE INDEX IF NOT EXISTS ix_tickperf_seed_tick
-                ON TickPerf (Seed, TickFrom);
+            CREATE INDEX IF NOT EXISTS ix_tickperf_tick
+                ON TickPerf (TickFrom);
             """;
         cmd.ExecuteNonQuery();
     }
@@ -76,7 +79,7 @@ public sealed class TickPerfStore : IDisposable
     }
 
     /// <summary>批量写入聚合行（一次事务）。</summary>
-    public int Write(string seed, IReadOnlyList<TickPerfRow> rows)
+    public int Write(IReadOnlyList<TickPerfRow> rows)
     {
         if (rows.Count == 0) return 0;
         if (_cs == null) { Interlocked.Add(ref _writtenRows, rows.Count); return rows.Count; }
@@ -88,11 +91,11 @@ public sealed class TickPerfStore : IDisposable
             using var cmd = c.CreateCommand();
             cmd.Transaction = tx;
             cmd.CommandText = """
-                INSERT INTO TickPerf(Seed, TickFrom, TickTo, Kind, N,
+                INSERT INTO TickPerf(TickFrom, TickTo, KindCode, N,
                                      MsGz, MsSer, MsXferIn, MsJs, MsXferOut, MsApply,
                                      BytesIn, BytesOut, VmDrops)
-                VALUES($s, $tf, $tt, $k, $n, $gz, $ser, $xi, $js, $xo, $ap, $bi, $bo, $vd)
-                ON CONFLICT(Seed, TickFrom, TickTo, Kind) DO UPDATE SET
+                VALUES($tf, $tt, $k, $n, $gz, $ser, $xi, $js, $xo, $ap, $bi, $bo, $vd)
+                ON CONFLICT(TickFrom, TickTo, KindCode) DO UPDATE SET
                     N=excluded.N, MsGz=excluded.MsGz, MsSer=excluded.MsSer,
                     MsXferIn=excluded.MsXferIn, MsJs=excluded.MsJs,
                     MsXferOut=excluded.MsXferOut, MsApply=excluded.MsApply,
@@ -100,10 +103,9 @@ public sealed class TickPerfStore : IDisposable
                     VmDrops=excluded.VmDrops;
                 """;
             var ps = cmd.Parameters;
-            var pS = ps.Add("$s", SqliteType.Text);
             var pTf = ps.Add("$tf", SqliteType.Integer);
             var pTt = ps.Add("$tt", SqliteType.Integer);
-            var pK = ps.Add("$k", SqliteType.Text);
+            var pK = ps.Add("$k", SqliteType.Integer);
             var pN = ps.Add("$n", SqliteType.Integer);
             var pGz = ps.Add("$gz", SqliteType.Real);
             var pSer = ps.Add("$ser", SqliteType.Real);
@@ -117,8 +119,8 @@ public sealed class TickPerfStore : IDisposable
 
             foreach (var row in rows)
             {
-                pS.Value = row.Seed; pTf.Value = row.TickFrom; pTt.Value = row.TickTo;
-                pK.Value = row.Kind; pN.Value = row.N;
+                pTf.Value = row.TickFrom; pTt.Value = row.TickTo;
+                pK.Value = row.KindCode; pN.Value = row.N;
                 pGz.Value = row.MsGzUnwrap; pSer.Value = row.MsPbSer;
                 pXi.Value = row.MsXferIn; pJs.Value = row.MsJs; pXo.Value = row.MsXferOut;
                 pAp.Value = row.MsApply;
@@ -132,24 +134,23 @@ public sealed class TickPerfStore : IDisposable
     }
 
     /// <summary>最近 N 条（/stats 与诊断用）。</summary>
-    public List<TickPerfRow> Recent(string seed, int n)
+    public List<TickPerfRow> Recent(int n)
     {
         var outList = new List<TickPerfRow>();
         if (_cs == null) return outList;
         using var c = Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            SELECT TickFrom, TickTo, Kind, N, MsGz, MsSer, MsXferIn, MsJs, MsXferOut, MsApply,
+            SELECT TickFrom, TickTo, KindCode, N, MsGz, MsSer, MsXferIn, MsJs, MsXferOut, MsApply,
                    BytesIn, BytesOut, VmDrops
-            FROM TickPerf WHERE Seed=$s ORDER BY TickTo DESC LIMIT $n;
+            FROM TickPerf ORDER BY TickTo DESC LIMIT $n;
             """;
-        cmd.Parameters.AddWithValue("$s", seed);
         cmd.Parameters.AddWithValue("$n", Math.Max(1, n));
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
             outList.Add(new TickPerfRow(
-                seed, r.GetInt64(0), r.GetInt64(1), r.GetString(2), r.GetInt32(3),
+                r.GetInt64(0), r.GetInt64(1), r.GetInt32(2), r.GetInt32(3),
                 r.GetDouble(4), r.GetDouble(5), r.GetDouble(6), r.GetDouble(7),
                 r.GetDouble(8), r.GetDouble(9),
                 r.GetInt64(10), r.GetInt64(11), r.GetInt32(12)));

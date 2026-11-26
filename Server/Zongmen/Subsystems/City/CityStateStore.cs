@@ -2,12 +2,17 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using Zongmen.Storage;
 
 namespace Zongmen.Subsystems.City;
 
 /// <summary>一座聚落的演化状态 (CityState 表的一行)。
 /// 与引擎 `Subsystems/City/js/city-evo.js` 的 CityState 结构**逐字段对应** ——
-/// 字段名/语义必须与那里保持一致, 否则离线对拍会以「看起来像 bug 的口径差」失败。</summary>
+/// 字段名/语义必须与那里保持一致, 否则离线对拍会以「看起来像 bug 的口径差」失败。
+///
+/// ⚠ 内存态**仍然是 string**（`Type`/`Stock`/`Built`）—— 紧凑编码只发生在落库边界
+///   (<see cref="CityStateStore"/> 的 Save / EnsureLoaded)。这样所有调用点、引擎 JSON
+///   互转、判据都不用改，省下的字节全在磁盘上。</summary>
 public sealed class CityStateRow
 {
     public int Round;
@@ -30,9 +35,11 @@ public sealed class CityStateRow
     public int Tier;
     public int State;
 
-    /// <summary>八资源库存 JSON (`{"粮":123,...}`)。演化只增减这里, 绝不回写引擎骨架产出。</summary>
+    /// <summary>八资源库存 JSON (`{"粮":123,...}`)。演化只增减这里, 绝不回写引擎骨架产出。
+    /// ⚠ 落库时拆成 8 个 INTEGER 列（键名占 JSON 的 69%，每行白烧 48B）。</summary>
     public string Stock = "{}";
-    /// <summary>演化新增建筑 JSON 数组。⚠ 每一项都带 `evo:1`; 骨架建筑不在本表 (它们是 seed 派生)。</summary>
+    /// <summary>演化新增建筑 JSON 数组。⚠ 每一项都带 `evo:1`; 骨架建筑不在本表 (它们是 seed 派生)。
+    /// ⚠ 落库时压成 varint BLOB（键名占 56%，`"q":` `"kind":` 每项重复一次）。</summary>
     public string Built = "[]";
 
     /* ---- Δ 铁律所需的累加器 (绝不由 tick 差反推) ---- */
@@ -58,13 +65,16 @@ public sealed class CityStateRow
  *              ② 客户端拉取 (人口/等级/库存叠加显示)
  *              ③ 离线进度对拍判据
  *
- * 表结构 (同一个 db/zongmen.sqlite, 表 CityState):
+ * 表结构 (同一个 db/zongmen.sqlite, 表 CityState) —— 2026-11-26 紧凑化:
  *     CityState(Round INTEGER, Id TEXT, Ver INTEGER, UpdatedAt INTEGER,
- *               LastEvoTick INTEGER, Pop INTEGER, PopF REAL, Tier INTEGER,
- *               State INTEGER, Stock TEXT, Built TEXT, BornTick INTEGER,
- *               Age INTEGER, FoodDebt REAL, PopBase INTEGER, BasePopF REAL,
- *               BaseAge INTEGER, BuiltFrac REAL, Kf REAL,
+ *               LastEvoTick INTEGER, TypeCode INTEGER, Q INTEGER, R INTEGER,
+ *               Pop INTEGER, PopF REAL, Tier INTEGER, State INTEGER,
+ *               R0..R7 INTEGER,           -- 八资源库存 (粮木矿渔炭灵丹器)
+ *               Built BLOB,               -- 演化建筑 (varint 数组)
+ *               BornTick INTEGER, Age INTEGER, FoodDebt REAL, PopBase INTEGER,
+ *               BasePopF REAL, BaseAge INTEGER, BuiltFrac REAL, Kf REAL,
  *               PRIMARY KEY(Round, Id))
+ *     CityDict(Code INTEGER PK AUTOINCREMENT, Dom TEXT, Name TEXT, UNIQUE(Dom,Name))
  *   · 主键 (Round, Id) ⇒ 一世一座一行。⚠ **不含 Account** (与 PlayerSect 的根本区别):
  *     CityState 覆盖**全部**聚落 (含 seed 派生的 NPC 城), 只有玩家聚落才有 Account;
  *     把 Account 放主键会让所有 NPC 城撞成同一行 (或被迫用假账号)。
@@ -78,10 +88,27 @@ public sealed class CityStateRow
  *
  * ⚠ Ver 单调递增的用途: 客户端缓存失效 (带旧 Ver 的请求不需要重算)。与
  *   PlayerSectStore 不同, 这里 Ver 由演化推进 (每批 +1), 不只在写入时自增。
+ *
+ * ⚠⚠ 2026-11-26 字符串压缩 (测试库已清空, 不做迁移):
+ *   · `Type`  TEXT  → `TypeCode` INTEGER (字典表 CityDict.Dom='type')
+ *   · `Stock` TEXT  → `R0..R7` 8 个 INTEGER (原 JSON 键名占 69%)
+ *   · `Built` TEXT  → BLOB (varint; 原 JSON 键名占 56%)
+ *   三者的**内存态与引擎 JSON 形态完全不变**, 编码只在这一层做。
  * ============================================================ */
 public sealed class CityStateStore : IDisposable
 {
     private const string CsTemplate = "Data Source={0};Pooling=True";
+
+    /// <summary>
+    /// 八资源固定顺序 —— 与引擎 `city-evo.js` 的 `E.RES_ORDER` **逐字一致**。
+    /// ⚠ 引擎加资源必须同步这里: 解析到未知键会**抛异常**(宁可炸也不静默丢数据),
+    ///   而不是默默少存一个。
+    /// </summary>
+    private static readonly string[] ResOrder = { "粮", "木", "矿", "渔", "炭", "灵", "丹", "器" };
+
+    /* Built 的 varint tag */
+    private const byte BuiltJson = 0;   // [tag][utf8 json…]   兜底：结构不符时原样存
+    private const byte BuiltBin = 1;    // [tag][count][7×varint]×
 
     private const string CreateSql = """
         CREATE TABLE IF NOT EXISTS CityState (
@@ -90,15 +117,22 @@ public sealed class CityStateStore : IDisposable
             Ver         INTEGER NOT NULL DEFAULT 0,
             UpdatedAt   INTEGER NOT NULL DEFAULT 0,
             LastEvoTick INTEGER NOT NULL DEFAULT 0,
-            Type        TEXT    NOT NULL DEFAULT 'town',
+            TypeCode    INTEGER NOT NULL DEFAULT 0,
             Q           INTEGER NOT NULL DEFAULT 0,
             R           INTEGER NOT NULL DEFAULT 0,
             Pop         INTEGER NOT NULL DEFAULT 0,
             PopF        REAL    NOT NULL DEFAULT 0,
             Tier        INTEGER NOT NULL DEFAULT 1,
             State       INTEGER NOT NULL DEFAULT 0,
-            Stock       TEXT    NOT NULL DEFAULT '{}',
-            Built       TEXT    NOT NULL DEFAULT '[]',
+            R0          INTEGER NOT NULL DEFAULT 0,
+            R1          INTEGER NOT NULL DEFAULT 0,
+            R2          INTEGER NOT NULL DEFAULT 0,
+            R3          INTEGER NOT NULL DEFAULT 0,
+            R4          INTEGER NOT NULL DEFAULT 0,
+            R5          INTEGER NOT NULL DEFAULT 0,
+            R6          INTEGER NOT NULL DEFAULT 0,
+            R7          INTEGER NOT NULL DEFAULT 0,
+            Built       BLOB    NOT NULL DEFAULT X'',
             BornTick    INTEGER NOT NULL DEFAULT 0,
             Age         INTEGER NOT NULL DEFAULT 0,
             FoodDebt    REAL    NOT NULL DEFAULT 0,
@@ -110,12 +144,22 @@ public sealed class CityStateStore : IDisposable
             PRIMARY KEY (Round, Id)
         );
         CREATE INDEX IF NOT EXISTS IX_CityState_Round ON CityState(Round);
+        CREATE TABLE IF NOT EXISTS CityDict (
+            Code INTEGER PRIMARY KEY AUTOINCREMENT,
+            Dom  TEXT NOT NULL,
+            Name TEXT NOT NULL,
+            UNIQUE (Dom, Name)
+        );
         """;
 
     private readonly string? _cs;
     private readonly object _gate = new();
     private readonly Dictionary<(int Round, string Id), CityStateRow> _mem = new();
     private bool _loaded;
+
+    /* 字典缓存: (Dom, Name) ↔ Code。Dom = 'type' | 'build' | 'terrain' */
+    private readonly Dictionary<(string Dom, string Name), int> _dictFwd = new();
+    private readonly Dictionary<(string Dom, int Code), string> _dictRev = new();
 
     public bool Persisted => _cs != null;
 
@@ -129,6 +173,7 @@ public sealed class CityStateStore : IDisposable
         using var cmd = init.CreateCommand();
         cmd.CommandText = CreateSql;
         cmd.ExecuteNonQuery();
+        LoadDict(init);
     }
 
     private SqliteConnection Open()
@@ -142,6 +187,51 @@ public sealed class CityStateStore : IDisposable
         }
         return c;
     }
+
+    /* ---------- 字典 ---------- */
+
+    private void LoadDict(SqliteConnection c)
+    {
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT Code, Dom, Name FROM CityDict;";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            var code = r.GetInt32(0);
+            var dom = r.GetString(1);
+            var name = r.GetString(2);
+            _dictFwd[(dom, name)] = code;
+            _dictRev[(dom, code)] = name;
+        }
+    }
+
+    /// <summary>名字 → 码。空名给 0（0 = 未设置）。新词**就地入库**并缓存。</summary>
+    private int DictCode(string dom, string name)
+    {
+        if (string.IsNullOrEmpty(name)) return 0;
+        if (_dictFwd.TryGetValue((dom, name), out var c)) return c;
+        if (_cs == null) { _dictFwd[(dom, name)] = 0; return 0; }
+        using var conn = Open();
+        using (var ins = conn.CreateCommand())
+        {
+            ins.CommandText = "INSERT INTO CityDict(Dom, Name) VALUES($d, $n) ON CONFLICT(Dom, Name) DO NOTHING;";
+            ins.Parameters.AddWithValue("$d", dom);
+            ins.Parameters.AddWithValue("$n", name);
+            ins.ExecuteNonQuery();
+        }
+        using var sel = conn.CreateCommand();
+        sel.CommandText = "SELECT Code FROM CityDict WHERE Dom=$d AND Name=$n;";
+        sel.Parameters.AddWithValue("$d", dom);
+        sel.Parameters.AddWithValue("$n", name);
+        var code = Convert.ToInt32(sel.ExecuteScalar() ?? 0);
+        _dictFwd[(dom, name)] = code;
+        _dictRev[(dom, code)] = name;
+        return code;
+    }
+
+    /// <summary>码 → 名字。0 / 未知码给空串。</summary>
+    private string DictName(string dom, int code)
+        => code != 0 && _dictRev.TryGetValue((dom, code), out var n) ? n : "";
 
     /* ---------- 读 ---------- */
 
@@ -210,7 +300,8 @@ public sealed class CityStateStore : IDisposable
         }
     }
 
-    /// <summary>批量落库 (一个 tick 批的落库口径: **一次事务**写完整个批)。    /// ⚠ 必须成批: 逐行各自开事务在 90 tick × 数百城的量级上会把 WAL 打满;
+    /// <summary>批量落库 (一个 tick 批的落库口径: **一次事务**写完整个批)。
+    /// ⚠ 必须成批: 逐行各自开事务在 90 tick × 数百城的量级上会把 WAL 打满;
     ///   而且批中途失败会留下「半批已演化」的不一致状态。</summary>
     public void PutRange(IEnumerable<CityStateRow> rows)
     {
@@ -232,33 +323,8 @@ public sealed class CityStateStore : IDisposable
             using var cmd = c.CreateCommand();
             cmd.Transaction = tx;
             cmd.CommandText = UpsertSql;
-            BindUpsert(cmd, list[0]);           // 预热参数名 (AddWithValue 一次即可复用)
-            foreach (var r in list)
-            {
-                cmd.Parameters["$ro"].Value = r.Round;
-                cmd.Parameters["$id"].Value = r.Id;
-                cmd.Parameters["$v"].Value = r.Ver;
-                cmd.Parameters["$u"].Value = r.UpdatedAt;
-                cmd.Parameters["$lt"].Value = r.LastEvoTick;
-                cmd.Parameters["$ty"].Value = r.Type;
-                cmd.Parameters["$q"].Value = r.Q;
-                cmd.Parameters["$rr"].Value = r.R;
-                cmd.Parameters["$pp"].Value = r.Pop;
-                cmd.Parameters["$pf"].Value = r.PopF;
-                cmd.Parameters["$ti"].Value = r.Tier;
-                cmd.Parameters["$st"].Value = r.State;
-                cmd.Parameters["$sk"].Value = r.Stock;
-                cmd.Parameters["$bl"].Value = r.Built;
-                cmd.Parameters["$bt"].Value = r.BornTick;
-                cmd.Parameters["$ag"].Value = r.Age;
-                cmd.Parameters["$fd"].Value = r.FoodDebt;
-                cmd.Parameters["$pb"].Value = r.PopBase;
-                cmd.Parameters["$bpf"].Value = (object?)r.BasePopF ?? DBNull.Value;
-                cmd.Parameters["$ba"].Value = (object?)r.BaseAge ?? DBNull.Value;
-                cmd.Parameters["$bf"].Value = r.BuiltFrac;
-                cmd.Parameters["$kf"].Value = r.Kf;
-                cmd.ExecuteNonQuery();
-            }
+            BindUpsert(cmd);                    // 预热参数名 (AddWithValue 一次即可复用)
+            foreach (var r in list) { BindRow(cmd, r); cmd.ExecuteNonQuery(); }
             tx.Commit();
         }
     }
@@ -329,26 +395,71 @@ public sealed class CityStateStore : IDisposable
         }
     }
 
-    /* ---------- 序列化: 与 city-evo.js 的 CityState 结构互转 ---------- */
+    /* ---------- 落库编码 ---------- */
 
     private const string UpsertSql = """
-        INSERT INTO CityState(Round, Id, Ver, UpdatedAt, LastEvoTick, Type, Q, R, Pop, PopF, Tier, State,
-                              Stock, Built, BornTick, Age, FoodDebt, PopBase, BasePopF, BaseAge,
-                              BuiltFrac, Kf)
-        VALUES($ro, $id, $v, $u, $lt, $ty, $q, $rr, $pp, $pf, $ti, $st, $sk, $bl, $bt, $ag, $fd, $pb, $bpf, $ba, $bf, $kf)
+        INSERT INTO CityState(Round, Id, Ver, UpdatedAt, LastEvoTick, TypeCode, Q, R, Pop, PopF, Tier, State,
+                              R0, R1, R2, R3, R4, R5, R6, R7, Built,
+                              BornTick, Age, FoodDebt, PopBase, BasePopF, BaseAge, BuiltFrac, Kf)
+        VALUES($ro, $id, $v, $u, $lt, $ty, $q, $rr, $pp, $pf, $ti, $st,
+               $r0, $r1, $r2, $r3, $r4, $r5, $r6, $r7, $bl,
+               $bt, $ag, $fd, $pb, $bpf, $ba, $bf, $kf)
         ON CONFLICT(Round, Id) DO UPDATE SET
-            Ver=$v, UpdatedAt=$u, LastEvoTick=$lt, Type=$ty, Q=$q, R=$rr,
+            Ver=$v, UpdatedAt=$u, LastEvoTick=$lt, TypeCode=$ty, Q=$q, R=$rr,
             Pop=$pp, PopF=$pf, Tier=$ti, State=$st,
-            Stock=$sk, Built=$bl, BornTick=$bt, Age=$ag, FoodDebt=$fd, PopBase=$pb,
+            R0=$r0, R1=$r1, R2=$r2, R3=$r3, R4=$r4, R5=$r5, R6=$r6, R7=$r7, Built=$bl,
+            BornTick=$bt, Age=$ag, FoodDebt=$fd, PopBase=$pb,
             BasePopF=$bpf, BaseAge=$ba, BuiltFrac=$bf, Kf=$kf;
         """;
 
-    private static void BindUpsert(SqliteCommand cmd, CityStateRow r)
+    private static readonly string[] ParamNames =
     {
-        foreach (var n in new[] { "$ro", "$id", "$v", "$u", "$lt", "$ty", "$q", "$rr",
-                                  "$pp", "$pf", "$ti", "$st", "$sk",
-                                  "$bl", "$bt", "$ag", "$fd", "$pb", "$bpf", "$ba", "$bf", "$kf" })
-            cmd.Parameters.AddWithValue(n, DBNull.Value);
+        "$ro", "$id", "$v", "$u", "$lt", "$ty", "$q", "$rr",
+        "$pp", "$pf", "$ti", "$st",
+        "$r0", "$r1", "$r2", "$r3", "$r4", "$r5", "$r6", "$r7", "$bl",
+        "$bt", "$ag", "$fd", "$pb", "$bpf", "$ba", "$bf", "$kf",
+    };
+
+    private static void BindUpsert(SqliteCommand cmd)
+    {
+        foreach (var n in ParamNames) cmd.Parameters.AddWithValue(n, DBNull.Value);
+    }
+
+    private void BindRow(SqliteCommand cmd, CityStateRow r)
+    {
+        var ps = cmd.Parameters;
+        ps["$ro"].Value = r.Round;
+        ps["$id"].Value = r.Id;
+        ps["$v"].Value = r.Ver;
+        ps["$u"].Value = r.UpdatedAt;
+        ps["$lt"].Value = r.LastEvoTick;
+        ps["$q"].Value = r.Q;
+        ps["$rr"].Value = r.R;
+        ps["$pp"].Value = r.Pop;
+        ps["$pf"].Value = r.PopF;
+        ps["$ti"].Value = r.Tier;
+        ps["$st"].Value = r.State;
+        ps["$bt"].Value = r.BornTick;
+        ps["$ag"].Value = r.Age;
+        ps["$fd"].Value = r.FoodDebt;
+        ps["$pb"].Value = r.PopBase;
+        ps["$bpf"].Value = (object?)r.BasePopF ?? DBNull.Value;
+        ps["$ba"].Value = (object?)r.BaseAge ?? DBNull.Value;
+        ps["$bf"].Value = r.BuiltFrac;
+        ps["$kf"].Value = r.Kf;
+        /* ⚠ TypeCode / 8 个资源 / Built 是**非静态**的 (要查字典 / 要解析 JSON)，
+           所以不能在 BindUpsert 里预热，必须每行算。 */
+        BindEncoded(cmd, r);
+    }
+
+    private void BindEncoded(SqliteCommand cmd, CityStateRow r)
+    {
+        var ps = cmd.Parameters;
+        ps["$ty"].Value = DictCode("type", r.Type);
+        var st = SplitStock(r.Stock);
+        ps["$r0"].Value = st[0]; ps["$r1"].Value = st[1]; ps["$r2"].Value = st[2]; ps["$r3"].Value = st[3];
+        ps["$r4"].Value = st[4]; ps["$r5"].Value = st[5]; ps["$r6"].Value = st[6]; ps["$r7"].Value = st[7];
+        ps["$bl"].Value = EncodeBuilt(r.Built);
     }
 
     private void Save(CityStateRow r)
@@ -357,30 +468,158 @@ public sealed class CityStateStore : IDisposable
         using var c = Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = UpsertSql;
-        cmd.Parameters.AddWithValue("$ro", r.Round);
-        cmd.Parameters.AddWithValue("$id", r.Id);
-        cmd.Parameters.AddWithValue("$v", r.Ver);
-        cmd.Parameters.AddWithValue("$u", r.UpdatedAt);
-        cmd.Parameters.AddWithValue("$lt", r.LastEvoTick);
-        cmd.Parameters.AddWithValue("$ty", r.Type);
-        cmd.Parameters.AddWithValue("$q", r.Q);
-        cmd.Parameters.AddWithValue("$rr", r.R);
-        cmd.Parameters.AddWithValue("$pp", r.Pop);
-        cmd.Parameters.AddWithValue("$pf", r.PopF);
-        cmd.Parameters.AddWithValue("$ti", r.Tier);
-        cmd.Parameters.AddWithValue("$st", r.State);
-        cmd.Parameters.AddWithValue("$sk", r.Stock);
-        cmd.Parameters.AddWithValue("$bl", r.Built);
-        cmd.Parameters.AddWithValue("$bt", r.BornTick);
-        cmd.Parameters.AddWithValue("$ag", r.Age);
-        cmd.Parameters.AddWithValue("$fd", r.FoodDebt);
-        cmd.Parameters.AddWithValue("$pb", r.PopBase);
-        cmd.Parameters.AddWithValue("$bpf", (object?)r.BasePopF ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$ba", (object?)r.BaseAge ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$bf", r.BuiltFrac);
-        cmd.Parameters.AddWithValue("$kf", r.Kf);
+        BindUpsert(cmd);
+        BindRow(cmd, r);
         cmd.ExecuteNonQuery();
     }
+
+    /// <summary>八资源 JSON → 8 个 long。
+    /// ⚠ 出现 `RES_ORDER` 之外的键就**抛** —— 引擎加了资源却没同步本表 = 静默丢数据，
+    ///   那是被查询时才发现「矿怎么永远是 0」的坑。宁可当场炸。</summary>
+    private static long[] SplitStock(string json)
+    {
+        var v = new long[8];
+        if (string.IsNullOrEmpty(json) || json == "{}") return v;
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) return v;
+        foreach (var p in doc.RootElement.EnumerateObject())
+        {
+            var i = Array.IndexOf(ResOrder, p.Name);
+            if (i < 0)
+                throw new InvalidDataException(
+                    $"CityState.Stock 出现未知资源键 '{p.Name}' —— 引擎 RES_ORDER 改了但 CityStateStore.ResOrder 没同步");
+            if (p.Value.ValueKind == JsonValueKind.Number)
+                v[i] = (long)Math.Round(p.Value.GetDouble());
+        }
+        return v;
+    }
+
+    /// <summary>8 个 long → 八资源 JSON。全 0 给 `{}`（与引擎默认形态一致，别写 8 个 0 撑大）。</summary>
+    private static string JoinStock(long v0, long v1, long v2, long v3, long v4, long v5, long v6, long v7)
+    {
+        ReadOnlySpan<long> v = stackalloc long[] { v0, v1, v2, v3, v4, v5, v6, v7 };
+        var any = false;
+        for (var i = 0; i < 8; i++) if (v[i] != 0) { any = true; break; }
+        if (!any) return "{}";
+        var sb = new StringBuilder(96);
+        sb.Append('{');
+        var first = true;
+        for (var i = 0; i < 8; i++)
+        {
+            if (v[i] == 0) continue;
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append('"').Append(ResOrder[i]).Append("\":").Append(v[i].ToString(CultureInfo.InvariantCulture));
+        }
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    /* ---- Built: varint BLOB ----
+       格式: [tag=1][count][ { zig(q), zig(r), kindCode, terrainCode, tier, lv, evo } × count ]
+       ⚠ 任何一项的字段集合不符（引擎加了字段 / 少了字段）⇒ 整串退回 [tag=0][utf8 json]，
+         保证「编码器不认识的结构」原样往返，绝不会丢字段。 */
+
+    private byte[] EncodeBuilt(string json)
+    {
+        if (string.IsNullOrEmpty(json) || json == "[]")
+            return new[] { BuiltBin, (byte)0 };
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) throw new InvalidDataException();
+            var arr = doc.RootElement;
+            var n = arr.GetArrayLength();
+            if (n > 255) throw new InvalidDataException();      // 建筑数不会到 255，超了就退回 JSON
+            var buf = new List<byte>(n * 9 + 2) { BuiltBin, (byte)n };
+            foreach (var it in arr.EnumerateArray())
+            {
+                if (it.ValueKind != JsonValueKind.Object) throw new InvalidDataException();
+                var cnt = 0;
+                foreach (var _ in it.EnumerateObject()) cnt++;
+                if (cnt != 7) throw new InvalidDataException();
+                var q = it.GetProperty("q").GetInt32();
+                var r = it.GetProperty("r").GetInt32();
+                var kind = it.GetProperty("kind").GetString() ?? "";
+                var terr = it.GetProperty("terrain").GetString() ?? "";
+                var tier = it.GetProperty("tier").GetInt32();
+                var lv = it.GetProperty("lv").GetInt32();
+                var evo = it.GetProperty("evo").GetInt32();
+                PutU(buf, Zig(q));
+                PutU(buf, Zig(r));
+                PutU(buf, (ulong)DictCode("build", kind));
+                PutU(buf, (ulong)DictCode("terrain", terr));
+                PutU(buf, (ulong)tier);
+                PutU(buf, (ulong)lv);
+                PutU(buf, (ulong)evo);
+            }
+            return buf.ToArray();
+        }
+        catch
+        {
+            var raw = Encoding.UTF8.GetBytes(json);
+            var o = new byte[raw.Length + 1];
+            o[0] = BuiltJson;
+            raw.CopyTo(o, 1);
+            return o;
+        }
+    }
+
+    private string DecodeBuilt(byte[] blob)
+    {
+        if (blob.Length == 0) return "[]";
+        if (blob[0] == BuiltJson)
+            return Encoding.UTF8.GetString(blob, 1, blob.Length - 1);
+        if (blob[0] != BuiltBin) return "[]";
+        var p = 1;
+        var n = blob[p++];
+        if (n == 0) return "[]";
+        var sb = new StringBuilder(n * 48 + 4);
+        sb.Append('[');
+        for (var i = 0; i < n; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var q = UnZig(GetU(blob, ref p));
+            var r = UnZig(GetU(blob, ref p));
+            var kc = (int)GetU(blob, ref p);
+            var tc = (int)GetU(blob, ref p);
+            var tier = (int)GetU(blob, ref p);
+            var lv = (int)GetU(blob, ref p);
+            var evo = (int)GetU(blob, ref p);
+            sb.Append("{\"q\":").Append(q.ToString(CultureInfo.InvariantCulture))
+              .Append(",\"r\":").Append(r.ToString(CultureInfo.InvariantCulture))
+              .Append(",\"kind\":").Append(JsStr(DictName("build", kc)))
+              .Append(",\"terrain\":").Append(JsStr(DictName("terrain", tc)))
+              .Append(",\"tier\":").Append(tier.ToString(CultureInfo.InvariantCulture))
+              .Append(",\"lv\":").Append(lv.ToString(CultureInfo.InvariantCulture))
+              .Append(",\"evo\":").Append(evo.ToString(CultureInfo.InvariantCulture))
+              .Append('}');
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    private static void PutU(List<byte> b, ulong v)
+    {
+        while (v >= 0x80) { b.Add((byte)(v | 0x80)); v >>= 7; }
+        b.Add((byte)v);
+    }
+
+    private static ulong GetU(byte[] b, ref int p)
+    {
+        ulong v = 0; var shift = 0;
+        while (true)
+        {
+            var x = b[p++];
+            v |= (ulong)(x & 0x7F) << shift;
+            if ((x & 0x80) == 0) return v;
+            shift += 7;
+            if (shift > 63) throw new InvalidDataException("Built varint 溢出");
+        }
+    }
+
+    private static ulong Zig(int v) => (ulong)((v << 1) ^ (v >> 31));
+    private static int UnZig(ulong v) => (int)((v >> 1) ^ (ulong)-(long)(v & 1));
 
     private void EnsureLoaded()
     {
@@ -388,7 +627,8 @@ public sealed class CityStateStore : IDisposable
         using var c = Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText =
-            "SELECT Round, Id, Ver, UpdatedAt, LastEvoTick, Type, Q, R, Pop, PopF, Tier, State, Stock, Built, " +
+            "SELECT Round, Id, Ver, UpdatedAt, LastEvoTick, TypeCode, Q, R, Pop, PopF, Tier, State, " +
+            "R0, R1, R2, R3, R4, R5, R6, R7, Built, " +
             "BornTick, Age, FoodDebt, PopBase, BasePopF, BaseAge, BuiltFrac, Kf FROM CityState;";
         using var r = cmd.ExecuteReader();
         while (r.Read())
@@ -400,23 +640,24 @@ public sealed class CityStateStore : IDisposable
                 Ver = r.GetInt32(2),
                 UpdatedAt = r.GetInt64(3),
                 LastEvoTick = r.GetInt64(4),
-                Type = r.GetString(5),
+                Type = DictName("type", r.GetInt32(5)),
                 Q = r.GetInt32(6),
                 R = r.GetInt32(7),
                 Pop = r.GetInt32(8),
                 PopF = r.GetDouble(9),
                 Tier = r.GetInt32(10),
                 State = r.GetInt32(11),
-                Stock = r.GetString(12),
-                Built = r.GetString(13),
-                BornTick = r.GetInt64(14),
-                Age = r.GetInt64(15),
-                FoodDebt = r.GetDouble(16),
-                PopBase = r.GetInt32(17),
-                BasePopF = r.IsDBNull(18) ? null : r.GetDouble(18),
-                BaseAge = r.IsDBNull(19) ? null : r.GetInt64(19),
-                BuiltFrac = r.GetDouble(20),
-                Kf = r.GetDouble(21),
+                Stock = JoinStock(r.GetInt64(12), r.GetInt64(13), r.GetInt64(14), r.GetInt64(15),
+                                  r.GetInt64(16), r.GetInt64(17), r.GetInt64(18), r.GetInt64(19)),
+                Built = DecodeBuilt((byte[])r.GetValue(20)),
+                BornTick = r.GetInt64(21),
+                Age = r.GetInt64(22),
+                FoodDebt = r.GetDouble(23),
+                PopBase = r.GetInt32(24),
+                BasePopF = r.IsDBNull(25) ? null : r.GetDouble(25),
+                BaseAge = r.IsDBNull(26) ? null : r.GetInt64(26),
+                BuiltFrac = r.GetDouble(27),
+                Kf = r.GetDouble(28),
             };
             _mem[(e.Round, e.Id)] = e;
         }

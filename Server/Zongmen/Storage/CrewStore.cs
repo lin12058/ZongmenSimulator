@@ -57,7 +57,7 @@ public sealed class CrewStore : IDisposable
             CREATE TABLE IF NOT EXISTS Crew (
                 Id        TEXT    PRIMARY KEY,
                 Revision  INTEGER NOT NULL,
-                Json      TEXT    NOT NULL,
+                Json      BLOB    NOT NULL,
                 UpdatedAt INTEGER NOT NULL
             );
             """;
@@ -121,7 +121,7 @@ public sealed class CrewStore : IDisposable
                     """;
                 cmd.Parameters.AddWithValue("$i", id);
                 cmd.Parameters.AddWithValue("$r", rev);
-                cmd.Parameters.AddWithValue("$j", JsonSerializer.Serialize(c, CrewJson.Options));
+                cmd.Parameters.AddWithValue("$j", BlobCodec.Pack(JsonSerializer.Serialize(c, CrewJson.Options)));
                 cmd.Parameters.AddWithValue("$u", c.UpdatedAt);
                 cmd.ExecuteNonQuery();
             }
@@ -368,7 +368,7 @@ public sealed class CrewStore : IDisposable
         while (r.Read())
         {
             var id = r.GetString(0);
-            var json = r.GetString(2);
+            var json = BlobCodec.FromField(r.GetValue(2));
             CrewContract? parsed = null;
             try { parsed = JsonSerializer.Deserialize<CrewContract>(json, CrewJson.Options); }
             catch { /* 坏档不让服务起不来: 跳过, 下次 PUT 覆盖 */ }

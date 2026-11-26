@@ -23,7 +23,6 @@ public sealed class PlayerSectEntry
     public string Owner = "";
     public int Tier = 1;
     public int State;
-    public long ExpireTs;
     /// <summary>所属主宗 id (主宗自己 = "")。2026-09-23 城市扩张引入:
     /// ⚠ 服务端判定本身不必读它 (一世一宗 ⇒ 按 Account 统计等价), 它是为
     ///   「按宗门等级限制附属数量」留的**正确口径** —— 那个规则天然是 per-宗 而不是 per-账号。</summary>
@@ -549,7 +548,6 @@ public sealed class PlayerSectStore : IDisposable
             w.WriteString("owner", e.Owner);
             w.WriteNumber("tier", e.Tier);
             w.WriteNumber("state", e.State);
-            w.WriteNumber("expireTs", e.ExpireTs);
             w.WriteEndObject();
         }
         return Encoding.UTF8.GetString(ms.ToArray());

@@ -262,7 +262,6 @@ public sealed class ConcurrentTickQueue
                 //   再置哨兵后重新入堆 ⇒ 此 job 现在「不可见」（在途）。
                 job.DueTick = job.NextTick;
                 job.DtTicks = (int)Math.Max(0, nowTick - job.LastRunTick);
-                job.ScheduleSeq = Interlocked.Increment(ref _pushCount);
                 job.NextTick = RevokedTick;
                 InsertUnchecked(job);
                 Interlocked.Increment(ref _revokeCount);

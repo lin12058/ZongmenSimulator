@@ -15,24 +15,25 @@ namespace Zongmen.Time;
 /// ⚠⚠ 为什么必须**独立成表**：`PruneExcept` 只清 `Data` 表的非活跃 seed 前缀 ——
 ///   塞 `Data(Key,Value)` 里会被**静默删掉**。与 `WorldLedger` / `PlayerSectStore` 同理。
 ///
-/// 表结构（照设计文档 §2.1）：
+/// 表结构（2026-11-26 紧凑化：**Seed 列已删、Kind 已改 int 码**）：
 /// ```sql
 /// CREATE TABLE TickJob (
-///   Seed TEXT, Round INTEGER, EntityId TEXT, Kind TEXT,
+///   Round INTEGER, EntityId TEXT, KindCode INTEGER,
 ///   Layer INTEGER, Resource INTEGER,
 ///   NextTick INTEGER, PeriodTicks INTEGER, Phase INTEGER, LastRunTick INTEGER,
 ///   FailCount INTEGER DEFAULT 0, Enabled INTEGER DEFAULT 1,
-///   Payload BLOB,
-///   PRIMARY KEY (Seed, Round, EntityId, Kind)
+///   PRIMARY KEY (Round, EntityId, KindCode)
 /// );
-/// CREATE INDEX ix_tickjob_due ON TickJob (Seed, Round, Enabled, NextTick);
+/// CREATE INDEX ix_tickjob_due ON TickJob (Round, Enabled, NextTick);
 /// ```
 ///
-/// ⚠ 五条设计约束（别违反）：
+/// ⚠ 四条设计约束（别违反）：
 ///   · `EntityId` **原样存取**，绝不由 C# 重算（引擎自算，C# 重算 = 批量踩坑）；
-///   · `Payload` 是 **BLOB 而非 TEXT**，且 **不 gzip**（几十字节，gzip header 18B 净亏）；
-///   · `Kind` 存**字符串**不存 int（枚举增删不会让历史行错读成另一个 kind）；
-///   · 索引按 `(Seed, Round, Enabled, NextTick)` —— 载入时唯一要跑的查询就这个形状；
+///   · `KindCode` 是 <see cref="KindNames.Code"/> 的**显式固定码**，不是 `(int)enum`
+///     （枚举重排会让历史行错读成另一个 kind，且不报错）；
+///   · **不再存 Seed** —— 整库只有一个活跃世界（`World` 表 1 行才是真源）。
+///     载入时由调用方传入的 seed 回填内存对象。⚠ 若将来要「下一世预生成」并行存在，
+///     必须把 Seed 列加回来（否则两世的 job 会按 (Round,EntityId,KindCode) 互相覆盖）；
 ///   · 三张账分账（`WorldClock` / `TickJob` / `TickPerf` 各自独立）。
 /// </summary>
 public sealed class TickJobStore : IDisposable
@@ -55,7 +56,7 @@ public sealed class TickJobStore : IDisposable
     public int DirtyCount { get { lock (_gate) return _dirty.Count + _deleted.Count; } }
     public long FlushCount => Interlocked.Read(ref _flushCount);
     public long UpsertedRows => Interlocked.Read(ref _upsertedRows);
-    /// <summary>载入时被跳过的脏行数（`Kind` 无法解析 / 字段缺失）。⚠ 应上报 /stats，不该静默。</summary>
+    /// <summary>载入时被跳过的脏行数（`KindCode` 无法解析 / 字段缺失）。⚠ 应上报 /stats，不该静默。</summary>
     public long SkippedRows => Interlocked.Read(ref _skippedRows);
     public long LoadedRows => Interlocked.Read(ref _loadedRows);
 
@@ -69,10 +70,9 @@ public sealed class TickJobStore : IDisposable
         using var cmd = init.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS TickJob (
-                Seed        TEXT    NOT NULL,
                 Round       INTEGER NOT NULL,
                 EntityId    TEXT    NOT NULL,
-                Kind        TEXT    NOT NULL,
+                KindCode    INTEGER NOT NULL,
                 Layer       INTEGER NOT NULL,
                 Resource    INTEGER NOT NULL,
                 NextTick    INTEGER NOT NULL,
@@ -81,11 +81,10 @@ public sealed class TickJobStore : IDisposable
                 LastRunTick INTEGER NOT NULL DEFAULT 0,
                 FailCount   INTEGER NOT NULL DEFAULT 0,
                 Enabled     INTEGER NOT NULL DEFAULT 1,
-                Payload     BLOB,
-                PRIMARY KEY (Seed, Round, EntityId, Kind)
+                PRIMARY KEY (Round, EntityId, KindCode)
             );
             CREATE INDEX IF NOT EXISTS ix_tickjob_due
-                ON TickJob (Seed, Round, Enabled, NextTick);
+                ON TickJob (Round, Enabled, NextTick);
             """;
         cmd.ExecuteNonQuery();
     }
@@ -106,8 +105,9 @@ public sealed class TickJobStore : IDisposable
 
     /// <summary>
     /// 读回本世所有 enabled 的 job。
-    /// ⚠ `Kind` 无法解析 / `NextTick` 非法的行**跳过并计数** ——
+    /// ⚠ `KindCode` 无法解析 / `NextTick` 非法的行**跳过并计数** ——
     ///   不要让一行脏数据废掉整次载入（`SkippedRows` 会上报 /stats）。
+    /// ⚠ `seed` 只用于回填内存对象（表里已经不存它了）。
     /// </summary>
     public List<TickJob> Load(string seed, int round)
     {
@@ -117,12 +117,11 @@ public sealed class TickJobStore : IDisposable
         using var c = Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            SELECT EntityId, Kind, Layer, Resource, NextTick, PeriodTicks, Phase,
-                   LastRunTick, FailCount, Enabled, Payload
+            SELECT EntityId, KindCode, Layer, Resource, NextTick, PeriodTicks, Phase,
+                   LastRunTick, FailCount, Enabled
             FROM TickJob
-            WHERE Seed=$s AND Round=$r AND Enabled=1;
+            WHERE Round=$r AND Enabled=1;
             """;
-        cmd.Parameters.AddWithValue("$s", seed);
         cmd.Parameters.AddWithValue("$r", round);
 
         var skipped = 0L;
@@ -130,15 +129,12 @@ public sealed class TickJobStore : IDisposable
         while (r.Read())
         {
             var entityId = r.GetString(0);
-            var kindName = r.GetString(1);
 
-            if (!KindNames.TryParse(kindName, out var kind)) { skipped++; continue; }
+            if (!KindNames.TryFromCode(r.GetInt32(1), out var kind)) { skipped++; continue; }
             if (r.IsDBNull(4)) { skipped++; continue; }
 
             var nextTick = r.GetInt64(4);
             if (nextTick < 0) { skipped++; continue; }
-
-            var payload = r.IsDBNull(10) ? null : (byte[])r.GetValue(10);
 
             outList.Add(new TickJob
             {
@@ -154,7 +150,6 @@ public sealed class TickJobStore : IDisposable
                 LastRunTick = r.GetInt64(7),
                 FailCount = r.GetInt32(8),
                 Enabled = r.GetInt32(9) != 0,
-                Payload = payload,
             });
         }
 
@@ -216,11 +211,11 @@ public sealed class TickJobStore : IDisposable
             {
                 cmd.Transaction = tx;
                 cmd.CommandText = """
-                    INSERT INTO TickJob(Seed, Round, EntityId, Kind, Layer, Resource,
+                    INSERT INTO TickJob(Round, EntityId, KindCode, Layer, Resource,
                                         NextTick, PeriodTicks, Phase, LastRunTick,
-                                        FailCount, Enabled, Payload)
-                    VALUES($s, $r, $e, $k, $l, $res, $n, $p, $ph, $lr, $fc, $en, $pl)
-                    ON CONFLICT(Seed, Round, EntityId, Kind) DO UPDATE SET
+                                        FailCount, Enabled)
+                    VALUES($r, $e, $k, $l, $res, $n, $p, $ph, $lr, $fc, $en)
+                    ON CONFLICT(Round, EntityId, KindCode) DO UPDATE SET
                         Layer       = excluded.Layer,
                         Resource    = excluded.Resource,
                         NextTick    = excluded.NextTick,
@@ -228,15 +223,13 @@ public sealed class TickJobStore : IDisposable
                         -- ⚠ Phase 刻意**不更新**：抖动一旦定下就不许被任何回写推平
                         LastRunTick = excluded.LastRunTick,
                         FailCount   = excluded.FailCount,
-                        Enabled     = excluded.Enabled,
-                        Payload     = excluded.Payload;
+                        Enabled     = excluded.Enabled;
                     """;
 
                 var ps = cmd.Parameters;
-                var pS = ps.Add("$s", SqliteType.Text);
                 var pR = ps.Add("$r", SqliteType.Integer);
                 var pE = ps.Add("$e", SqliteType.Text);
-                var pK = ps.Add("$k", SqliteType.Text);
+                var pK = ps.Add("$k", SqliteType.Integer);
                 var pL = ps.Add("$l", SqliteType.Integer);
                 var pRes = ps.Add("$res", SqliteType.Integer);
                 var pN = ps.Add("$n", SqliteType.Integer);
@@ -245,14 +238,12 @@ public sealed class TickJobStore : IDisposable
                 var pLr = ps.Add("$lr", SqliteType.Integer);
                 var pFc = ps.Add("$fc", SqliteType.Integer);
                 var pEn = ps.Add("$en", SqliteType.Integer);
-                var pPl = ps.Add("$pl", SqliteType.Blob);
 
                 foreach (var j in jobs)
                 {
-                    pS.Value = j.Seed;
                     pR.Value = j.Round;
                     pE.Value = j.EntityId;
-                    pK.Value = KindNames.Of(j.Kind);
+                    pK.Value = KindNames.Code(j.Kind);
                     pL.Value = (int)j.Layer;
                     pRes.Value = (int)j.Resource;
                     pN.Value = j.NextTick == ConcurrentTickQueue.RevokedTick ? j.NextTick - 1 : j.NextTick;
@@ -261,7 +252,6 @@ public sealed class TickJobStore : IDisposable
                     pLr.Value = j.LastRunTick;
                     pFc.Value = j.FailCount;
                     pEn.Value = j.Enabled ? 1 : 0;
-                    pPl.Value = (object?)j.Payload ?? DBNull.Value;
                     cmd.ExecuteNonQuery();
                 }
             }
@@ -270,16 +260,15 @@ public sealed class TickJobStore : IDisposable
             {
                 using var cmd = c.CreateCommand();
                 cmd.Transaction = tx;
-                cmd.CommandText = "DELETE FROM TickJob WHERE Seed=$s AND Round=$r AND EntityId=$e AND Kind=$k;";
+                cmd.CommandText = "DELETE FROM TickJob WHERE Round=$r AND EntityId=$e AND KindCode=$k;";
                 var ps = cmd.Parameters;
-                var pS = ps.Add("$s", SqliteType.Text);
                 var pR = ps.Add("$r", SqliteType.Integer);
                 var pE = ps.Add("$e", SqliteType.Text);
-                var pK = ps.Add("$k", SqliteType.Text);
+                var pK = ps.Add("$k", SqliteType.Integer);
                 foreach (var k in deleted)
                 {
-                    pS.Value = k.Seed; pR.Value = k.Round; pE.Value = k.EntityId;
-                    pK.Value = KindNames.Of(k.Kind);
+                    pR.Value = k.Round; pE.Value = k.EntityId;
+                    pK.Value = KindNames.Code(k.Kind);
                     cmd.ExecuteNonQuery();
                 }
             }
@@ -357,14 +346,13 @@ public sealed class TickJobStore : IDisposable
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
-    /// <summary>清掉某世（换世）。</summary>
-    public int DeleteWorld(string seed, int round)
+    /// <summary>清掉某一世（换世）。⚠ 表里已无 Seed 列 ⇒ 按 Round 删。</summary>
+    public int DeleteRound(int round)
     {
         if (_cs == null) return 0;
         using var c = Open();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "DELETE FROM TickJob WHERE Seed=$s AND Round=$r;";
-        cmd.Parameters.AddWithValue("$s", seed);
+        cmd.CommandText = "DELETE FROM TickJob WHERE Round=$r;";
         cmd.Parameters.AddWithValue("$r", round);
         return cmd.ExecuteNonQuery();
     }
@@ -373,17 +361,16 @@ public sealed class TickJobStore : IDisposable
     /// 清掉某世某 kind 的**全部**行（不限 `Enabled`）。用于收尾清理**僵尸行**：
     /// `Enabled=0` 的停用行既不在 `expected`（provider 不再投递）也不在
     /// <see cref="Load"/>(只取 `Enabled=1`) 里 ⇒ <see cref="Reconcile"/> **永远判不到它**
-    /// ⇒ 会永久滞留在表里。只有换世 (`DeleteWorld`) 才顺手清得掉。
+    /// ⇒ 会永久滞留在表里。只有换世 (<see cref="DeleteRound"/>) 才顺手清得掉。
     /// </summary>
-    public int DeleteKindRows(string seed, int round, string kind)
+    public int DeleteKindRows(int round, TickJobKind kind)
     {
         if (_cs == null) return 0;
         using var c = Open();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "DELETE FROM TickJob WHERE Seed=$s AND Round=$r AND Kind=$k;";
-        cmd.Parameters.AddWithValue("$s", seed);
+        cmd.CommandText = "DELETE FROM TickJob WHERE Round=$r AND KindCode=$k;";
         cmd.Parameters.AddWithValue("$r", round);
-        cmd.Parameters.AddWithValue("$k", kind);
+        cmd.Parameters.AddWithValue("$k", KindNames.Code(kind));
         return cmd.ExecuteNonQuery();
     }
 

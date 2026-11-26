@@ -62,31 +62,47 @@ public enum TickJobKind
     DemoHeartbeat
 }
 
-/// <summary>job 种类 ↔ 持久化字符串（双向唯一真源）。</summary>
+/// <summary>
+/// job 种类 ↔ 持久化码（双向唯一真源）。
+///
+/// ⚠⚠ **持久化码显式编号、只增不改、删了也留空号** ——
+///   绝不能用 `(int)kind` 直接落库：枚举一重排（哪怕只是插一个成员在前头），
+///   整张 TickJob 表的历史行就会**静默错读成另一个 kind**，而且不报错。
+///   名字保留给日志 / 对账输出 / 人眼诊断，**不再入库**（每行省 8~11B）。
+/// </summary>
 public static class KindNames
 {
-    private static readonly (TickJobKind Kind, string Name)[] All =
+    private static readonly (TickJobKind Kind, int Code, string Name)[] All =
     {
-        (TickJobKind.PopGrowth,       "popGrowth"),
-        (TickJobKind.SectCultivation, "sectCultivation"),
-        (TickJobKind.Lifespan,        "lifespan"),
-        (TickJobKind.TownEvolve,      "townEvolve"),
-        (TickJobKind.TradeEdge,       "tradeEdge"),
-        (TickJobKind.Reputation,      "reputation"),
-        (TickJobKind.RoadRework,      "roadRework"),
-        (TickJobKind.DemoHeartbeat,   "demoHeartbeat"),
+        (TickJobKind.PopGrowth,        1, "popGrowth"),
+        (TickJobKind.SectCultivation,  2, "sectCultivation"),
+        (TickJobKind.Lifespan,         3, "lifespan"),
+        (TickJobKind.TownEvolve,       4, "townEvolve"),
+        (TickJobKind.TradeEdge,        5, "tradeEdge"),
+        (TickJobKind.Reputation,       6, "reputation"),
+        (TickJobKind.RoadRework,       7, "roadRework"),
+        (TickJobKind.DemoHeartbeat,    8, "demoHeartbeat"),
     };
 
+    private static readonly Dictionary<TickJobKind, int> ToCode =
+        All.ToDictionary(x => x.Kind, x => x.Code);
+    private static readonly Dictionary<int, TickJobKind> FromCode =
+        All.ToDictionary(x => x.Code, x => x.Kind);
     private static readonly Dictionary<TickJobKind, string> ToName =
         All.ToDictionary(x => x.Kind, x => x.Name);
-
     private static readonly Dictionary<string, TickJobKind> FromName =
         All.ToDictionary(x => x.Name, x => x.Kind);
+
+    /// <summary>落库码。未登记的枚举值返回 **0**（0 是保留的「无效」码，载入时会被跳过）。</summary>
+    public static int Code(TickJobKind kind) => ToCode.TryGetValue(kind, out var c) ? c : 0;
+
+    /// <summary>未知码返回 false（载入时**跳过并计数**，不让一行脏数据废掉整次载入）。</summary>
+    public static bool TryFromCode(int code, out TickJobKind kind) => FromCode.TryGetValue(code, out kind);
 
     public static string Of(TickJobKind kind) =>
         ToName.TryGetValue(kind, out var n) ? n : kind.ToString();
 
-    /// <summary>未知名字返回 false（载入时**跳过并计数**，不让一行脏数据废掉整次载入）。</summary>
+    /// <summary>名字 → 枚举（日志回读 / 旧库兼容用；新库不再按名字存）。</summary>
     public static bool TryParse(string? name, out TickJobKind kind)
     {
         if (name is not null && FromName.TryGetValue(name, out kind)) return true;
@@ -140,15 +156,9 @@ public sealed class TickJob
 
     public bool Enabled { get; set; } = true;
 
-    /// <summary>该 kind 自己的 proto 参数（一次性事件的主要用途）。⚠ 不 gzip（太小，header 净亏）。</summary>
-    public byte[]? Payload { get; set; }
-
     // ── 运行时瞬态（不落库）────────────────────────────────────────────
     /// <summary>本轮的 Δt tick 数。由 `AdvanceTo` 填，不由构造填。</summary>
     public int DtTicks { get; set; }
-
-    /// <summary>本轮调度序号（诊断用）。</summary>
-    public long ScheduleSeq { get; set; }
 
     /// <summary>被 <see cref="ConcurrentTickQueue.AdvanceTo"/> 收集时的**原到期 tick**（瞬态，不落库）。
     /// ⚠ 收集即吊销（`NextTick` 被置为哨兵）⇒ 合流推进相位只能靠这个字段。重启后时钟被
@@ -157,33 +167,8 @@ public sealed class TickJob
 
     public JobKey Key => new(Seed, Round, EntityId, Kind);
 
-    /// <summary>
-    /// 规范排序键 = `(Layer, SortKey, EntityId, Kind)`。
-    /// ⚠ 合流的 apply 顺序必须**与到达顺序无关**（到达顺序由线程调度决定 ⇒ 不确定），
-    ///   所以这里排序的对象是「job」而不是「结果」。
-    /// </summary>
-    public string SortKey =>
-        $"{(int)Layer:D1}|{EntityId}|{(int)Kind:D2}";
-
     /// <summary>是否一次性事件。</summary>
     public bool IsOneShot => PeriodTicks <= 0;
-
-    public TickJob Clone() => new()
-    {
-        Seed = Seed,
-        Round = Round,
-        EntityId = EntityId,
-        Kind = Kind,
-        Layer = Layer,
-        Resource = Resource,
-        NextTick = NextTick,
-        PeriodTicks = PeriodTicks,
-        Phase = Phase,
-        LastRunTick = LastRunTick,
-        FailCount = FailCount,
-        Enabled = Enabled,
-        Payload = Payload,
-    };
 
     public override string ToString() =>
         $"{KindNames.Of(Kind)}({EntityId}) @{NextTick} dt={DtTicks} p={PeriodTicks}";

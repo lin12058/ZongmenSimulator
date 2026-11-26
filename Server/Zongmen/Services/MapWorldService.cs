@@ -1716,7 +1716,7 @@ public sealed class MapWorldService : IDisposable
         {
             Account = account ?? "", Round = cur.Round, IdemKey = idemKey ?? "",
             Id = st.Id, Type = st.Type, Q = st.Q, R = st.R, Name = st.Name,
-            Pop = st.Pop, Owner = st.Owner, Tier = st.Tier, State = st.State, ExpireTs = st.ExpireTs,
+            Pop = st.Pop, Owner = st.Owner, Tier = st.Tier, State = st.State,
             SectId = expand ? (main?.Id ?? "") : "",
         };
         row.Json = PlayerSectStore.BuildJson(row);
@@ -1767,7 +1767,7 @@ public sealed class MapWorldService : IDisposable
                 {
                     Id = e.Id, Type = e.Type, Q = e.Q, R = e.R,
                     Name = e.Name, Pop = e.Pop, Owner = e.Owner, Tier = e.Tier,
-                    State = e.State, ExpireTs = e.ExpireTs,
+                    State = e.State, ExpireTs = 0,
                 });
             }
         }

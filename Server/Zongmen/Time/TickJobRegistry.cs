@@ -127,7 +127,7 @@ public sealed class TickJobRegistry
     ///   C# 重算 = 批量踩坑（`rngDominated` / `roadsNear` 要靠 `split('_')` 反解，NaN 会静默扫空）。
     /// </summary>
     public TickJob NewJob(string seed, int round, string entityId, TickJobKind kind,
-                          long fromTick, byte[]? payload = null, bool immediate = false)
+                          long fromTick, bool immediate = false)
     {
         var spec = Spec(kind);
         var period = spec.PeriodTicks;
@@ -164,7 +164,6 @@ public sealed class TickJobRegistry
             LastRunTick = fromTick,        // ★ 首次 Δt = 0（不虚增演化）
             FailCount = 0,
             Enabled = true,
-            Payload = payload,
         };
     }
 
