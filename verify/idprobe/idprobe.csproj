@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       判据宿主 (实体 id 分配器专用)。
+       ⚠ 为什么不引用整个 Zongmen.csproj:
+         · 服务端 8140 在跑时 bin\Zongmen.exe 被锁 ⇒ 引用工程一构建就 MSB3027;
+         · 这里只测一个纯组件, 拖 53 个 .cs + Web SDK 进来纯属浪费。
+       ⚠ 但**绝不复制源码**: 用 <Compile Include="..."> 链接**同一份文件**,
+         断言的是生产代码本身 (与 tickprobe 的原则一致)。
+       ============================================================ -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>idprobe</AssemblyName>
+    <RootNamespace>Zongmen.Verify</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Server\Zongmen\Storage\EntityIdAllocator.cs" Link="EntityIdAllocator.cs" />
+  </ItemGroup>
+
+</Project>
